@@ -39,10 +39,11 @@ void scut_core_shutdown(void);
 
 /* --- 三种调度 --- */
 
-/* --- 测速支持（b<N> 命令用，运行期生效，不需要重启进程） --- */
+/* --- 测速支持（b<N> 命令用，运行期生效，不需要重启进程） ---
+ * 抬高 repeat 后【下一帧】会以 N 次重复执行 PROCESS，
+ * 报出的 process_us / cycles 即"每次的平均值"。 */
 int  scut_sched_get_repeat(void);
 void scut_sched_set_repeat(int n);
-void scut_sched_set_post_enabled(int enabled);
 
 /* 跑一帧。返回 0 = 正常，非 0 = 请求退出。 */
 int scut_run_once(void);
@@ -67,17 +68,16 @@ void scut_set_frame_sink(scut_frame_sink_fn fn, void *user);
 
 /* --- 计时查询 --- */
 typedef struct {
-    double process_us;    /* ★ 仅 PROCESS 角色（用户算法） */
-    double draw_us;       /* DRAW 角色（不计入 process_us） */
-    double report_us;     /* REPORT 角色 */
+    double process_us;    /* ★ 仅 PROCESS 角色（用户算法）—— 核心指标 */
+    double draw_us;       /* DRAW 角色：搬运结果图 + 画标注 + 打日志，不计入上面 */
     double frame_us;      /* 整帧（不含呈现后端自身的开销） */
-    scut_u64 process_cycles; /* 处理器周期数（若可用） */
+    scut_u64 process_cycles; /* 处理器周期数（若可用）—— 跨机器可比 */
     int    cycles_valid;     /* 周期数是否可信（TSC 可用性） */
 } scut_timing_t;
 
 const scut_timing_t *scut_timing_get(void);
 
-/* 打开/关闭绘图计时（计时本身有微小开销，做精细测试时可关） */
+/* 开关 DRAW 阶段计时（计时本身有微小开销，做精细测试时可关） */
 void scut_enable_draw_timing(int enable);
 
 #ifdef __cplusplus

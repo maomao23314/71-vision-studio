@@ -4,6 +4,7 @@
  *  设计理念对照：
  *    · 模拟单片机   → 日志是主机侧设施，车载可接到串口或直接留空
  *    · 上手即用     → 用法同 printf，零学习成本
+ *    · 代码松耦合   → 只存文本行，呈现层决定怎么显示
  * ========================================================================== */
 #ifndef SCUT_LOG_H
 #define SCUT_LOG_H
@@ -20,7 +21,14 @@ typedef enum {
     SCUT_LOG_ERROR
 } scut_log_level_t;
 
-/* 输出一行日志。仅在 REPORT 阶段有效（其余阶段调用会被忽略并记录）。 */
+/* 输出一行日志。
+ *
+ * ★ 只在「绘制/后处理」阶段有效（其余阶段调用会被静默忽略）。
+ *   原因：PROCESS 阶段是被计时的那一段，在里面 printf 会把格式化与 IO
+ *   的开销算进算法耗时 —— 而这个数字正是本环境存在的核心意义。
+ *   这条限制由机制保证，不靠文档约定。
+ *
+ * ★ 形式与 printf 完全一致（含 %d/%f/%s 与可变参数），零学习成本。 */
 void SCUT_Log(scut_log_level_t level, const char *fmt, ...);
 
 /* 清空日志缓冲。切换图片/重跑时环境会自动调用。 */
@@ -33,12 +41,10 @@ int         scut_log_enabled(void);
 void        scut_log_set_enabled(int enabled);
 
 /* --- 核心内部使用：阶段门控 ---
- * ★ 只有 REPORT 阶段允许写日志。
- *   在 PROCESS 阶段写日志会污染性能测量（printf 很慢），
- *   在 DRAW 阶段写会打乱绘制顺序。
- *   用门控从【机制】上阻止，而不是靠文档约定。 */
-void scut_log_begin_report_phase(void);
-void scut_log_end_report_phase(void);
+ * 只有「绘制/后处理」阶段允许写日志，与产生日志的钩子同一阶段。
+ * 由调度器在进入/离开 DRAW 阶段时调用。 */
+void scut_log_begin_draw_phase(void);
+void scut_log_end_draw_phase(void);
 
 #ifdef __cplusplus
 }

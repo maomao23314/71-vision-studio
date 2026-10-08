@@ -85,6 +85,10 @@
 #    define WIN32_LEAN_AND_MEAN
 #  endif
 #  include <windows.h>
+#  include <direct.h>       /* _mkdir —— 建帧输出目录 */
+#else
+#  include <sys/stat.h>     /* mkdir */
+#  include <sys/types.h>
 #endif
 
 /* --- 由 bind 单元提供（它是唯一知道编译期尺寸的地方） --- */
@@ -94,6 +98,29 @@ extern scut_u8 *scut_bind_output(void);
 extern scut_u32 *scut_bind_overlay(void);
 extern int      scut_bind_width(void);
 extern int      scut_bind_height(void);
+
+/* --------------------------------------------------------------------------
+ *  建目录（可移植，不经 shell）
+ *
+ * ★ 为什么不用 system("mkdir ...")：
+ *   旧实现用它建帧输出目录。system 会拉起一个子 shell，而且
+ *   `2>nul` 是 Windows cmd 的语法 —— 在别的平台上是非法重定向。
+ *   这个环境里本该只有"计时"和"取自身路径"两处平台相关代码，
+ *   多一个 shell 依赖就多一处移植障碍，收益却只是省四行。
+ *
+ * 已存在（EEXIST）视为成功：调用方要的是"目录可用"，
+ * 不是"这次真的创建了它"。 */
+static void ensure_dir(const char *path)
+{
+    if (path == NULL || path[0] == '\0') {
+        return;
+    }
+#ifdef _WIN32
+    (void)_mkdir(path);
+#else
+    (void)mkdir(path, 0777);
+#endif
+}
 
 /* --------------------------------------------------------------------------
  *  测试图集的编译期默认值
@@ -335,6 +362,23 @@ static int  s_pic_err_code;
 static char s_pic_err_path[SCUT_PATH_MAX];
 static int  s_pic_err_reported;
 static char s_pic_err_short[128];       /* 最近一次加载失败的短中文原因 */
+
+/* 测速请求：收到了 b<N>，但【还没跑那一帧】。
+ *
+ * ★ 为什么需要这个标志（一条真实缺陷的修复）：
+ *   b<N> 是在帧钩子 on_frame 内部被解析的，而 on_frame 本身就是被
+ *   run_one_frame 调用的 —— 在"帧中途"再嵌套跑一整帧会引出两个问题：
+ *     ① 递归调用 on_frame，于是又走到读 stdin 那段，
+ *        把下一条协议命令【吃掉】；表现为 b3 之后再发命令会少生效一次；
+ *     ② 内层帧覆盖了计时状态，而测速结果正是靠这一帧的读数。
+ *   改成"挂起待用"之后，本帧正常结束，调度循环自然跑到下一帧，
+ *   那一帧以 N 次重复执行 PROCESS。恰好一帧、无递归。
+ *
+ * 生命周期：on_frame 末尾收到 b<N> → 置 1；
+ *           下一次 on_frame 开头读到 1 → 本帧就是测速帧，
+ *           报 bench:true 并把 repeat 还原。 */
+static int  s_bench_pending;
+static int  s_repeat_before_bench = 1;
 
 static int         scut_pic_count(void) { return s_pic_count; }
 static int         scut_pic_index(void) { return s_pic_index; }
@@ -1928,10 +1972,21 @@ static void on_frame(void *user)
     char         err_esc[256];      /* loadError 转义缓冲（短语，够用） */
     char        *vars_json;         /* 每帧变量快照（堆分配，见下） */
     int          load_error;
+    int          is_bench;
     const scut_u8 *out;
     int          w, h;
 
     frame_no++;
+
+    /* 测速帧的记账：本帧是不是"重复 N 次"的那一帧。
+     * ★ 必须在读 stdin 之前定下来：下面的 b<N> 分支置的是 s_bench_pending，
+     *   那是给【下一帧】用的，不能影响本帧的标记。
+     * ★ 测速帧报完之后立刻还原 repeat，这样紧随其后的普通帧不受影响。 */
+    is_bench = s_bench_pending;
+    if (is_bench) {
+        s_bench_pending = 0;
+        scut_sched_set_repeat(s_repeat_before_bench);
+    }
 
     /* 每帧变量快照：80KB 上限（--select 过滤后通常远小于此）。
      * ★ 为什么堆分配而不是栈：快照随勾选数量伸缩，栈上 80KB 在
@@ -2015,18 +2070,19 @@ static void on_frame(void *user)
         printf("{\"frame\":%d,\"w\":%d,\"h\":%d,\"img\":\"%s\","
                "\"pic\":\"%s\","
                "%s%s%s"
+               "\"bench\":%s,"
                "\"vars\":%s,"
                "\"timing\":{\"processUs\":%.3f,\"drawUs\":%.3f,"
-               "\"reportUs\":%.3f,\"frameUs\":%.3f,\"cycles\":%" PRIu64 ","
+               "\"frameUs\":%.3f,\"cycles\":%" PRIu64 ","
                "\"cyclesValid\":%s}}\n",
                frame_no, w, h, img_esc, pic_esc,
                load_error ? "\"loadError\":\"" : "",
                load_error ? err_esc : "",
                load_error ? "\"," : "",
+               is_bench ? "true" : "false",
                vars_json,
                t ? t->process_us : 0.0,
                t ? t->draw_us    : 0.0,
-               t ? t->report_us  : 0.0,
                t ? t->frame_us   : 0.0,
                (scut_u64)(t ? t->process_cycles : 0),
                (t && t->cycles_valid) ? "true" : "false");
@@ -2199,17 +2255,32 @@ static void on_frame(void *user)
                     long nrep = strtol(line + 1, NULL, 10);
                     if (nrep < 1) { nrep = 1; }
                     if (nrep > 1000000) { nrep = 1000000; }
-                    {
-                        int saved = scut_sched_get_repeat();
-                        /* 挂起后处理（用户要求：同图 N 次不跑 POST/REPORT），
-                         * 把重复次数临时抬到 N，跑一帧（PRE+PROCESS×N+sink），
-                         * 然后立刻还原 —— 这帧的 process_us/cycles 就是 N 次平均。 */
-                        scut_sched_set_post_enabled(0);
-                        scut_sched_set_repeat((int)nrep);
-                        scut_run_once();
-                        scut_sched_set_repeat(saved);
-                        scut_sched_set_post_enabled(1);
+                    /* ★★ 这里【刻意不跑帧】，只把重复次数挂上，让它作用到
+                     *    【下一帧】。理由是一条真实缺陷：
+                     *
+                     *    旧实现直接在这里调 scut_run_once()。但本函数
+                     *    (on_frame) 本身就是被 run_one_frame 调用的 ——
+                     *    也就是在「帧中途」再嵌套跑一整帧。后果有两层：
+                     *      ① 递归调用 on_frame，于是又走到本段 fgets，
+                     *         把下一条协议命令【吃掉】了。表现为
+                     *         `b3` 之后再发命令会少生效一次，帧数对不上；
+                     *      ② 内层帧覆盖了 s_timing，外层帧接着往下跑，
+                     *         报给插件的计时可能来自内层，
+                     *         而"测速结果"正是靠这一帧的计时读数。
+                     *
+                     *    改成"挂起待用"之后：本帧正常结束，调度循环自然
+                     *    跑到下一帧，那一帧以 N 次重复执行 PROCESS，
+                     *    平均耗时就是测速结果。恰好一帧、无递归。
+                     *
+                     * ★ 为什么不再需要"挂起后处理"：
+                     *    process_us 只统计 PROCESS 阶段，绘制/日志在
+                     *    draw_us 里单独计量、本就不计入。所以测速不需要
+                     *    屏蔽后处理 —— 屏蔽它反而会让用户看不到标注。 */
+                    if (!s_bench_pending) {
+                        s_repeat_before_bench = scut_sched_get_repeat();
                     }
+                    scut_sched_set_repeat((int)nrep);
+                    s_bench_pending = 1;
                     break;
                 }
                 case 'g': {                  /* goto 第 N 张 */
@@ -2247,10 +2318,7 @@ int main(int argc, char **argv)
         return (rc > 0) ? 0 : 2;        /* --help 返回 0，参数错返回 2 */
     }
 
-    /* --- 1) 绑定：把编译期尺寸交给核心（唯一知道尺寸的地方） --- */
-    scut_bind_apply();
-
-    /* --- 2) 分配帧缓冲并绑定绘制目标 ---
+    /* --- 1) 分配帧缓冲并绑定绘制目标 ---
      * ★ 这一步把「绘制」从「图形库」解耦：绘制写进覆盖层，
      *   呈现由后端负责。旧环境把绘制直接写进 EasyX 的 DIB，
      *   换后端时会静默失效 —— 这里刻意不再犯。 */
@@ -2263,51 +2331,25 @@ int main(int argc, char **argv)
     scut_draw_bind(scut_bind_output(), scut_bind_overlay(),
                    scut_bind_width(), scut_bind_height(), scut_bind_width());
 
-    /* --- 3) 解析测试图集并加载第一张图 ---
+    /* --- 2) 解析测试图集并加载第一张图 ---
      *
-     * ★★ 位置是刻意的：必须在 scut_bind_apply() 【之后】、
-     *    并且必须在【任何】帧运行之前。理由分三层：
+     * ★★ 位置是刻意的：必须在 scut_bind_apply() 【之前】★★
      *
-     *    (1) 必须在 scut_bind_apply() 之后 —— 这一条是【真正的约束】：
-     *        scut_bind_apply() 内部会调 scut_core_init()，core_init 里会执行
-     *        INIT 角色的用户回调。用户完全可能在自己的 INIT 里直接访问
-     *        输入数组（例如 mt9v03x_image、或任何它自己声明的指向它的指针），
-     *        或者为第一帧预建查找表。若我们在 bind 之前加载，
-     *        INIT 看到的还是零缓冲 —— 于是「第一帧图像」这件事
-     *        在 INIT 阶段就已经是错的了。
+     *    scut_bind_apply() 内部会调 scut_core_init()，而 core_init 会执行
+     *    INIT 角色的用户回调。用户的初始化代码极可能直接访问输入数组
+     *    （例如为第一帧预建逆透视查找表、或读取第一张图做统计）。
+     *    如果我们在 INIT 之后才加载，那些回调看到的全是零缓冲 ——
+     *    "第一张图"这件事在 INIT 阶段就已经是错的，而且不报任何错。
      *
-     *        ★ 一个必须说清的细节（已实测，不要凭直觉推断）：
-     *          如果 INIT 回调是通过官方访问器 SCUT_GetInputImage() 去读图的，
-     *          那么它拿到的【永远是 NULL】，与加载时机无关 ——
-     *          因为 scut_input.c 的阶段门控只放行 PRE_FRAME / PROCESS，
-     *          而 INIT 执行时阶段是 IDLE，会返回 NULL 并记一次违规。
-     *          所以这条顺序真正保护的是【直接访问数组】与
-     *          【依赖图像就绪来做预计算】这两类写法，
-     *          而不是访问器写法。把它写在这里，是为了避免后来者
-     *          误以为"INIT 反正读不到图，放哪都行"而把顺序调乱。
+     *    旧实现把加载放在 INIT 之后，并且专门写了一段注释解释
+     *    "INIT 反正读不到图" —— 那个理由是错的：它只在"用访问器读图"
+     *    这一种写法下成立，而绝大多数车载算法是直接访问数组的。
+     *    把顺序摆正，两种写法都正确。
      *
-     *    (2) 也必须在 scut_frame_alloc() 之后：
-     *        本函数自身只用 bind 的缓冲（scut_bind_input()），
-     *        严格来说不依赖 frame_alloc。但仍然放在它之后，
-     *        是为了让"宿主已经完成全部内存准备"成为一条不变量——
-     *        将来若加载逻辑需要（例如为了缩放而临时申请帧缓冲），
-     *        这里不需要再挪位置。位置依赖少一点，改动风险就低一点。
-     *
-     *    (3) 必须在跑帧之前：
-     *        第 1 帧的 PROCESS 会立刻读输入图。若加载发生在第一帧之后，
-     *        用户看到的第 1 帧永远是黑的，而第 2 帧才正常——
-     *        又是一个"看起来像算法问题"的假象。
-     *
-     * ★ 同时注意为什么【不】放进 INIT 回调：
-     *    INIT 属于用户算法域（用户可以在自己的代码里注册任意多个），
-     *    而"从测试图集喂图"是【呈现后端】的职责 —— 真机上这件事是
-     *    摄像头的 DMA 在干，不是算法。把它塞进 INIT 回调会让算法
-     *    依赖后端的存在，破坏「代码松耦合」。
-     *
-     * ★ 另外加载被刻意放在 --list-vars 的提前返回【之前】：
-     *    --list-vars 是 IDE 初始化变量面板用的，它需要知道图集目录与
-     *    张数（本函数的警告/统计会一并给出）。探测本身的代价只是
-     *    几十次 fopen，放在这里不会让面板变慢。 */
+     * ★ 为什么加载不放进 INIT 回调：
+     *    INIT 属于用户算法域，而"从测试图集喂图"是【呈现后端】的职责 ——
+     *    真机上这件事是摄像头的 DMA 在干，不是算法。把它塞进 INIT
+     *    会让算法依赖后端的存在，破坏「代码松耦合」。 */
     resolve_pic_set(&o);
 
     /* 加载起始图片。失败也继续（输入保持零填充 = 黑图），
@@ -2318,6 +2360,17 @@ int main(int argc, char **argv)
      *   会把那个"占位默认 1"重新带进来 —— 0 起的图集就永远从 1 号跑起，
      *   第一张被静默跳过。探测结果在这里是唯一权威。 */
     scut_pic_load(scut_pic_index());
+
+    /* --- 3) 绑定：把编译期尺寸与配置交给核心（这一步会跑 INIT 回调） --- */
+    scut_bind_apply();
+
+    /* ★ 运行期覆盖 PROCESS 重复次数（--repeat）。
+     *   bind 里给的是编译期默认值（SCUT_PROCESS_REPEAT），
+     *   这里用命令行/设置给的值覆盖它。
+     *   旧实现解析了 --repeat 却从未应用，属于"设置项是死的"那类缺陷。 */
+    if (o.repeat >= 1) {
+        scut_sched_set_repeat(o.repeat);
+    }
 
     /* --- 4) 只列变量就退出（供 IDE 的变量面板初始化） ---
      *
@@ -2348,19 +2401,12 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    /* --- 5) 建立输出目录（不存在就建） --- */
-    {
-        char cmd[600];
-        /* 用系统命令建目录：避免引入 <sys/stat.h> 的平台差异。
-         * 路径做过引号包裹，空格与中文都能work。 */
-        snprintf(cmd, sizeof(cmd), "mkdir \"%s\" 2>nul", o.out_dir);
-        if (system(cmd) != 0) {
-            /* 目录可能已存在 —— 这是正常情况，不报错。 */
-        }
-    }
-
-    /* --- 6) 装帧钩子并运行 --- */
+    /* --- 5) 装帧钩子并运行 --- */
     scut_set_frame_sink(on_frame, &o);
+
+    /* 帧输出目录（PGM 落盘处）。失败不致命：写文件时会报具体错误。
+     * ★ 必须在第一帧之前建好：sink 每帧都会往这里写。 */
+    ensure_dir(o.out_dir);
 
     if (!o.quiet && !o.json) {
         printf("SCUT-71 仿真宿主\n");
@@ -2399,7 +2445,7 @@ int main(int argc, char **argv)
         scut_run_until_quit();
     }
 
-    /* --- 7) 每帧变量快照（放在最后输出一次，避免刷屏） --- */
+    /* --- 6) 每帧变量快照（放在最后输出一次，避免刷屏） --- */
     if (o.json) {
         emit_variables(&o);
     }

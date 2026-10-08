@@ -71,6 +71,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import hashlib
 import json
 import os
 import re
@@ -758,8 +759,339 @@ def parse_image_size(header: str) -> Tuple[int, int]:
 
 
 # ===========================================================================
-# scut.extra.mk —— 逃生舱
+# 工程配置（scut_project.json）—— 单一真值来源
 # ===========================================================================
+#
+# ★★ 为什么配置从 config.h 搬到 JSON ★★
+#
+#   用户原话："所有的配置不要丢在 config.h 吧，最好也有 UI，
+#   然后可以用一个 json 记录，不然用户会乱搞。"
+#
+#   完全同意。config.h 的问题不是"多了个文件"，而是它同时扮演两个角色：
+#     ① 编译期契约（图像尺寸）—— C 语言要求数组大小是常量，这个躲不掉；
+#     ② 一堆可调参数（图集路径、扩展名、重复次数）—— 这些根本不是契约。
+#   混在一起的结果是：用户改 ② 的时候会顺手改 ①，然后满屏红波浪线。
+#
+#   现在的分工：
+#     scut_project.json  —— 用户/UI 编辑的唯一入口
+#     .scut/gen/scut_config.h —— 构建时生成，带 DO NOT EDIT 头，只含契约
+#
+#   ★ 兼容：没有 JSON 的老工程仍按 config.h 走（迁移期不该强制用户改）。
+
+PROJECT_CONFIG_NAME = "scut_project.json"
+
+# 默认配置。键名与 extension/src/projectconfig.ts 的接口一一对应。
+DEFAULT_CONFIG: Dict[str, Any] = {
+    "image": {"width": 188, "height": 120},
+    "inputArray": "mt9v03x_image",
+    "outputArray": "",
+    "hooks": {"init": [], "frame": [], "post": []},
+    "pic": {"dir": "", "ext": "", "start": 1},
+}
+
+
+def _deep_merge(base: Dict[str, Any], over: Dict[str, Any]) -> Dict[str, Any]:
+    """把 over 合并进 base 的副本。只认识字典与标量，不认识列表的合并语义
+    （列表整体替换 —— 钩子顺序由用户完全控制，合并只会制造意外）。"""
+    out = dict(base)
+    for k, v in (over or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def load_project_config(proj: "Project", reporter: "Reporter"
+                        ) -> Tuple[Dict[str, Any], str]:
+    """
+    读取工程配置。返回 (配置, 来源说明)。
+
+    优先级：
+      1) <root>/scut_project.json      —— 新约定，插件 UI 编辑
+      2) <root>/config.h               —— 老约定，兼容用（只取尺寸与图集）
+      3) 默认值                         —— 让"什么都没有"也能构建
+    """
+    cfg_path = os.path.join(proj.root, PROJECT_CONFIG_NAME)
+    if os.path.isfile(cfg_path):
+        try:
+            with open(cfg_path, "r", encoding="utf-8-sig") as f:
+                raw = json.load(f)
+        except (OSError, ValueError) as exc:
+            raise ConfigParseError(
+                "%s 读不出来：%s\n"
+                "    下一步：这个文件由插件设置界面维护；"
+                "若手改坏了，删掉它再在设置里重新填一次即可。"
+                % (cfg_path, exc))
+        if not isinstance(raw, dict):
+            raise ConfigParseError("%s 的顶层必须是一个 JSON 对象。" % cfg_path)
+        return _deep_merge(DEFAULT_CONFIG, raw), "scut_project.json"
+
+    header, base = proj.find_config_header()
+    if header:
+        w, h = parse_image_size(header)
+        cfg = _deep_merge(DEFAULT_CONFIG, {
+            "image": {"width": w, "height": h},
+            "pic": {
+                "dir": _read_macro_str(header, "SCUT_PIC_DIR") or "",
+                "ext": _read_macro_str(header, "SCUT_PIC_EXT") or "",
+            },
+        })
+        return cfg, "%s（老约定，建议改用设置界面）" % base
+
+    return dict(DEFAULT_CONFIG), "内置默认值"
+
+
+_STR_MACRO_CACHE: Dict[str, Dict[str, str]] = {}
+
+
+def _read_macro_str(header: str, macro: str) -> str:
+    """从 config.h 里读一个字符串宏的字面量（只支持 "..." 形式）。"""
+    cache = _STR_MACRO_CACHE.get(header)
+    if cache is None:
+        try:
+            with open(header, "r", encoding="utf-8-sig", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            return ""
+        text = re.sub(r"/\*.*?\*/", " ", text, flags=re.DOTALL)
+        text = re.sub(r"//[^\n]*", " ", text)
+        cache = {}
+        for m in re.finditer(r"#\s*define\s+(\w+)\s+\"([^\"]*)\"", text):
+            cache[m.group(1)] = m.group(2)
+        _STR_MACRO_CACHE[header] = cache
+    return cache.get(macro, "")
+
+
+def _cfg_image(cfg: Dict[str, Any]) -> Tuple[int, int]:
+    img = cfg.get("image") or {}
+    try:
+        w = int(img.get("width", 0))
+        h = int(img.get("height", 0))
+    except (TypeError, ValueError):
+        w = h = 0
+    if not (0 < w <= 4096) or not (0 < h <= 4096):
+        raise ConfigParseError(
+            "配置里的图像尺寸不合理：%s x %s。\n"
+            "    要求：1..4096 之间的整数。\n"
+            "    下一步：在插件设置里改「图像宽度/高度」。"
+            % (img.get("width"), img.get("height")))
+    return w, h
+
+
+def _cfg_names(cfg: Dict[str, Any], key: str) -> List[str]:
+    """取一个钩子列表。容忍用户写成字符串（换行/逗号/分号分隔）。"""
+    hooks = cfg.get("hooks") or {}
+    val = hooks.get(key)
+    if val is None:
+        return []
+    if isinstance(val, str):
+        val = re.split(r"[\n,;]", val)
+    out: List[str] = []
+    for item in val:
+        name = str(item).split("//")[0].strip()
+        if name:
+            out.append(name)
+    return out
+
+
+def _is_c_identifier(s: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z_]\w*", s or ""))
+
+
+def write_generated_config(gen_dir: str, cfg: Dict[str, Any]) -> str:
+    """
+    生成编译期契约头 scut_config.h。
+
+    ★ 内容刻意【只有契约】，没有可调参数：
+      尺寸、输入数组名。图集路径之类全部走运行期设置（改完立即生效）。
+      把"改完需要重编译"的东西压到最少，是这个文件存在的全部意义。
+    """
+    w, h = _cfg_image(cfg)
+    in_name = str(cfg.get("inputArray") or "mt9v03x_image").strip()
+    if not _is_c_identifier(in_name):
+        raise ConfigParseError(
+            "配置里的「输入图像数组名」不是合法的 C 标识符：%r\n"
+            "    下一步：在插件设置里改成一个像 mt9v03x_image 这样的名字。"
+            % in_name)
+
+    text = (
+        "/* ==========================================================================\n"
+        " *  scut_config.h —— 编译期契约（★ 自动生成，不要手改）\n"
+        " *  --------------------------------------------------------------------------\n"
+        " *  由 tools/scut_build.py 依据 scut_project.json 生成。\n"
+        " *  要改这些值，请用 VS Code 设置界面（搜索 \"SCUT-71\"）——\n"
+        " *  手改本文件会在下次构建时被覆盖。\n"
+        " *\n"
+        " *  ★ 为什么尺寸必须留在编译期：\n"
+        " *      C 语言里数组大小必须是常量，而算法里到处是\n"
+        " *          int left_line[SCUT_IMAGE_H];\n"
+        " *      这类声明。这是语言的硬约束，不是设计偷懒。\n"
+        " * ========================================================================== */\n"
+        "#ifndef SCUT_CONFIG_H\n"
+        "#define SCUT_CONFIG_H\n"
+        "\n"
+        "#define SCUT_IMAGE_W            (%d)\n"
+        "#define SCUT_IMAGE_H            (%d)\n"
+        "\n"
+        "/* 输入图像数组名（环境拥有、地址恒定，算法直接按名字访问）。 */\n"
+        "#define SCUT_INPUT_ARRAY        %s\n"
+        "\n"
+        "/* 输入图像的 extern 声明：让用户算法不必自己再写一遍。\n"
+        " * ★ 用 unsigned char 而不是 scut_u8：本头可能被不含 scut_types.h 的\n"
+        " *   车载代码包含，不能依赖环境的类型别名。 */\n"
+        "#ifndef SCUT_NO_INPUT_EXTERN\n"
+        "extern unsigned char %s[SCUT_IMAGE_H][SCUT_IMAGE_W];\n"
+        "#endif\n"
+        "\n"
+        "#endif /* SCUT_CONFIG_H */\n"
+        % (w, h, in_name, in_name))
+
+    path = os.path.join(gen_dir, "scut_config.h")
+    atomic_write_text(path, text)
+    return path
+
+
+GLUE_HEAD = '''/* ==========================================================================
+ *  scut_env_glue.c —— 环境接线单元（★ 自动生成，不要手改）
+ *  --------------------------------------------------------------------------
+ *  由 tools/scut_build.py 依据 scut_project.json 里的钩子配置生成。
+ *
+ *  作用：把用户代码里的普通函数接进环境的三个阶段。
+ *
+ *  ★★ 为什么要有这一层（这是"用户代码可直接移植"的关键）★★
+ *
+ *    用户代码必须能原样拷进车载工程，所以它里面【不能】出现
+ *    任何仿真环境的注册宏。而仿真环境需要一个入口来驱动算法。
+ *
+ *    解法：让"谁调用谁"这件事留在环境侧。用户在设置界面里填函数名，
+ *    构建时生成本文件，由它声明并调用那些函数。
+ *
+ *    车载工程里同样存在这件事 —— 它的 main() 里也是按顺序调用
+ *    image_process() / ImagePerspective_Init()。所以本文件做的事情，
+ *    与车载 main 做的事情完全同构，只是换了个宿主。
+ *
+ *  ★ 用户函数必须【非 static】（有外部链接）：
+ *    本文件是独立编译单元，只能调用外部链接的函数。
+ *    这恰好也是车载工程的要求（main 要能调到它们），所以不是额外限制。
+ *
+ *  源文件: {src}
+ * ========================================================================== */
+#include "scut_sdk.h"
+
+/* ---- 用户函数声明 ---------------------------------------------------- */
+{decls}
+
+/* ---- 初始化（开机一次，不计时） -------------------------------------- */
+static void scut_env_init(void)
+{{
+{init_calls}
+}}
+
+/* ---- 图像处理（每帧，★ 计时段：测速测的就是这里） -------------------- */
+static void scut_env_frame(void)
+{{
+{frame_calls}
+}}
+
+/* ---- 绘制 / 后处理（每帧，不计时：搬运结果图 + 画标注 + 打日志） ------ */
+static void scut_env_draw(void)
+{{
+{copy_call}{post_calls}
+}}
+
+/* ---- 注册（环境的内部宏，用户代码不接触） ---------------------------- */
+ENV_REGISTER(SCUT_ROLE_INIT,    100, "env_init",  scut_env_init)
+ENV_REGISTER(SCUT_ROLE_PROCESS, 100, "env_frame", scut_env_frame)
+ENV_REGISTER(SCUT_ROLE_DRAW,    100, "env_draw",  scut_env_draw)
+'''
+
+
+def write_glue(gen_dir: str, cfg: Dict[str, Any]) -> str:
+    """
+    生成环境接线单元。
+
+    ★ 输出图的搬运也放在这里，而不是让用户调用 SCUT_OutImageSet：
+      用户算法写的是自己的结果数组（车上就是这么写的），
+      "把它搬去显示"是呈现层的事，不该出现在算法文件里。
+      搬运函数体由 scut_symbols.py 生成到【能看到该数组声明】的那个
+      编译单元里（见 --output-array），本文件只负责调用它。
+    """
+    init_names = _cfg_names(cfg, "init")
+    frame_names = _cfg_names(cfg, "frame")
+    post_names = _cfg_names(cfg, "post")
+    out_array = str(cfg.get("outputArray") or "").strip()
+
+    for nm in init_names + frame_names + post_names:
+        if not _is_c_identifier(nm):
+            raise ConfigParseError(
+                "钩子函数名不是合法的 C 标识符：%r\n"
+                "    下一步：在插件设置里填【函数名】（每行一个），"
+                "例如 image_process。" % nm)
+
+    if out_array and not _is_c_identifier(out_array):
+        raise ConfigParseError(
+            "结果图数组名不是合法的 C 标识符：%r" % out_array)
+
+    if not (init_names or frame_names):
+        raise ConfigParseError(
+            "没有配置任何钩子函数。\n"
+            "    原因：环境需要一个「图像处理函数」才能跑起来 —— "
+            "它就是你算法的主入口。\n"
+            "    下一步：打开 VS Code 设置，搜索 \"SCUT-71\"，在\n"
+            "    「图像处理函数」里填你代码里的函数名（每行一个），\n"
+            "    例如 image_process。\n"
+            "    说明：用户代码里【不需要】写任何注册宏 —— "
+            "那样代码才能保持与车载工程一致、直接可移植。")
+
+    # 声明：同名只声明一次（同一函数可能被填进多个阶段）
+    all_names = list(dict.fromkeys(init_names + frame_names + post_names))
+    decls = "\n".join("void %s(void);" % n for n in all_names)
+
+    def _calls(names: List[str]) -> str:
+        if not names:
+            return "    /* （未配置，本阶段不做任何事） */"
+        return "\n".join("    %s();" % n for n in names)
+
+    copy_call = ""
+    if out_array:
+        copy_call = (
+            "    /* 把用户的结果图搬进环境的输出图（逐像素深拷贝）。\n"
+            "     * 深拷贝而不是换指针：算法里可能建立了指向图像像素的\n"
+            "     * 指针表（逆透视），换指针会让它们集体悬空。 */\n"
+            "    scut_env_copy_output();\n\n")
+    else:
+        copy_call = (
+            "    /* 未配置结果图数组 —— 画面显示的是输入图本身。\n"
+            "     * 想看到算法输出，请在设置里填「结果图数组名」。 */\n\n")
+
+    text = GLUE_HEAD.format(
+        src=PROJECT_CONFIG_NAME,
+        decls=decls,
+        init_calls=_calls(init_names),
+        frame_calls=_calls(frame_names),
+        copy_call=copy_call,
+        post_calls=_calls(post_names))
+
+    # 结果图搬运函数的声明：由 scut_symbols.py 生成到能看见该数组的 TU 里。
+    # ★ 必须放在【调用之前】—— 所以拼在 GLUE_HEAD 的开头而不是尾部：
+    #   C 语言里函数必须先声明后使用，放尾部会得到
+    #   "call to undeclared function" 的编译错误。
+    if out_array:
+        text = (
+            "\n/* 由符号发现阶段生成到【声明了 %s 的那个编译单元】里 ——\n"
+            " * 只有在那里才看得见它的真实类型（可能是 static，也可能是\n"
+            " * 二维数组，独立编译单元猜不准）。\n"
+            " *\n"
+            " * ★ 为什么搬运函数体不写在这里，而只在这里【声明】：\n"
+            " *   本文件是独立编译单元，看不到用户的数组定义；\n"
+            " *   只有展开了用户源码的那个包装单元才知道它长什么样。 */\n"
+            "void scut_env_copy_output(void);\n" % out_array) + text
+
+    path = os.path.join(gen_dir, "scut_env_glue.c")
+    atomic_write_text(path, text)
+    return path
+
 
 def write_config_shim(gen_dir: str, content: str) -> None:
     """
@@ -1055,7 +1387,7 @@ def normalize_probe_obj_dwarf(objcopy: str, obj_path: str,
 def build_one_unit(job: UnitJob, cc: str, objdump: str, python: str,
                    symbols_tool: str, base_flags: List[str], mode_flags: List[str],
                    probe_flags: List[str], include_dirs: List[str],
-                   objcopy: str, auto_watch: bool,
+                   objcopy: str, auto_watch: bool, output_array: str,
                    reporter: Reporter, log_lock: threading.Lock,
                    logs: List[str], proj: "Project") -> bool:
     """
@@ -1120,6 +1452,10 @@ def build_one_unit(job: UnitJob, cc: str, objdump: str, python: str,
             "--out-json", tmp_j,
             "--objdump", objdump,
         ]
+        if output_array:
+            # 结果图数组名交给生成器：只有它展开了用户源码，
+            # 才知道这个数组的真实类型与作用域。
+            gen_cmd += ["--output-array", output_array]
         reporter.detail("  [2/3 生成] $ " + " ".join(
             '"%s"' % a if " " in a else a for a in gen_cmd))
         env = dict(os.environ)
@@ -1293,6 +1629,22 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
     core_lib = args.core_lib or os.path.join(proj.root, DEFAULT_CORE_LIB_REL)
     core_lib = os.path.abspath(core_lib)
 
+    # bind/scut_bind.c 的来源：仓库自带的那一份。也允许工程自带覆盖。
+    # ★ 必须在这里解析（而不是等到编译阶段）：核心库的内容指纹要把它
+    #   算进去 —— 改了 bind 就等于改了环境代码，必须触发重建。
+    bind_src = os.path.join(proj.root, "bind", "scut_bind.c")
+    if not os.path.isfile(bind_src):
+        bind_src = os.path.join(SCUT_TOOL_ROOT, "bind", "scut_bind.c")
+    if not os.path.isfile(bind_src):
+        reporter.error(
+            "找不到绑定单元源码 scut_bind.c。\n"
+            "    原因：这是【唯一】知道编译期图像尺寸的编译单元，"
+            "核心库刻意不知道尺寸，没有它就无法把尺寸交给环境。\n"
+            "    下一步：确认 <仓库>/bind/scut_bind.c 存在，"
+            "或在 %s 下放一份自定义的 scut_bind.c。"
+            % os.path.join(proj.root, "bind"))
+        return finish(2)
+
     # ------------------------------------------------------------------------
     # ★ 自动构建 / 增量重建核心库
     #
@@ -1304,12 +1656,20 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
     # 为什么必须【增量】判断：
     #   核心库存在的意义就是「改用户算法时环境不重编」。
     #   但如果无脑每次重建，这个收益就没了，而且用户改一行算法要等好几秒。
-    #   所以：只要库文件比 core/src/*.c 和 core/include/*.h 都新，
-    #   就直接复用。
+    #
+    # ★★ 判据用【内容指纹】而不是 mtime ★★
+    #   旧实现只比较文件修改时间。这在两种真实场景下会静默用错库：
+    #     ① git clone / 解压 zip：文件时间戳来自打包顺序，源码可能比
+    #        库文件"更旧"，于是改过的源码被判成"没变"，用旧库链接 ——
+    #        报出来的是一堆 undefined reference，而根因完全看不出来；
+    #     ② 本仓库里真的发生过：一个预先放好的 .a 缺了两个目标文件，
+    #        因为它的 mtime 恰好较新，一直没被重建。
+    #   指纹方案对这两种情况都免疫，代价只是每次构建多读几十 KB。
     #
     # 为什么源码缺失时【不报错】：
     #   SDK 可以以「只有库、没有源码」的形式分发（保护环境实现）。
     #   这时库文件本身就是要用的东西，源码不在是完全正常的。
+    #   但那种情况下我们【无法】校验指纹，所以只在存在指纹文件时才比对。
     # ------------------------------------------------------------------------
     sdk_core_src_dir = os.path.join(SDK_ROOT, "core", "src")
     sdk_core_inc_dir = os.path.join(SDK_ROOT, "core", "include")
@@ -1319,34 +1679,45 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
             os.path.join(sdk_core_src_dir, n)
             for n in os.listdir(sdk_core_src_dir) if n.endswith(".c"))
 
-    def _newest_mtime(paths: List[str]) -> float:
-        newest = 0.0
-        for p in paths:
-            try:
-                m = os.path.getmtime(p)
-                if m > newest:
-                    newest = m
-            except OSError:
-                pass
-        return newest
-
     core_headers = []
     if os.path.isdir(sdk_core_inc_dir):
-        core_headers = [os.path.join(sdk_core_inc_dir, n)
-                        for n in os.listdir(sdk_core_inc_dir)
-                        if n.endswith(".h")]
+        core_headers = sorted(
+            os.path.join(sdk_core_inc_dir, n)
+            for n in os.listdir(sdk_core_inc_dir) if n.endswith(".h"))
+
+    def _core_fingerprint() -> str:
+        """核心库全部输入（.c/.h + 编译器命令模板）的内容指纹。"""
+        h = hashlib.sha256()
+        for p in sorted(core_sources + core_headers + [bind_src]):
+            h.update(os.path.basename(p).encode("utf-8", "replace"))
+            try:
+                with open(p, "rb") as f:
+                    h.update(f.read())
+            except OSError:
+                h.update(b"<unreadable>")
+        return h.hexdigest()
 
     need_core_rebuild = False
     if core_sources:
+        core_stamp = core_lib + ".sha256"
         if not os.path.isfile(core_lib):
             need_core_rebuild = True
             reporter.human("  核心库不存在，将从源码构建（首次构建较慢，之后会缓存）")
         else:
-            lib_m = os.path.getmtime(core_lib)
-            newest_src = _newest_mtime(core_sources + core_headers)
-            if newest_src > lib_m:
+            want = _core_fingerprint()
+            have = ""
+            if os.path.isfile(core_stamp):
+                try:
+                    with open(core_stamp, "r", encoding="utf-8") as f:
+                        have = f.read().strip()
+                except OSError:
+                    have = ""
+            if have != want:
                 need_core_rebuild = True
-                reporter.human("  核心源码有更新，重建核心库")
+                if not have:
+                    reporter.human("  核心库没有内容指纹（旧版本留下的），重建以保证一致")
+                else:
+                    reporter.human("  核心源码有更新，重建核心库")
 
     if need_core_rebuild:
         with timer.stage("构建核心库"):
@@ -1394,6 +1765,7 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
                 reporter.error("打包核心静态库失败。")
                 return 1, None
             os.replace(tmp_lib, core_lib)
+            atomic_write_text(core_lib + ".sha256", _core_fingerprint() + "\n")
             reporter.human("  核心库已构建: %s" % core_lib)
 
     # ⑧ 用户代码【强制 -O0】（用户原话："用户代码需要强制O0优化（不优化）"）：
@@ -1401,100 +1773,63 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
     #   变量看不到值，与"仿真环境用于理解算法行为"的目标直接冲突。
     #   release 模式只影响核心库与链接参数，用户源码永远 -O0。
     mode_flags = ["-g", "-O0"]
-    # --- 3) 编译期契约头文件 ------------------------------------------------
+    # --- 3) 工程配置 → 生成编译期契约头 + 环境接线单元 ---------------------
     #
-    # 三条路径，优先级从高到低：
-    #   A) 工程里有 scut_config.h  → bind 的原样 #include 直接命中，什么都不用做
-    #   B) 工程里有 config.h       → 生成一个【只做转发的】 scut_config.h 垫片
-    #   C) 两者都没有              → 垫片留空（只保证 #include 不报错），
-    #                                尺寸靠 -DSCUT_IMAGE_W=/H= 从命令行注入
+    # ★ 配置的唯一入口是 scut_project.json（插件设置界面维护）。
+    #   没有它时回落到老的 config.h（迁移期不该强制用户改），
+    #   两者都没有则用默认值 —— "什么都没有也能构建"是上手即用的一部分。
     #
-    # ★ 为什么 C 路径的垫片必须【留空】而不是把尺寸写进去：
-    #   如果垫片里写了 #define SCUT_IMAGE_W，同时又传 -DSCUT_IMAGE_W=，
-    #   编译器会对每个编译单元都报 'macro redefined' 警告（实测过）。
-    #   宏定义只有一处来源，才不会产生噪声 —— 噪声会淹没真正的错误。
-    # ★ 同理，A/B 路径【绝不】再传 -D：头文件就是唯一真值来源。
-    #   （需求里的「-D 覆盖」是 C 路径的兜底，不是和头文件并存的选项。）
-    header, header_base = proj.find_config_header()
-    cfg_flags: List[str] = []
-    with timer.stage("读取 config.h"):
-        if header:
-            try:
-                img_w, img_h = parse_image_size(header)
-            except ConfigParseError as exc:
-                reporter.error(str(exc) + "\n    下一步：修好后重跑构建。")
-                return finish(2)
-            reporter.human("  图像尺寸: %d x %d  （来自 %s）"
-                           % (img_w, img_h, header))
-            if header_base != "scut_config.h":
-                # 路径 B：工程只有 config.h，而 bind/scut_bind.c 写的是
-                # #include "scut_config.h"。用一个转发垫片补齐，
-                # 这样【仓库里的 bind 源码一行都不用改】也能支持两种命名。
-                write_config_shim(
-                    proj.gen_dir,
-                    "/* AUTO-GENERATED by tools/scut_build.py -- DO NOT EDIT.\n"
-                    " *\n"
-                    " * 本工程的编译期契约头文件叫 config.h，而 bind/scut_bind.c\n"
-                    " * 里写的是 #include \"scut_config.h\"。这个转发垫片把两者接上，\n"
-                    " * 于是 bind 源码一行都不用改，两种命名都能用。\n"
-                    " */\n"
-                    "#include \"config.h\"\n")
-        else:
-            # 路径 C：没有契约头文件。允许用环境变量把尺寸注入进去。
-            env_w = os.environ.get("SCUT_IMAGE_W", "").strip()
-            env_h = os.environ.get("SCUT_IMAGE_H", "").strip()
-            if env_w.isdigit() and env_h.isdigit() and int(env_w) > 0 \
-                    and int(env_h) > 0:
-                img_w, img_h = int(env_w), int(env_h)
-                reporter.warn(
-                    "工程里没有 config.h / scut_config.h，"
-                    "改用环境变量 SCUT_IMAGE_W=%d / SCUT_IMAGE_H=%d "
-                    "通过 -D 注入编译期契约。\n"
-                    "    影响：IDE 打开工程时看不到尺寸契约，"
-                    "算法里 SCUT_IMAGE_W/H 相关的数组声明会满屏红波浪线；"
-                    "换机器构建时若忘了设这两个环境变量会直接失败。\n"
-                    "    下一步：建议把 templates/starter/config.h 复制到工程根 "
-                    "(%s)，这才是唯一的真值来源。"
-                    % (img_w, img_h, os.path.join(proj.root, "config.h")))
-                # 垫片留空（只有 include guard），只为了让 bind 的
-                # #include "scut_config.h" 不报错；尺寸由下面的 -D 提供。
-                write_config_shim(
-                    proj.gen_dir,
-                    "/* AUTO-GENERATED by tools/scut_build.py -- DO NOT EDIT.\n"
-                    " *\n"
-                    " * 本工程没有编译期契约头文件，尺寸由构建脚本通过\n"
-                    " * -DSCUT_IMAGE_W= / -DSCUT_IMAGE_H= 注入。\n"
-                    " * 这里刻意【不】写 #define，避免与命令行宏冲突报\n"
-                    " * 'macro redefined' 警告。\n"
-                    " */\n")
-                cfg_flags = ["-DSCUT_IMAGE_W=%d" % img_w,
-                             "-DSCUT_IMAGE_H=%d" % img_h]
-            else:
-                reporter.error(
-                    "找不到编译期契约头文件。\n"
-                    "    原因：bind 单元与用户算法都依赖 SCUT_IMAGE_W / "
-                    "SCUT_IMAGE_H，C 语言要求数组大小是编译期常量，"
-                    "所以这个头文件不可省略。\n"
-                    "    下一步：把 templates/starter/config.h 复制到 %s，"
-                    "按需修改里面的 SCUT_IMAGE_W / SCUT_IMAGE_H。"
-                    % os.path.join(proj.root, "config.h"))
-                return finish(2)
+    # ★ 生成物放 .scut/gen/，并且 -I 顺序把它排在最前，
+    #   于是 bind 与用户代码的 #include "scut_config.h" 都命中生成的那一份。
+    cfg: Dict[str, Any] = {}
+    cfg_source = ""
+    with timer.stage("读取工程配置"):
+        try:
+            cfg, cfg_source = load_project_config(proj, reporter)
+            img_w, img_h = _cfg_image(cfg)
+        except ConfigParseError as exc:
+            reporter.error(str(exc) + "\n    下一步：修好后重跑构建。")
+            return finish(2)
 
-        if not os.path.isdir(proj.pic_dir):
+        reporter.human("  配置来源: %s" % cfg_source)
+        reporter.human("  图像尺寸: %d x %d" % (img_w, img_h))
+
+        try:
+            write_generated_config(proj.gen_dir, cfg)
+            glue_path = write_glue(proj.gen_dir, cfg)
+        except ConfigParseError as exc:
+            reporter.error(str(exc) + "\n    下一步：修好后重跑构建。")
+            return finish(2)
+
+        n_init = len(_cfg_names(cfg, "init"))
+        n_frame = len(_cfg_names(cfg, "frame"))
+        n_post = len(_cfg_names(cfg, "post"))
+        out_array = str(cfg.get("outputArray") or "").strip()
+        reporter.human("  钩子函数: 初始化 %d 个 / 处理 %d 个 / 后处理 %d 个"
+                       % (n_init, n_frame, n_post))
+        reporter.human("  结果图数组: %s"
+                       % (out_array if out_array else "（未配置，显示输入图）"))
+        reporter.detail("  生成契约头: %s"
+                        % os.path.join(proj.gen_dir, "scut_config.h"))
+        reporter.detail("  生成接线单元: %s" % glue_path)
+
+    # 尺寸宏由生成的头文件提供，绝不再传 -D（会报 macro redefined）
+    cfg_flags: List[str] = []
+
+    if not os.path.isdir(proj.pic_dir):
+        reporter.warn(
+            "工程里没有 pic/ 目录，仿真将没有测试图可读。\n"
+            "    影响：仿真能启动，但画面会全黑，容易误判成算法有问题。\n"
+            "    下一步：创建 pic/ 并放入测试图。")
+    else:
+        pics = [n for n in os.listdir(proj.pic_dir)
+                if os.path.splitext(n)[1].lower()
+                in (".bmp", ".png", ".jpg", ".jpeg", ".pgm")]
+        if not pics:
             reporter.warn(
-                "工程里没有 pic/ 目录，仿真将没有测试图可读。\n"
-                "    影响：仿真能启动，但画面会全黑，容易误判成算法有问题。\n"
-                "    下一步：创建 pic/ 并放入测试图（按 config.h 里的 "
-                "SCUT_PIC_DIR / SCUT_PIC_EXT 约定命名）。")
-        else:
-            pics = [n for n in os.listdir(proj.pic_dir)
-                    if os.path.splitext(n)[1].lower()
-                    in (".bmp", ".png", ".jpg", ".jpeg", ".pgm")]
-            if not pics:
-                reporter.warn(
-                    "pic/ 目录里没有任何图片，仿真将没有测试图可读。\n"
-                    "    影响：画面会全黑，容易误判成算法有问题。\n"
-                    "    下一步：往 %s 里放测试图。" % proj.pic_dir)
+                "pic/ 目录里没有任何图片，仿真将没有测试图可读。\n"
+                "    影响：画面会全黑，容易误判成算法有问题。\n"
+                "    下一步：往 %s 里放测试图。" % proj.pic_dir)
 
     # --- 4) 核心静态库存在性 ------------------------------------------------
     # 放在契约解析【之后】：先让用户把「工程自身的配置问题」修完，
@@ -1523,19 +1858,7 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
             "    下一步：确认本脚本位于 <仓库>/tools/ 下，"
             "且 <仓库>/core/include/ 存在。" % core_include)
 
-    # bind/scut_bind.c 的来源：仓库自带的那一份。也允许工程自带覆盖。
-    bind_src = os.path.join(proj.root, "bind", "scut_bind.c")
-    if not os.path.isfile(bind_src):
-        bind_src = os.path.join(SCUT_TOOL_ROOT, "bind", "scut_bind.c")
-    if not os.path.isfile(bind_src):
-        reporter.error(
-            "找不到绑定单元源码 scut_bind.c。\n"
-            "    原因：这是【唯一】知道编译期图像尺寸的编译单元，"
-            "核心库刻意不知道尺寸，没有它就无法把尺寸交给环境。\n"
-            "    下一步：确认 <仓库>/bind/scut_bind.c 存在，"
-            "或在 %s 下放一份自定义的 scut_bind.c。"
-            % os.path.join(proj.root, "bind"))
-        return finish(2)
+    # bind/scut_bind.c 已在 core_lib 解析处定位（见上面的说明）。
 
     # include 搜索顺序（★ 顺序本身就是设计）：
     #   1) .scut/gen          —— 必须有，转发头 scut_config.h 在这里，
@@ -1602,19 +1925,23 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
         ))
 
     workers = max(1, int(args.jobs))
+    # 结果图数组名：交给符号发现阶段，让它在【声明了该数组的那个 TU】里
+    # 生成 scut_env_copy_output()。不在这里生成，是因为只有展开了用户
+    # 源码才看得见该数组的真实类型与作用域。
+    out_array = str(cfg.get("outputArray") or "").strip()
     with timer.stage("编译用户代码（%d 个文件）" % len(jobs)):
         if workers == 1 or len(jobs) == 1:
             for j in jobs:
                 build_one_unit(j, tc.cc, tc.objdump, tc.python,
                                SYMBOLS_TOOL, base_flags, mode_flags, probe_flags,
-                               include_dirs, objcopy, auto_watch,
+                               include_dirs, objcopy, auto_watch, out_array,
                                reporter, log_lock, logs, proj)
         else:
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
                 futs = [ex.submit(
                     build_one_unit, j, tc.cc, tc.objdump, tc.python,
                     SYMBOLS_TOOL, base_flags, mode_flags, probe_flags,
-                    include_dirs, objcopy, auto_watch,
+                    include_dirs, objcopy, auto_watch, out_array,
                     reporter, log_lock, logs, proj)
                     for j in jobs]
                 concurrent.futures.wait(futs)
@@ -1622,6 +1949,34 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
     for j in jobs:
         for w in j.warnings:
             reporter.warn("%s：%s" % (os.path.relpath(j.src, proj.root), w))
+
+    # --- 6b) 编译环境接线单元 ------------------------------------------------
+    #
+    # ★ 这个单元把用户函数接进环境的三个阶段（初始化/处理/绘制）。
+    #   它是"用户代码可直接移植"的关键：注册信息留在环境侧，
+    #   用户 code/ 里一个 SCUT_ 宏都不需要。
+    #
+    # ★ 放在用户代码【之后】编译：它的函数声明来自用户代码，
+    #   若用户函数名填错，这里会给出"未定义符号"的链接期错误，
+    #   而那正是我们想暴露的问题（比静默不执行好得多）。
+    glue_obj = os.path.join(proj.obj_dir, "scut_env_glue.o")
+    with timer.stage("编译环境接线"):
+        gcmd = ([tc.cc] + base_flags + mode_flags + include_dirs
+                + ["-c", glue_path, "-o", glue_obj])
+        reporter.detail("  $ " + " ".join(
+            '"%s"' % a if " " in a else a for a in gcmd))
+        rg = run_cmd(gcmd)
+        with log_lock:
+            logs.append(rg.out)
+        if rg.code != 0:
+            gd = parse_diagnostics(rg.out)
+            reporter.error(
+                "环境接线单元编译失败。\n"
+                "    原因：多半是设置里填的钩子函数名与代码不一致，"
+                "或者函数被写成了 static（必须是非 static 的 void f(void)）。\n"
+                "    " + first_error_digest(gd).replace("\n", "\n    "))
+            timer.report()
+            return finish(1)
 
     all_output = "".join(logs)
     diags = parse_diagnostics(all_output)
@@ -1723,6 +2078,7 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
     link_cmd = ([tc.cc]
                 + [bind_obj]
                 + [j.wrapped_obj for j in jobs]
+                + [glue_obj]
                 + backend_objs
                 + ["-L" + os.path.dirname(core_lib)]
                 + extra_libdirs
@@ -2092,9 +2448,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-v", "--verbose", action="store_true",
                    help="打印每一条实际执行的命令行（排查构建问题时用）")
     p.add_argument("--backend", default="headless",
-                   choices=["headless", "window", "webview"],
-                   help="呈现后端（谁提供 main）。headless=无窗口批量跑，"
-                        "window=独立窗口，webview=由插件驱动（默认 headless）")
+                   choices=["headless"],
+                   help="呈现后端（谁提供 main）。headless = 由插件驱动的"
+                        "无窗口后端，帧经 stdout 协议交给 IDE（默认）")
     return p
 
 

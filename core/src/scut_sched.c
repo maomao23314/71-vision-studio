@@ -10,28 +10,26 @@
  *      性能数据只有在"两次测量口径一致"时才能比较。同一个人换个后端、
  *      换台机器，如果口径变了，历史数据全部作废。所以本文件把
  *      「什么计入 process_us、什么不计入」用代码固定下来，
- *      而不是留给调用方或文档去约定（docs/实测证据.md 的 N-8 就是
- *      旧实现里"文档说含显示、代码不含显示"造成的口径事故）。
+ *      而不是留给调用方或文档去约定（旧实现里"文档说含显示、代码不含显示"
+ *      造成过一次口径事故）。
  *
- *      PRE_FRAME + PROCESS(取 repeat 次平均) + POST_FRAME  → process_us
- *      frame sink（呈现后端抓帧）                          → 从 frame_us 里扣除
- *      DRAW                                                 → draw_us（独立）
- *      REPORT                                               → report_us（独立）
+ *      PROCESS(取 repeat 次平均)  → process_us   ★ 算法性能的唯一指标
+ *      DRAW（搬运结果图 + 画标注 + 打日志）→ draw_us（独立，不计入上面）
+ *      frame sink（呈现后端抓帧）  → 从 frame_us 里扣除
  *
  *  ★ 帧内顺序（顺序本身是契约，不能重排）：
- *      PRE_FRAME → PROCESS → POST_FRAME → DRAW → frame sink → REPORT
+ *      PROCESS → DRAW → 合成覆盖层 → 清空覆盖层 → frame sink
  *
- *  ★★ DRAW 必须在 frame sink【之前】—— 这是修掉「标注静默丢失」后的顺序 ★★
- *      DRAW 回调把标注写进【覆盖层】，而呈现后端抓帧读的是【灰度输出图】，
- *      两者必须被合到一起才看得见。所以 DRAW 之后先由本文件把覆盖层
- *      合成进灰度图，再让 sink 抓帧。
- *      历史版本把 sink 排在 DRAW 之前，后果是标注【永远进不了用户看到的图】：
- *      不报错、不崩溃，只是标注凭空消失 —— 正是本工程要消灭的那类缺陷。
- *      （这一段曾经的理由是"后端要抓干净的算法结果图"，但在本工程里
- *        后端抓帧的方式就是读灰度图写文件，它并不会自己合成覆盖层，
- *        所以那个理由等价于"标注永不显示"，必须推翻。）
+ *  ★★ DRAW 必须在「合成覆盖层」之前（历史缺陷的修复）★★
+ *      绘制写进【覆盖层】，呈现后端抓帧读的是【灰度输出图】，两者必须被
+ *      合到一起才看得见。所以 DRAW 之后由本文件把覆盖层合成进灰度图，
+ *      再让 sink 抓帧。
+ *      旧实现把绘制注册成「REPORT」角色，而 REPORT 排在合成【之后】——
+ *      后果是每帧画的标注都落到【下一帧】的画面上，且最后一帧的标注永远
+ *      丢失。不报错、不崩溃，只是画面慢一帧，属于最难查的一类静默缺陷。
+ *      现在绘制只有一个阶段（DRAW），调度器保证它在合成之前跑完。
  *
- *  ★ DRAW 阶段的收尾（合成 + 清屏）由本文件负责，见 run_one_frame 的 5b 段。
+ *  ★ DRAW 阶段的收尾（合成 + 清屏）由本文件负责，见 run_one_frame 的第 4 段。
  *      这件事放在调度器而不是各个后端，是为了让每个后端都"免费"拿到
  *      正确的绘制：后端一旦忘记合成，用户的标注就会全部静默消失。
  *
@@ -124,10 +122,6 @@
  * -------------------------------------------------------------------------- */
 static scut_image_desc_t  s_desc;              /* 描述符的值拷贝 */
 static scut_run_config_t  s_cfg;               /* 配置的值拷贝 */
-/* 测速挂起开关：b<N> 命令在这一帧跳过 POST/REPORT（用户要求：同图跑 N 次不跑后处理）。默认开。 */
-static int s_post_enabled = 1;
-
-void scut_sched_set_post_enabled(int enabled) { s_post_enabled = enabled ? 1 : 0; }
 static int                s_initialized;       /* 是否调用过 scut_core_init */
 static int                s_init_ran;          /* INIT 回调是否已执行过（保证"恰好一次"） */
 static int                s_quit;              /* 退出请求标志（见 scut_request_quit） */
@@ -289,35 +283,43 @@ static void scut_timing_init(void)
  *
  *  ★★ 顺序是契约，不要重排 ★★
  *
- *      PRE_FRAME   → 计时内          （改参数、换图、预处理开关）
- *      PROCESS     → 计时内，重复 N 次（★ 图像处理主体）
- *      POST_FRAME  → 计时内          （收尾、统计）
- *      frame sink  → 不计入处理时间  （呈现后端在这里抓走这一帧的图像）
- *      DRAW        → draw_us 独立    （往覆盖层画标注）
- *      REPORT      → report_us 独立  （输出 LOG / 数据）
+ *      PROCESS  → 计时（process_us）    ★ 图像处理主体，重复 repeat 次
+ *      DRAW     → 独立计时（draw_us）   接线单元：搬运结果图 + 画标注 + 打日志
+ *      合成      → 覆盖层 → 输出图
+ *      清空      → 覆盖层复位
+ *      frame sink → 不计入处理时间      呈现后端抓走这一帧
  *
  *  ★★★ 绘图与日志【刻意不计入】处理时间 ★★★
- *      因为车载程序上根本没有"画点给屏幕看"这件事：CH32 上既没有屏幕，
- *      也没有日志文件，SCUT_Draw* / SCUT_Log 在移植层里就是空实现。
- *      把它算进 process_us，等于拿"主机侧调试设施"的耗时去冒充
- *      "车上算法"的耗时——性能数据会直接失真，
- *      而且是最坏的那种失真：在主机上看起来变慢，在车上其实没有这段开销，
- *      于是用户会去优化一段根本不存在于车上的代码。
+ *      车载程序上没有"画点给屏幕看"这件事：CH32 上既没有屏幕也没有日志文件，
+ *      SCUT_Draw* / SCUT_Log 在移植层里就是空实现。
+ *      把它算进 process_us，等于拿"主机侧调试设施"的耗时去冒充"车上算法"的
+ *      耗时——性能数据会直接失真。而且是最坏的那种失真：主机上看起来变慢，
+ *      车上根本没有这段开销，于是用户会去优化一段不存在的代码。
  *
- *  ★ frame sink 放在 POST_FRAME 之后、DRAW 之前：
- *      呈现后端要抓的是【算法跑完之后、标注画上去之前】的干净结果图。
- *      放早了会抓到上一帧，放晚了会把调试标注当成算法输出。
+ *  ★★ 为什么 DRAW 必须在「合成」之前（历史缺陷的修复）★★
+ *      旧实现把「绘制」注册为 REPORT 角色，而 REPORT 排在合成【之后】。
+ *      后果：任何在 post 钩子里画的标注，都落到【下一帧】的画面上，
+ *      本帧什么都没有；并且最后一帧的标注永远丢失。
+ *      它不报错、不崩溃，只是画面慢一帧 —— 属于最难查的一类静默缺陷。
+ *      现在绘制只有一个阶段（DRAW），且调度器保证它在合成之前跑完。
+ *
+ *  ★ 日志门控与 DRAW 同一阶段：
+ *      日志由 post 钩子产生，post 钩子在 DRAW 阶段执行，
+ *      所以门控必须与它一致。旧实现把门控绑在 REPORT 上，而 REPORT 与
+ *      产生日志的钩子【不是同一个阶段】，属于自相矛盾的设计。
+ *
+ *  ★ frame sink 放在合成【之后】：
+ *      后端读的是灰度输出图，标注是在合成时才进入它的。
+ *      若 sink 排在合成之前，用户看到的图永远不含标注 —— 且不报任何错。
  *
  *  ★ frame_us 用"整帧跨度 减去 sink 耗时"来算：
- *      头文件写明 frame_us 是"整帧（不含呈现后端自身的开销）"。
  *      用跨度相减而不是把各阶段相加，可以顺带把核心自身的调度开销
- *      （注册表遍历、循环、时间读数的开销）也如实算进整帧时间里——
- *      这些开销是真实存在的，不该凭空消失。而 sink 属于呈现后端，
- *      必须扣掉，否则 GUI 后端的画图时间会污染算法侧的帧率。
+ *      （注册表遍历、循环、时间读数）也如实算进整帧时间；
+ *      而 sink 属于呈现后端，必须扣掉，否则后端的画图时间会污染帧率读数。
  *
  *  ★ 帧内请求退出时不提前返回：
- *      即使 PROCESS 里调用了 scut_request_quit()，也要把 POST / sink /
- *      DRAW / REPORT 走完。否则呈现后端会漏掉最后一帧，
+ *      即使 PROCESS 里调用了 scut_request_quit()，也要把 DRAW / 合成 /
+ *      sink 走完。否则呈现后端会漏掉最后一帧，
  *      用户看到的现象是"点了退出，画面停在上一帧"。
  * -------------------------------------------------------------------------- */
 static void run_one_frame(void)
@@ -328,10 +330,7 @@ static void run_one_frame(void)
     scut_u64 sink_end;
     scut_u64 t0;
     scut_u64 t1;
-    double   pre_us          = 0.0;
-    double   post_us         = 0.0;
     double   draw_us         = 0.0;
-    double   report_us       = 0.0;
     double   sink_us;
     double   process_total_us = 0.0;   /* repeat 次 PROCESS 的【总和】 */
     double   process_avg_us;           /* 除以 repeat 得到的每次平均 */
@@ -339,7 +338,7 @@ static void run_one_frame(void)
     scut_u64 process_total_cycles = 0;
     int      repeat;
     int      r;
-    /* 用于「DRAW 之后把 overlay 合成进 gray」——见 DRAW 块内的说明。
+    /* 用于「DRAW 之后把 overlay 合成进 gray」——见下方说明。
      * 局部变量刻意初始化为 NULL/0：即便某条路径没有赋值，
      * 合成函数也会因参数非法而安全空操作，不会误写随机地址。 */
     scut_u8  *cmp_gray    = NULL;
@@ -353,13 +352,7 @@ static void run_one_frame(void)
 
     frame_begin = scut_tick_now();
 
-    /* --- 1. PRE_FRAME --- */
-    scut_input_set_phase(SCUT_PHASE_PRE_FRAME);
-    t0 = scut_tick_now();
-    scut_registry_invoke(SCUT_ROLE_PRE_FRAME);
-    t1 = scut_tick_now();
-    pre_us = scut_tick_delta_us(t0, t1);
-    /* --- 2. PROCESS（重复 repeat 次） ---
+    /* --- 1. PROCESS（重复 repeat 次） ---
      * 复杂度测试时把 repeat 调大，观察 process_us 是否随规模线性增长。
      * 因此这里报的是【每次调用的平均值】：repeat 变大时这个数字应当
      * 基本不变；如果它跟着变大，说明测到的是"系统噪声"而不是算法复杂度。 */
@@ -381,27 +374,20 @@ static void run_one_frame(void)
     }
     process_avg_us = process_total_us / (double)repeat;
 
-    /* --- 3. POST_FRAME --- */
-    scut_input_set_phase(SCUT_PHASE_POST_FRAME);
-    t0 = scut_tick_now();
-    if (s_post_enabled) { scut_registry_invoke(SCUT_ROLE_POST_FRAME); }
-    t1 = scut_tick_now();
-    post_us = scut_tick_delta_us(t0, t1);
-
-    /* --- 4. 先发布算法侧计时（sink 本身挪到 DRAW 之后，见第 5 段后的 5c）---
+    /* --- 2. 先发布算法侧计时 ---
      *
-     * ★ 这里先把 process_us 等字段写进 s_timing，再继续往下走：
-     *   这样后端在 sink 内部调用 scut_timing_get() 拿到的是【本帧】数据，
+     * ★ 先把 process_us 写进 s_timing，再继续往下走：
+     *   这样 BACKEND 在 sink 内部调用 scut_timing_get() 拿到的是【本帧】数据，
      *   而不是上一帧的残值（先发布、后回调，消除"慢一拍"）。
-     *   draw_us / report_us 此刻尚未发生，所以不在这里写——
-     *   它们本来就不属于"算法侧"口径。 */
-    s_timing.process_us     = pre_us + process_avg_us + post_us;
+     *   draw_us 此刻尚未发生，所以不在这里写。 */
+    s_timing.process_us     = process_avg_us;
     s_timing.process_cycles = s_cycles_valid
                             ? (process_total_cycles / (scut_u64)repeat)
                             : 0;
     s_timing.cycles_valid   = s_cycles_valid;
 
-    /* --- 5. DRAW（独立计时，绝不并入 process_us） ---
+    /* --- 3. DRAW（独立计时，绝不并入 process_us） ---
+     *
      * draw_enabled == 0 时整个 DRAW 阶段不执行：配置里写的
      * "是否允许 DRAW 阶段绘制"只有核心能兑现（核心是 cfg 的唯一消费者），
      * 若不在这里生效，这个字段就是一段死配置。
@@ -409,9 +395,15 @@ static void run_one_frame(void)
      *
      * ★ 这里把阶段设为 DRAW 之后，SCUT_GetInputImage() 会返回 NULL
      *   并记一次违规。这是「防止把图像处理写进绘制里逃避计时」的
-     *   机制性保障，而不是文档约定。 */
+     *   机制性保障，而不是文档约定。
+     *
+     * ★ 日志门控与 DRAW 同阶段开启：
+     *   产生日志的 post 钩子就在本阶段执行，门控必须与它一致。 */
+    scut_input_set_phase(SCUT_PHASE_DRAW);
+    if (s_cfg.log_enabled) {
+        scut_log_begin_draw_phase();
+    }
     if (s_cfg.draw_enabled) {
-        scut_input_set_phase(SCUT_PHASE_DRAW);
         if (s_draw_timing) {
             t0 = scut_tick_now();
             scut_registry_invoke(SCUT_ROLE_DRAW);
@@ -422,8 +414,13 @@ static void run_one_frame(void)
              * 会混进相邻阶段的测量里。 */
             scut_registry_invoke(SCUT_ROLE_DRAW);
         }
+    }
+    if (s_cfg.log_enabled) {
+        scut_log_end_draw_phase();
+    }
 
-        /* --- 5b. DRAW 收尾：合成 overlay → gray，然后清空 overlay ---
+    if (s_cfg.draw_enabled) {
+        /* --- 4. DRAW 收尾：合成 overlay → gray，然后清空 overlay ---
          *
          * ★★ 顺序是本块的全部要点：先【合成】，再【清空】。两者都不能省 ★★
          *      · 只清空不合成 → 本帧画的东西直接被抹掉，标注永远不出现；
@@ -438,22 +435,14 @@ static void run_one_frame(void)
          *      那么每个后端都得自己记得做一遍 —— 只要有一个后端忘了，
          *      用户的标注就在那个后端上【全部静默消失】。
          *      旧环境正是栽在这里：绘制写进 EasyX 的 DIB，换成 headless 后
-         *      标注凭空不见。把合成放进调度器，则所有后端（headless /
-         *      Webview / 将来任何一个）都【免费】获得正确的绘制，
-         *      新增后端时无需知道覆盖层的存在。这就是"必须在核心做"的理由。
+         *      标注凭空不见。把合成放进调度器，则所有后端都【免费】获得
+         *      正确的绘制，新增后端时无需知道覆盖层的存在。
          *
-         * ★ 为什么取目标要问绘制模块 (scut_draw_get_target) 而不是直接读
-         *    scut_frame_overlay()：本工程里覆盖层缓冲存在【两份】——
-         *    frame 模块一份（堆分配）、bind 单元一份（静态数组）。
-         *    绘制写的是它当前【被绑定的】那一块，也就是 bind 那份。
-         *    若这里图省事去合成 frame 自己那块，合成的就是一张永远为空的
-         *    覆盖层：不报错、不崩溃，标注全部不见 —— 又一类静默缺陷。
-         *    只有绘制模块知道它绑定的是哪一对，所以只能由它交出来。
-         *
-         * ★ 为什么放在 draw_enabled 这个 if 内部：
-         *      关闭 DRAW 时既不该产生标注，也就不该有"合成 + 清屏"这件事。
-         *      放在块外会让 draw_enabled=0 时仍然清掉覆盖层并合成，
-         *      使这个配置项的行为变得难以解释。 */
+         * ★ 绘制目标通过 scut_draw_get_target() 取回，而不是各自读模块内部
+         *   状态：调度器并不知道绘制模块当前绑定了哪一对缓冲，只有绘制模块
+         *   自己知道。若这里猜错，合成的就是一张永远为空的覆盖层 ——
+         *   不报错、不崩溃，标注全部不见。让绘制模块把它交出来，
+         *   这类错误在接口形状上就无从发生。 */
         scut_draw_get_target(&cmp_gray, &cmp_overlay, &cmp_w, &cmp_h);
         if (cmp_gray != NULL && cmp_overlay != NULL &&
             cmp_w > 0 && cmp_h > 0) {
@@ -464,18 +453,41 @@ static void run_one_frame(void)
         scut_draw_clear_overlay();
     }
 
-    /* --- 5c. frame sink：把这一帧交给呈现后端 ---
+    /* --- 4. 汇总本帧计时（★ 必须在 sink 之前发布） ---
+     *
+     * ★ frame_us 的定义是「整帧，不含呈现后端的开销」。
+     *   实现方式是【在调用 sink 之前读一次表】—— 此时已经跑完了
+     *   全部算法与绘制阶段，而呈现还没开始，所以这个跨度恰好就是定义。
+     *
+     * ★ 为什么不再用「整帧跨度 减去 sink 耗时」那种写法：
+     *   那要求先跑 sink 再相减，于是 s_timing 只能在 sink【之后】填 ——
+     *   而后端正是在 sink 内部读 scut_timing_get() 上报计时的。
+     *   结果是每帧报出去的 draw_us / frame_us 都是【上一帧】的数字
+     *   （第一帧干脆是 0）。实测确认过：drawUs 恒为 0.000，
+     *   而绘制其实一直在跑。
+     *   直接在 sink 前读表，既准确又消除了这个"慢一拍"。
+     *
+     * ★ 顺带说明为什么不需要再减什么：
+     *   跨度里已经天然包含了核心自身的调度开销（注册表遍历、循环、
+     *   读表），那些是真实存在的开销，本来就该算进整帧时间。
+     *   而 sink 属于呈现层，发生在读表之后，自然不会被计入。 */
+    frame_end = scut_tick_now();
+    frame_us  = scut_tick_delta_us(frame_begin, frame_end);
+    if (frame_us < 0.0) {
+        frame_us = 0.0;   /* 时间不可能倒退，钳一下防御读数抖动 */
+    }
+
+    s_timing.draw_us   = draw_us;
+    s_timing.frame_us  = frame_us;
+
+    /* --- 5. frame sink：把这一帧交给呈现后端 ---
      * ★★ 必须排在 DRAW + 合成【之后】★★
-     *   后端（headless 写 PGM、Webview 上屏）读的就是灰度输出图。
-     *   标注是在 5b 才被合成进去的，若 sink 排在它前面，
+     *   后端（headless 写 PGM）读的就是灰度输出图。
+     *   标注是在上一步才被合成进去的，若 sink 排在它前面，
      *   用户看到的图就永远不含标注 —— 而且不报任何错。
-     *   放在这里，任何后端都自动拿到"算法结果 + 正确标注"的完整帧。
      *
-     * ★ sink 的耗时仍然从 frame_us 里扣除（口径不变），
-     *   只是它现在发生在 DRAW 之后，所以下面汇总处的减法依然成立。
-     *
-     * ★ 先把阶段切回 IDLE 再回调 sink（这也是 scut_internal.h 里
-     *   "SCUT_PHASE_IDLE = 帧外（含 frame sink 期间）"所声明的语义）：
+     * ★ 先把阶段切回 IDLE 再回调 sink（与 scut_internal.h 里
+     *   "SCUT_PHASE_IDLE = 帧外（含 frame sink 期间）"的语义一致）：
      *   后端属于呈现层，不属于任何算法阶段。若让它停留在 DRAW 阶段里，
      *   后端一旦顺手调用 SCUT_GetInputImage() 就会被记成"用户违规"，
      *   把后端自身的行为算到用户头上，误导排查方向。 */
@@ -486,39 +498,7 @@ static void run_one_frame(void)
     }
     sink_end = scut_tick_now();
     sink_us = scut_tick_delta_us(sink_begin, sink_end);
-
-    /* --- 6. REPORT（独立计时） ---
-     * ★ 必须同时打开日志门控：SCUT_Log 只在这个阶段被允许写入，
-     *   否则在 PROCESS/DRAW 里打日志会污染性能测量或打乱绘制顺序。 */
-    if (s_cfg.log_enabled) {
-        scut_input_set_phase(SCUT_PHASE_REPORT);
-        scut_log_begin_report_phase();
-        t0 = scut_tick_now();
-        if (s_post_enabled) { scut_registry_invoke(SCUT_ROLE_REPORT); }
-        t1 = scut_tick_now();
-        scut_log_end_report_phase();
-        report_us = scut_tick_delta_us(t0, t1);
-    }
-    scut_input_set_phase(SCUT_PHASE_IDLE);
-
-    /* --- 汇总（计时已全部就绪） ---
-     * ★ frame_us 的定义是「整帧跨度 减去 呈现后端开销」。
-     *   两个端点都必须是【真实测量】：
-     *      frame_begin → frame_end 覆盖「阶段 + 呈现」的完整一帧
-     *      sink_us                 是其中的呈现部分
-     *   相减才是"不含呈现的整帧"。
-     *   曾经犯过两次不报错、只让数字悄悄错掉的错：
-     *     ① 在 sink 之前就减 sink_us（当时还是未初始化的栈垃圾）→ 报 nan；
-     *     ② 把 frame_end 定格在 sink 之前再减 sink_us → 呈现时间被减两次，恒为 0。 */
-    frame_end = scut_tick_now();
-    frame_us  = scut_tick_delta_us(frame_begin, frame_end) - sink_us;
-    if (frame_us < 0.0) {
-        frame_us = 0.0;   /* 时间不可能倒退，钳一下防御读数抖动 */
-    }
-
-    s_timing.draw_us   = draw_us;
-    s_timing.report_us = report_us;
-    s_timing.frame_us  = frame_us;
+    (void)sink_us;   /* 仅用于诊断；不参与上面已发布的 frame_us */
 }
 
 /* 描述符与初始化状态是否允许跑帧。
@@ -531,8 +511,7 @@ static int core_present(void)
 /* --------------------------------------------------------------------------
  *  初始化 / 释放
  * -------------------------------------------------------------------------- */
-void scut_core_init(const scut_image_desc_t *desc, const scut_run_config_t *cfg)
-{
+void scut_core_init(const scut_image_desc_t *desc, const scut_run_config_t *cfg){
     scut_run_config_t local;
 
     /* --- 配置：整体值拷贝 ---

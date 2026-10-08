@@ -30,10 +30,11 @@ static int  s_head   = 0;    /* 下一个写入位置 */
 static int  s_count  = 0;    /* 当前有效行数（<= MAX） */
 static int  s_enabled = 1;
 
-/* ★ 阶段门控：只有 REPORT 阶段允许写日志。
- *   在 PROCESS 阶段写日志会污染性能测量（printf 很慢），
- *   在 DRAW 阶段写会打乱绘制顺序。这里用门控从机制上阻止，
- *   而不是靠文档约定。 */
+/* ★ 阶段门控：只有「绘制/后处理」阶段允许写日志。
+ *   在 PROCESS 阶段写日志会污染性能测量（printf 很慢）——
+ *   而 process_us 正是本环境的核心指标。这里用门控从机制上阻止，
+ *   而不是靠文档约定。
+ *   门控与产生日志的钩子（post）是同一个阶段，不会自相矛盾。 */
 static int  s_phase_allows_log = 0;
 
 void scut_log_set_enabled(int enabled)
@@ -46,9 +47,9 @@ int scut_log_enabled(void)
     return s_enabled;
 }
 
-/* 供调度器在进入/离开 REPORT 阶段时调用（见 scut_sched.c）。 */
-void scut_log_begin_report_phase(void) { s_phase_allows_log = 1; }
-void scut_log_end_report_phase(void)   { s_phase_allows_log = 0; }
+/* 供调度器在进入/离开 DRAW 阶段时调用（见 scut_sched.c）。 */
+void scut_log_begin_draw_phase(void) { s_phase_allows_log = 1; }
+void scut_log_end_draw_phase(void)   { s_phase_allows_log = 0; }
 
 void SCUT_LogClear(void)
 {
