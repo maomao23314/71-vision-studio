@@ -306,7 +306,21 @@ export interface BuildContext {
 export async function build(options: BuildOptions, ctx: BuildContext): Promise<BuildResult> {
     const started = Date.now();
     const ch = getBuildOutputChannel();
-    const tc = await detectToolchain();
+    // ★ allowDownload = true：编译是用户明确的动作，只有到这一刻
+    //   才允许去下载工具链。只读探测（activate / 状态查询）不会走到这里，
+    //   所以"刚装完插件打开 VS Code"不会莫名其妙开始下几百 MB。
+    const tc = await detectToolchain(true);
+    if (!tc.cc) {
+        // 探测阶段已经给出了中文的"下一步"；这里再补一条醒目的失败信息，
+        // 因为"点了编译却毫无反应"是最令人困惑的体验。
+        const hint = tc.warnings.find((w) => w.includes('clang')) ?? tc.warnings[0] ?? '';
+        return fail(started, [{
+            severity: 'error',
+            message: '没有可用的编译器，无法编译。'
+                + (hint ? `\n    ${hint}` : '')
+                + '\n    下一步：执行「SCUT-71: 环境自检」查看详细诊断。',
+        }], ch);
+    }
 
     return vscode.window.withProgress(
         {

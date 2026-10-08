@@ -15,12 +15,36 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 import { execFile } from 'child_process';
 import type { DoctorResult, Toolchain, ToolInfo } from './types';
+import { ensureToolchain, findInstalledToolchain } from './toolchainfetch';
 
 /** 探测结果缓存：activate 不能因为探测慢而卡住，所以探测是异步 + 惰性 + 只做一次。 */
 let cached: Toolchain | undefined = undefined;
 let inflight: Promise<Toolchain> | undefined = undefined;
+
+/**
+ * 插件存放「自己下载的工具链」的目录。
+ *
+ * ★ 为什么不用 extensionUri：插件安装目录在升级时会被整体替换，
+ *   下载进来的几百 MB 工具链会跟着消失，用户每次升级都要重下。
+ *   globalStorage 按扩展隔离、且升级时保留，是这类"下载物"的正确位置。
+ *
+ * ★ 为什么不用 context.globalStorageUri：
+ *   detectToolchain() 是模块级函数，签名里没有 context，
+ *   而把它一路透传进来会污染十几个调用点。这里按 VS Code 的约定路径自行推导，
+ *   等价且不引入耦合。取不到时返回临时目录下的一个固定名字 ——
+ *   宁可下到临时目录（大不了重下），也不要因为拿不到路径就放弃"到手即用"。
+ */
+function globalStorageDir(): string {
+    const appData = process.env.APPDATA;
+    if (appData) {
+        return path.join(appData, 'Code', 'User', 'globalStorage',
+                         'scut-racing.scut-71-vision-studio');
+    }
+    return path.join(os.tmpdir(), 'scut71-toolchain');
+}
 
 /** 版本探测的超时。★ 必须有超时：任何一次 getWindowsDirectory 之类的系统调用
  *  卡住都会让整个扩展宿主挂起，学生只会看到「插件没反应」。 */
@@ -319,20 +343,29 @@ async function findPython(binDir: string | undefined): Promise<{ path?: string; 
     };
 }
 
-function detectImpl(): Promise<Toolchain> {
+function detectImpl(allowDownload: boolean): Promise<Toolchain> {
     return (async () => {
         const warnings: string[] = [];
         const cfg = vscode.workspace.getConfiguration('scut71');
         const configured = (cfg.get<string>('toolchainPath', '') ?? '').trim();
         const envRoot = (process.env.SCUT71_TOOLCHAIN ?? '').trim();
 
-        // ---- 1) 工具链根目录：配置 > 环境变量 > 已知位置 > PATH ----
+        // ---- 1) 工具链根目录：配置 > 环境变量 > 插件自下载 > 已知位置 ----
+        //
+        // ★ 顺序即优先级，而「插件自下载」排在已知位置之前是有意的：
+        //   用户装了插件却什么编译器都没有时，我们下载的那份是【确定可用】的；
+        //   而 D:\TOOLS\llvm-mingw 这种硬编码路径只在开发机上存在，
+        //   换个同学就变成"看起来配了其实没有"。先用自己的，再碰运气。
         const roots: Array<{ root: string; from: string }> = [];
         if (configured) {
             roots.push({ root: configured, from: 'scut71.toolchainPath 设置' });
         }
         if (envRoot) {
             roots.push({ root: envRoot, from: 'SCUT71_TOOLCHAIN 环境变量' });
+        }
+        const fetched = findInstalledToolchain(globalStorageDir());
+        if (fetched) {
+            roots.push({ root: fetched, from: '插件自动下载（上次装好的）' });
         }
         for (const r of ROOT_CANDIDATES) {
             roots.push({ root: r, from: '默认安装位置' });
@@ -365,6 +398,36 @@ function detectImpl(): Promise<Toolchain> {
             ld = firstExisting(binDir, ['ld.lld.exe', 'ld.lld']);
         }
 
+        if (!cc && allowDownload) {
+            // ---- 1b) 本机什么都没有：自动下载一份（"到手即用"的兜底）----
+            //
+            // ★ 为什么放在这里而不是 activate：
+            //   activate 必须快且不能失败。下载要几十秒到几分钟，
+            //   放在激活路径上会让"装完插件第一次开 VS Code"变成一次漫长等待，
+            //   而且用户此时可能根本不想编译。
+            //   放在这里则是「第一次真的要编译时」才触发，意图明确。
+            //
+            // ★ 为什么只有 allowDownload 为真才走这条路：
+            //   本函数也会被只读探测（activate / 状态查询）调用，
+            //   那些调用点不该产生几百 MB 的网络流量。
+            const dl = await ensureToolchain(globalStorageDir(), () => { /* 进度已经在 withProgress 里显示 */ });
+            if (dl.ok && dl.root) {
+                root = dl.root;
+                rootFrom = '插件自动下载';
+                binDir = binOf(dl.root);
+                if (binDir) {
+                    cc = firstExisting(binDir, ['clang.exe', 'clang']);
+                    cxx = firstExisting(binDir, ['clang++.exe', 'clang++']);
+                    lldbDap = firstExisting(binDir, ['lldb-dap.exe', 'lldb-dap']);
+                    clangd = firstExisting(binDir, ['clangd.exe', 'clangd']);
+                    ld = firstExisting(binDir, ['ld.lld.exe', 'ld.lld']);
+                }
+                warnings.push(dl.message);
+            } else {
+                warnings.push(dl.message);
+            }
+        }
+
         if (!cc) {
             // PATH 兜底
             cc = whichInPath(['clang.exe', 'clang']);
@@ -385,10 +448,12 @@ function detectImpl(): Promise<Toolchain> {
                 '没有找到 clang 编译器，无法编译仿真程序。\n'
                 + '    原因：本项目的编译器固定为 clang（LLVM-MinGW），因为它自带 MinGW sysroot，'
                 + '装完即可用，不需要额外配 MSVC 或 mingw 环境。\n'
-                + '    下一步：从 github.com/mstorsjo/llvm-mingw/releases 下载 '
-                + 'ucrt-x86_64 包，解压到 D:\\TOOLS\\llvm-mingw（或任意目录），'
-                + '然后在设置里把「Scut71 › Toolchain Path」指向该目录；'
-                + '也可以把它的 bin 目录加进 PATH。');
+                + '    下一步（任选其一）：\n'
+                + '      1) 从 github.com/mstorsjo/llvm-mingw/releases 下载 '
+                + 'ucrt-x86_64 包，解压到任意目录，'
+                + '再用设置「Scut71 › Toolchain Path」指向它（里面有 bin\\clang.exe 的那一层）；\n'
+                + '      2) 把 clang 的 bin 目录加进 PATH；\n'
+                + '      3) 检查设置里的「Scut71 › Auto Download Toolchain」是否被关掉了。');
         } else {
             // 版本探测失败【不算】探测失败，只记 undefined，不阻断流程
             const ver = await probeVersion(cc);
@@ -468,30 +533,61 @@ function detectImpl(): Promise<Toolchain> {
     })();
 }
 
-/** 探测工具链（带缓存）。★ 永不 reject：任何异常都退化成「空工具链 + 中文警告」。 */
-export function detectToolchain(): Promise<Toolchain> {
-    if (cached) {
+/**
+ * 探测工具链（带缓存）。★ 永不 reject：任何异常都退化成「空工具链 + 中文警告」。
+ *
+ * ★ allowDownload 的语义（很重要，别去掉）：
+ *     false（默认）—— 只探测本机，找不到就如实报告，【绝不联网】。
+ *     true          —— 本机找不到时尝试自动下载一份精简工具链。
+ *
+ *   为什么默认不下载：本函数在 activate() 里被调用一次（为了把自检结论
+ *   写进输出面板）。如果那里会联网，用户"装完插件第一次开 VS Code"
+ *   就会莫名其妙开始下载几百 MB —— 而他此时可能只是打开了一个无关的文件夹。
+ *   所以只有明确的动作（编译 / 环境自检）才允许触发下载。
+ */
+export function detectToolchain(allowDownload = false): Promise<Toolchain> {
+    // ★ 只读探测：缓存直接复用，不需要做任何事。
+    if (cached && !allowDownload) {
         return Promise.resolve(cached);
     }
-    if (!inflight) {
-        inflight = detectImpl()
-            .catch((e: unknown) => {
-                const msg = e instanceof Error ? e.message : String(e);
-                const fallback: Toolchain = {
-                    root: '', cc: '', cxx: '', ld: '', objdump: '',
-                    warnings: [`工具链探测过程中出现意外错误：${msg}\n`
-                        + '    下一步：执行「SCUT-71: 环境自检」查看详细信息，'
-                        + '或在设置里手动指定 scut71.toolchainPath。'],
-                };
-                return fallback;
-            })
+    // ★ 允许下载时【直接做一次完整探测】，不与 in-flight 的只读探测合并。
+    //   理由：合并需要记录"那次探测允不允许下载"，而一旦记错就会出现
+    //   "刚下载完却仍报没有工具链"。下载是罕见的显式动作，
+    //   多做一次探测（几百毫秒）远好过一类难查的静默错误。
+    if (allowDownload) {
+        return detectImpl(true)
+            .catch((e: unknown) => fallbackToolchain(e))
             .then((tc) => {
-                cached = tc;
+                // 探测到编译器就更新缓存；没探到则保留可能的旧值（可能仍可用）
+                if (tc.cc) {
+                    cached = tc;
+                }
+                return tc;
+            });
+    }
+    if (!inflight) {
+        inflight = detectImpl(false)
+            .catch((e: unknown) => fallbackToolchain(e))
+            .then((tc) => {
+                if (tc.cc) {
+                    cached = tc;
+                }
                 inflight = undefined;
                 return tc;
             });
     }
     return inflight;
+}
+
+/** 探测过程出意外时的兜底结果（永远返回可用的对象，不抛异常）。 */
+function fallbackToolchain(e: unknown): Toolchain {
+    const msg = e instanceof Error ? e.message : String(e);
+    return {
+        root: '', cc: '', cxx: '', ld: '', objdump: '',
+        warnings: [`工具链探测过程中出现意外错误：${msg}\n`
+            + '    下一步：执行「SCUT-71: 环境自检」查看详细信息，'
+            + '或在设置里手动指定 scut71.toolchainPath。'],
+    };
 }
 
 /** 同步取缓存（还没探测完就返回 undefined）。供不需要等待的调用点使用。 */
@@ -505,9 +601,13 @@ export function resetToolchainCache(): void {
     inflight = undefined;
 }
 
-/** 环境自检：把 Toolchain 变成面向用户的诊断结果。 */
+/** 环境自检：把 Toolchain 变成面向用户的诊断结果。
+ *
+ * ★ 允许下载：用户点「环境自检」就是想确认"能不能用"，
+ *   此时发现缺工具链，顺手装好正是他期望的结果。
+ *   （对比：只读探测不会下载，见 detectToolchain 的说明。） */
 export async function runDoctor(): Promise<DoctorResult> {
-    const tc = await detectToolchain();
+    const tc = await detectToolchain(true);
     const lines: string[] = [];
     const errors: string[] = [];
 
