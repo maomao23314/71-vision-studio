@@ -199,7 +199,7 @@ def main():
     banner("4/10  JSON 协议合法性（插件依赖它）")
     run("json", [PY, os.path.join(HERE, "check_json_protocol.py")])
 
-    banner("5/10  插件纯逻辑（协议解析 / PGM / 诊断）")
+    banner("5/10  插件纯逻辑（协议解析 / PPM / 诊断）")
     run("extension", ["node", os.path.join(HERE, "extension_smoke.js"),
                       os.path.join(proj, ".scut", "frames"),
                       os.path.join(proj, ".scut", "bin", "scut_sim.exe")])

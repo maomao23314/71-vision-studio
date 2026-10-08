@@ -102,6 +102,7 @@ void scut_env_seed_output_from_input(void)
     scut_u8 *out;
     int      w;
     int      h;
+    int      x, y;
 
     in  = scut_bind_input();
     out = scut_bind_output();
@@ -110,7 +111,19 @@ void scut_env_seed_output_from_input(void)
     if (in == 0 || out == 0 || w <= 0 || h <= 0 || in == out) {
         return;
     }
-    memcpy(out, in, (size_t)w * (size_t)h);
+    /* ★ 输出图是 RGB 三通道，而输入是单通道灰度，
+     *   所以不能整块 memcpy —— 必须逐像素把灰度扩成等值三通道。
+     *   直接 memcpy(w*h) 会只填满前三分之一，后两通道全是上一帧的残留，
+     *   症状是"画面像被撕掉一条"，而且不报错。 */
+    for (y = 0; y < h; y++) {
+        const scut_u8 *src = in  + (size_t)y * (size_t)w;
+        scut_u8       *dst = out + (size_t)y * (size_t)w * 3u;
+        for (x = 0; x < w; x++) {
+            dst[(size_t)x * 3u + 0] = src[x];
+            dst[(size_t)x * 3u + 1] = src[x];
+            dst[(size_t)x * 3u + 2] = src[x];
+        }
+    }
 }
 
 /* --------------------------------------------------------------------------
@@ -128,8 +141,14 @@ void scut_env_seed_output_from_input(void)
  *
  *  ★ 为什么不用 SCUT_OutImageSet 逐点写：
  *    那是给"算法想直接产出显示图"的场景留的通用接口，每点一次要走
- *    边界检查与步长乘法。整块拷贝一次 memcpy 逐行做，既更快，
+ *    边界检查与步长乘法。这里逐行逐像素搬运，既更快，
  *    也让"这是一次搬运"这件事在代码里看得见。
+ *
+ *  ★★ 为什么必须逐像素、不能 memcpy ★★
+ *    用户的 src 是单通道灰度，而环境输出图是 RGB 三通道。
+ *    memcpy 会把灰度字节当成 RGB 连续排下去，颜色通道全是错的；
+ *    直接按 w*h 拷贝又只能填满前 1/3。两者都"看起来跑通了"，
+ *    所以这里显式把每个灰度扩成等值三通道。
  *
  *  ★ 尺寸不匹配时按行裁剪而不是报错：
  *    用户数组尺寸来自它自己的宏，未必与本工程 config 完全一致。
@@ -145,8 +164,8 @@ void SCUT_EnvCopyOutput(const scut_u8 *src, int src_w, int src_h)
     scut_u8 *dst;
     int w;
     int h;
-    int row_bytes;
-    int y;
+    int cols;
+    int x, y;
 
     if (src == 0) {
         return;
@@ -163,21 +182,24 @@ void SCUT_EnvCopyOutput(const scut_u8 *src, int src_w, int src_h)
     if (src_h <= 0) { src_h = h; }
 
     /* 只搬两边都有的那部分 */
-    if (src_w < w) { row_bytes = src_w; } else { row_bytes = w; }
+    if (src_w < w) { cols = src_w; } else { cols = w; }
     if (src_h < h) { h = src_h; }
 
     for (y = 0; y < h; y++) {
-        memcpy(dst + (size_t)y * (size_t)w,
-               src + (size_t)y * (size_t)src_w,
-               (size_t)row_bytes);
-    }
-
-    /* 源比目标小时，剩余区域填黑而不是留上一帧的残影 ——
-     * 否则"换了张图反而看到旧内容"，属于最难解释的一类现象。 */
-    if (row_bytes < w) {
-        for (y = 0; y < h; y++) {
-            memset(dst + (size_t)y * (size_t)w + (size_t)row_bytes, 0,
-                   (size_t)(w - row_bytes));
+        const scut_u8 *src_row = src + (size_t)y * (size_t)src_w;
+        scut_u8       *dst_row = dst + (size_t)y * (size_t)w * 3u;
+        for (x = 0; x < cols; x++) {
+            scut_u8 v = src_row[x];
+            dst_row[(size_t)x * 3u + 0] = v;
+            dst_row[(size_t)x * 3u + 1] = v;
+            dst_row[(size_t)x * 3u + 2] = v;
+        }
+        /* 源比目标窄时，剩余区域填黑而不是留上一帧的残影 ——
+         * 否则"换了张图反而看到旧内容"，属于最难解释的一类现象。 */
+        for (x = cols; x < w; x++) {
+            dst_row[(size_t)x * 3u + 0] = 0;
+            dst_row[(size_t)x * 3u + 1] = 0;
+            dst_row[(size_t)x * 3u + 2] = 0;
         }
     }
 }

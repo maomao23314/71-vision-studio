@@ -447,7 +447,7 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
                 index: f.index,
                 width: f.width,
                 height: f.height,
-                gray: f.gray,
+                rgb: f.rgb,
                 timing: f.timing,
                 // 把"本帧用的是哪张输入图"一并送给前端显示
                 pic: f.pic ?? '',

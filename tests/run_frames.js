@@ -120,7 +120,13 @@ async function main() {
         ok('帧号严格递增',
             col.seen.every((f, i) => i === 0 || f.index > col.seen[i - 1].index),
             col.seen.map((f) => f.index).join(','));
-        ok('每帧都有图像数据', col.seen.every((f) => f.gray && f.gray.length > 0));
+        ok('每帧都有图像数据', col.seen.every((f) => f.rgb && f.rgb.length > 0));
+        /* 每帧图像必须是 w*h*3 字节（RGB）。若按旧的单通道长度断言，
+         * 改 RGB 之后会因为"少了两条通道"而悄悄通过 —— 这里写死 3 倍，
+         * 让通道数本身就是被断言的内容。 */
+        ok('每帧图像是 RGB 三通道（长度 = w*h*3）',
+           col.seen.every((f) => f.rgb.length === f.width * f.height * 3),
+           col.seen.map((f) => `${f.width}x${f.height}:${f.rgb.length}`).join(','));
         ok('每帧都带计时', col.seen.every((f) => f.timing && typeof f.timing.processUs === 'number'));
         // ★ drawUs 曾经恒为 0（计时在 sink 之后才发布），这里明确断言非零。
         ok('drawUs 非零（计时在 sink 之前发布）',

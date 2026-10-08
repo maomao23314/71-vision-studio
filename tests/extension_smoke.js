@@ -100,29 +100,43 @@ console.log('\n=== 3. parseVariablesLine：变量协议 ===');
     ok('十六进制记号安全', protocol.parseNumericValues('0x4050b0').length === 0);
 }
 
-console.log('\n=== 4. parsePgm：真实仿真输出 ===');
+console.log('\n=== 4. parsePpm：真实仿真输出 ===');
 {
     const dir = process.argv[2];
     if (dir && fs.existsSync(dir)) {
-        const files = fs.readdirSync(dir).filter(f => f.endsWith('.pgm')).sort();
-        ok('找到 PGM 文件', files.length > 0, dir);
+        const files = fs.readdirSync(dir).filter(f => f.endsWith('.ppm')).sort();
+        ok('找到 PPM 文件', files.length > 0, dir);
         if (files.length) {
             const buf = fs.readFileSync(path.join(dir, files[0]));
-            const img = protocol.parsePgm(new Uint8Array(buf));
+            const img = protocol.parsePpm(new Uint8Array(buf));
             ok('解析出图像', !!img);
             if (!img) {
-                console.log('  (后续 PGM 断言跳过)');
+                console.log('  (后续 PPM 断言跳过)');
             } else {
-                // ★ 字段名是 gray（不是 pixels）—— 与 PgmImage 接口一致
+                // ★ 字段名是 rgb（不是 pixels）—— 与 FrameImage 接口一致
                 ok('宽度 188', img.width === 188, String(img.width));
                 ok('高度 120', img.height === 120, String(img.height));
-                ok('像素数 = w*h', img.gray.length === 188 * 120,
-                   String(img.gray.length));
+                ok('字节数 = w*h*3', img.rgb.length === 188 * 120 * 3,
+                   String(img.rgb.length));
                 let nz = 0;
-                for (const p of img.gray) if (p) nz++;
+                for (const p of img.rgb) if (p) nz++;
                 ok('图像非全黑（证明加载链路通）', nz > 0, 'non-zero=' + nz);
+
+                /* ★ 真彩色回归断言：标注颜色必须原样透传。
+                 *   这条断言是有来历的：核心曾把彩色标注按亮度折算成
+                 *   单通道灰度，红/绿/青在暗色底图上肉眼无法分辨，
+                 *   表现为「绘制明明是彩色的，画面却变成灰度了」。
+                 *   只断言"非全黑"的话，那个缺陷会完全溜过去。 */
+                let colored = 0;
+                for (let i = 0; i + 2 < img.rgb.length; i += 3) {
+                    const r = img.rgb[i], g = img.rgb[i + 1], b = img.rgb[i + 2];
+                    if (r !== g || g !== b) { colored++; }
+                }
+                ok('含非灰度像素（彩色标注已透传）', colored > 0,
+                   'colored=' + colored);
                 console.log('        ' + files[0] + ': ' + img.width + 'x' + img.height +
-                            ', 非零像素 ' + nz + ' / ' + img.gray.length);
+                            ', 非零字节 ' + nz + ' / ' + img.rgb.length +
+                            ', 非灰度像素 ' + colored);
             }
         }
     } else {
@@ -130,15 +144,15 @@ console.log('\n=== 4. parsePgm：真实仿真输出 ===');
     }
 }
 
-console.log('\n=== 5. parsePgm：畸形输入必须安全 ===');
+console.log('\n=== 5. parsePpm：畸形输入必须安全 ===');
 {
-    ok('空 buffer', protocol.parsePgm(new Uint8Array(0)) === undefined);
-    ok('非 P5 魔数',
-       protocol.parsePgm(new Uint8Array(Buffer.from('P6\n1 1\n255\n'))) === undefined);
+    ok('空 buffer', protocol.parsePpm(new Uint8Array(0)) === undefined);
+    ok('非 P6 魔数',
+       protocol.parsePpm(new Uint8Array(Buffer.from('P5\n1 1\n255\n'))) === undefined);
     ok('头部被截断',
-       protocol.parsePgm(new Uint8Array(Buffer.from('P5\n188'))) === undefined);
+       protocol.parsePpm(new Uint8Array(Buffer.from('P6\n188'))) === undefined);
     let threw = false;
-    try { protocol.parsePgm(new Uint8Array(Buffer.from('P5\n2 2\n255\n\x01'))); }
+    try { protocol.parsePpm(new Uint8Array(Buffer.from('P6\n2 2\n255\n\x01'))); }
     catch (e) { threw = true; }
     ok('数据不足不抛异常', !threw);
 }

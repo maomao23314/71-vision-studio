@@ -54,7 +54,7 @@ void scut_frame_free(void)
      *
      * 注意这里【不需要】清理 frame 自己的指针 —— 紧接着的 free(NULL)
      * 是合法空操作，尺寸复位也在下面统一做。 */
-    scut_draw_bind(NULL, NULL, 0, 0, 0);
+    scut_draw_bind(NULL, NULL, 0, 0, 0, 0);
 
     /* free(NULL) 是合法的空操作，所以这里不需要判断。
      * 复位尺寸同样重要：只释放指针却留着旧 w/h，
@@ -87,7 +87,10 @@ int scut_frame_alloc(int w, int h)
     /* ★ 溢出防护（必须显式做，不能靠运气）：
      *   w * h 若在 size_t 上溢出，malloc 会拿到一个【很小】的尺寸并成功，
      *   随后按真实 w/h 写入就会越界堆写 —— 不崩溃、直接踩坏别的数据。
-     *   这里用除法反向验证乘法，避免「先乘后查」（那个顺序已经错了）。 */
+     *   这里用除法反向验证乘法，避免「先乘后查」（那个顺序已经错了）。
+     *   ★ 输出图是 RGB 三通道，所以字节数是 w*h*3；
+     *     先按 u32 元素校验一遍（覆盖层要 4 字节/像素，是更紧的那个约束），
+     *     再按 3 字节校验一遍，两边都过才分配。 */
     if ((size_t)w > SIZE_MAX / sizeof(scut_u32)) {
         return SCUT_FRAME_ERR_BADARG;
     }
@@ -95,8 +98,11 @@ int scut_frame_alloc(int w, int h)
     if (pixels > SIZE_MAX / sizeof(scut_u32)) {
         return SCUT_FRAME_ERR_BADARG;
     }
+    if (pixels > SIZE_MAX / 3u) {
+        return SCUT_FRAME_ERR_BADARG;
+    }
 
-    gray    = (scut_u8 *)malloc(pixels * sizeof(scut_u8));
+    gray    = (scut_u8 *)malloc(pixels * 3u * sizeof(scut_u8));
     overlay = (scut_u32 *)malloc(pixels * sizeof(scut_u32));
 
     /* 任一失败都要把另一个也释放掉，并保持全局状态干净（不半分配）。 */
@@ -106,9 +112,9 @@ int scut_frame_alloc(int w, int h)
         return SCUT_FRAME_ERR_BADARG;
     }
 
-    /* 灰度清零：它是「输出结果图」，零 = 黑底，是符合直觉的初值，
+    /* 输出图清零：它是「输出结果图」，全 0 = 纯黑底，是符合直觉的初值，
      * 也让「源图比目标小」时未覆盖区域自然留黑。 */
-    memset(gray, 0, pixels * sizeof(scut_u8));
+    memset(gray, 0, pixels * 3u * sizeof(scut_u8));
 
     /* ★ 覆盖层【必须】初始化为透明哨兵，不能留 malloc 的垃圾值。
      *   哨兵高 8 位为 1，而合法颜色高 8 位恒为 0 —— 若这一层是未初始化内存，
@@ -192,11 +198,11 @@ void scut_composite_overlay(scut_u8 *dst, int dst_stride,
     if (w <= 0 || h <= 0) {
         return;
     }
-    /* ★ dst_stride < w 必须拒绝，不能"凑合按 w 用"：
+    /* ★ dst_stride < w*3 必须拒绝，不能"凑合按 w 用"：
      *   步长小于一行宽度意味着第 1 行起就与前一行重叠，
      *   写入不崩溃，只是画面错乱并互相覆盖 —— 又一类静默损坏。
      *   与 scut_draw_bind 的校验口径保持一致。 */
-    if (dst_stride < w) {
+    if (dst_stride < w * 3) {
         return;
     }
 
@@ -209,29 +215,31 @@ void scut_composite_overlay(scut_u8 *dst, int dst_stride,
 
         for (x = 0; x < w; x++) {
             scut_u32 c = ovl_row[x];
+            scut_u8 *p = dst_row + (size_t)x * 3u;
 
             if (c == SCUT_OVERLAY_NONE) {
-                /* 透明：保留 dst 在该位置【原有】的灰度，不写。
+                /* 透明：保留 dst 在该位置【原有】的像素，不写。
                  *   不写而不是"从别处拷"是本函数的语义边界：
-                 *   它只做合成，不搬移灰度 —— 灰度从哪来由调用方负责。 */
+                 *   它只做合成，不搬移图像 —— 底图从哪来由调用方负责。 */
                 continue;
             }
 
-            /* 有色：按【亮度】折算成灰度。
+            /* ★★★ 有色：颜色【原样】写入，不再折算成亮度 ★★★
              *
-             * ★ 为什么不把颜色直接输出成彩色：
-             *   输出缓冲是单通道 8 位，与 MT9V03X 灰度相机、
-             *   车载 IPS 灰度屏一致。若这里输出彩色，
-             *   仿真里鲜艳可辨的标注在真屏上根本无法显示 ——
-             *   「仿真通过、上车抓瞎」正是要避免的一类问题。
-             *   需要真彩预览时，呈现层可另读覆盖层单独渲染，
-             *   本函数不承担这个职责。 */
-            {
-                scut_u32 r =  c        & 0xFFu;         /* 0x00BBGGRR */
-                scut_u32 g = (c >>  8) & 0xFFu;
-                scut_u32 b = (c >> 16) & 0xFFu;
-                dst_row[x] = scut_luma(r, g, b);
-            }
+             *  这里曾经是 `dst_row[x] = scut_luma(r, g, b)` ——
+             *  把彩色标注压成一个灰度值。那是"输出缓冲单通道"的必然结果，
+             *  但它让 SCUT_DrawPoint(x, y, SCUT_COLOR_RED) 这类调用
+             *  在画面上完全看不出是红色：红/绿/青的折算值落在同一低区间，
+             *  贴在灰度底图上肉眼无法区分，于是产生了那个真实的疑问 ——
+             *  「我看绘制是彩色的，为什么画面变成灰度了？」
+             *
+             *  现在输出是 RGB 三通道，颜色直接落盘，语义与调用方写下的
+             *  一模一样。scut_luma 仍然保留给"确实需要灰度"的场合
+             *  （例如图片解码，见下方各处使用）。
+             */
+            p[0] = (scut_u8)( c        & 0xFFu);   /* 0x00BBGGRR → R */
+            p[1] = (scut_u8)((c >>  8) & 0xFFu);
+            p[2] = (scut_u8)((c >> 16) & 0xFFu);
         }
     }
 }
@@ -259,19 +267,20 @@ void scut_frame_composite(scut_u8 *dst, int dst_stride)
     if (s_gray == NULL || s_overlay == NULL || dst == NULL) {
         return;
     }
-    if (s_w <= 0 || s_h <= 0 || dst_stride < s_w) {
+    if (s_w <= 0 || s_h <= 0 || dst_stride < s_w * 3) {
         return;
     }
 
-    /* 第一步：把源灰度搬到目标缓冲。
+    /* 第一步：把源图搬到目标缓冲。
      * 源与目标的步长【分开算】：目标可能是带 padding 的显示缓冲，
      * 其 stride != 帧的 stride。若图省事只用一个步长，
-     * 画面会从第二行起整体斜移。 */
+     * 画面会从第二行起整体斜移。
+     * ★ 源图是 RGB 三通道，一行 s_w 个像素 = s_w * 3 字节。 */
     for (y = 0; y < s_h; y++) {
         const scut_u8 *src_row = s_gray + (size_t)y * (size_t)s_stride;
         scut_u8       *dst_row = dst    + (size_t)y * (size_t)dst_stride;
 
-        memcpy(dst_row, src_row, (size_t)s_w);
+        memcpy(dst_row, src_row, (size_t)s_w * 3u);
     }
 
     /* 第二步：把覆盖层合成上去（透明像素保留刚搬过来的灰度）。 */

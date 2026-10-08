@@ -43,8 +43,10 @@ void SCUT_DrawLine(int x0, int y0, int x1, int y1, scut_u32 color);
 void SCUT_DrawRect(int x0, int y0, int x1, int y1, scut_u32 color);
 void SCUT_DrawText(int x, int y, scut_u32 color, const char *fmt, ...);
 
-/* --- 输出图像（灰度结果图，PROCESS 阶段写） --- */
+/* --- 输出图像（RGB 三通道结果图，PROCESS 阶段写） ---
+ * ★ 输出缓冲每像素 3 字节（R/G/B 紧凑排列，行步长 = 宽度 × 3）。 */
 void  SCUT_OutImageSet(int x, int y, scut_u8 value);
+void  SCUT_OutImageSetRGB(int x, int y, scut_u8 r, scut_u8 g, scut_u8 b);
 scut_u8 SCUT_OutImageGet(int x, int y);
 
 /* --- 覆盖层尺寸查询（供绘制代码做自适应） --- */
@@ -53,8 +55,11 @@ int SCUT_GetOutputHeight(void);
 int SCUT_GetImageWidth(void);
 int SCUT_GetImageHeight(void);
 
-/* --- 核心内部使用：由 frame 模块绑定实际缓冲 --- */
-void scut_draw_bind(scut_u8 *gray, scut_u32 *overlay, int w, int h, int stride);
+/* --- 核心内部使用：由 frame 模块绑定实际缓冲 ---
+ * gray_stride 单位是【字节】（RGB 下 = 宽度 × 3）；
+ * ovl_stride  单位是【u32 元素数】（= 宽度）。两者必须分别传。 */
+void scut_draw_bind(scut_u8 *gray, scut_u32 *overlay, int w, int h,
+                    int gray_stride, int ovl_stride);
 void scut_draw_clear_overlay(void);
 
 /* --------------------------------------------------------------------------

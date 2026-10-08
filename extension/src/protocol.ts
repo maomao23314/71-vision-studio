@@ -1,16 +1,21 @@
 /**
- * protocol.ts —— 仿真进程 stdout 协议 + PGM 图像的【纯逻辑】解析层。
+ * protocol.ts —— 仿真进程 stdout 协议 + PPM 图像的【纯逻辑】解析层。
  *
  * ★ 为什么单独拆一个文件：
  *   本文件不 import 'vscode'，因此可以在普通 Node 进程里被单元测试直接加载
- *   （见验证脚本：逐行切分器与 PGM 解析器都靠这个文件做无 UI 校验）。
+ *   （见验证脚本：逐行切分器与 PPM 解析器都靠这个文件做无 UI 校验）。
  *   其余模块（simsession/simview/...）都必须依赖 vscode 运行时，测不了。
  *
  * 协议来源：backends/headless/scut_headless_main.c（权威，勿凭记忆）。
- *   · 每帧一行 JSON：{"frame":..,"w":..,"h":..,"img":"<pgm path>","timing":{..}}
+ *   · 每帧一行 JSON：{"frame":..,"w":..,"h":..,"img":"<ppm path>","timing":{..}}
  *   · 结尾一行变量：{"vars":[{"name":..,"kind":..,"dim":..,"total":..,
  *                             "values":"..","truncated":bool}, ...]}
- *   · 帧图像是 PGM(P5)：ASCII 头 "P5\n<w> <h>\n255\n" + w*h 字节灰度。
+ *   · 帧图像是 PPM(P6)：ASCII 头 "P6\n<w> <h>\n255\n" + w*h*3 字节 RGB。
+ *
+ *  ★ 为什么输出改成彩色：覆盖层里 SCUT_DrawPoint 写的是真彩色，
+ *    而合成阶段曾经把颜色按亮度折算成单通道灰度写进输出 —— 于是
+ *    红/绿/青在暗色底图上落进同一个低区间，肉眼无法分辨，
+ *    表现为「绘制明明是彩色的，画面却变成灰度了」。现在 RGB 原样透传。
  */
 
 import type { BuildDiagnostic } from './types';
@@ -80,10 +85,10 @@ export class LineSplitter {
  * 修复「反斜杠路径」造成的非法 JSON 转义。
  *
  * ★ 为什么需要这一步（实测）：
- *   scut_headless_main.c 用 snprintf 拼 `"%s/frame_%04d.pgm"`，
+ *   scut_headless_main.c 用 snprintf 拼 `"%s/frame_%04d.ppm"`，
  *   而 out_dir 来自命令行。于是当 --out 是 `C:\Users\...` 时，
  *   stdout 上的 JSON 里出现【未转义的单个反斜杠】：
- *       "img":"C:\Users\SQY\...\probe_frames/frame_0001.pgm"
+ *       "img":"C:\Users\SQY\...\probe_frames/frame_0001.ppm"
  *   JSON 规范只允许 \" \\ \/ \b \f \n \r \t \uXXXX，
  *   实测 JSON.parse 直接抛 "Bad escaped character in JSON"。
  *   也就是说：**按原样根本无法解析**，必须容错。
@@ -195,7 +200,7 @@ export interface FrameLine {
     frame: number;
     w: number;
     h: number;
-    /** PGM 文件路径（可能是反斜杠与正斜杠混用的形式） */
+    /** PPM 文件路径（可能是反斜杠与正斜杠混用的形式） */
     img: string;
     /** 本帧实际使用的【输入图】路径（仿真进程的 "pic" 字段）。 */
     pic: string;
@@ -309,14 +314,14 @@ export function parseNumericValues(values: string): number[] {
 }
 
 /* ==========================================================================
- *  PGM (P5) 解析
+ *  PPM (P6) 解析
  * ========================================================================== */
 
-export interface PgmImage {
+export interface FrameImage {
     width: number;
     height: number;
-    /** 长度 = width * height，每像素 1 字节 */
-    gray: Uint8Array;
+    /** 长度 = width * height * 3，每像素 R/G/B 三字节（紧凑排列） */
+    rgb: Uint8Array;
 }
 
 function isWs(b: number): boolean {
@@ -352,11 +357,11 @@ function readToken(buf: Uint8Array, pos: number): { token: string; next: number 
 }
 
 /**
- * 解析 PGM(P5) 灰度图。
+ * 解析 PPM(P6) 真彩色图。
  *
  * ★ 为什么手写而不是找库：
- *   格式只有「P5 / 宽 / 高 / 255 / 原始字节」五段，核心侧
- *   （scut_headless_main.c:267 的 `fprintf(f, "P5\n%d %d\n255\n", w, h)`）
+ *   格式只有「P6 / 宽 / 高 / 255 / 原始字节」五段，核心侧
+ *   （scut_headless_main.c 的 `fprintf(f, "P6\n%d %d\n255\n", w, h)`）
  *   就是按这个写法输出的，引入依赖不划算。
  *
  * ★ 关键难点（写错就会整帧花屏或越界）：
@@ -366,11 +371,11 @@ function readToken(buf: Uint8Array, pos: number): { token: string; next: number 
  *   2) 注释 `#...` 只允许出现在头部记号之间。
  *   3) 头部反斜杠无关，但 \r\n 存在时要跨两个字节。
  *
- * 返回 undefined 表示：不是 P5、头损坏、或像素数据不完整。
+ * 返回 undefined 表示：不是 P6、头损坏、或像素数据不完整。
  */
-export function parsePgm(buf: Uint8Array): PgmImage | undefined {
+export function parsePpm(buf: Uint8Array): FrameImage | undefined {
     const magic = readToken(buf, 0);
-    if (!magic || magic.token !== 'P5') {
+    if (!magic || magic.token !== 'P6') {
         return undefined;
     }
     const wTok = readToken(buf, magic.next);
@@ -384,7 +389,7 @@ export function parsePgm(buf: Uint8Array): PgmImage | undefined {
     const maxval = Number(mTok.token);
     if (!Number.isInteger(width) || !Number.isInteger(height)
         || width <= 0 || height <= 0 || maxval !== 255) {
-        // 只支持 8 位灰度：核心固定写 255，其它值说明不是我们的产物。
+        // 只支持 8 位通道：核心固定写 255，其它值说明不是我们的产物。
         return undefined;
     }
     // maxval 记号之后恰好一个分隔空白；\r\n 要跨两个
@@ -394,7 +399,7 @@ export function parsePgm(buf: Uint8Array): PgmImage | undefined {
     } else if (dataStart < buf.length && isWs(buf[dataStart])) {
         dataStart += 1;
     }
-    const need = width * height;
+    const need = width * height * 3;   // ★ RGB：每像素 3 字节
     if (buf.length - dataStart < need) {
         return undefined;           // 文件被截断（仿真进程正在写？）
     }
@@ -403,8 +408,8 @@ export function parsePgm(buf: Uint8Array): PgmImage | undefined {
     //   直接 subarray 会共享底层（可能是 64 KB 的池 slab）。
     //   而 postMessage 的结构化克隆快路径要求真正的 ArrayBuffer 视图，
     //   共享 slab 会把整个池都传过去（实测过这类事故）。
-    const gray = new Uint8Array(buf.subarray(dataStart, dataStart + need));
-    return { width, height, gray };
+    const rgb = new Uint8Array(buf.subarray(dataStart, dataStart + need));
+    return { width, height, rgb };
 }
 
 /* ==========================================================================

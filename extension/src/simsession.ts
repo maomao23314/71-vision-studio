@@ -17,7 +17,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
-import { LineSplitter, parseFrameLine, parsePgm, parseVariablesLine, repairLooseJson } from './protocol';
+import { LineSplitter, parseFrameLine, parsePpm, parseVariablesLine, repairLooseJson } from './protocol';
 import type { FramePacket, SimSession, TimingInfo, VariableSnapshot } from './types';
 
 export interface SimSessionOptions {
@@ -459,17 +459,17 @@ export class SimSessionImpl implements SimSession {
             cyclesValid: frame.timing.cyclesValid,
         };
 
-        let gray: Uint8Array | undefined;
+        let rgb: Uint8Array | undefined;
         try {
             // ★ readFileSync 返回 Buffer（Uint8Array 的子类，可能共享 64KB 池 slab）。
-            //   parsePgm 内部会 new Uint8Array(...) 拷成独立缓冲，
+            //   parsePpm 内部会 new Uint8Array(...) 拷成独立缓冲，
             //   这样 postMessage 才能走结构化克隆快路径。
             const buf = await fs.promises.readFile(frame.img);
-            const img = parsePgm(new Uint8Array(buf));
+            const img = parsePpm(new Uint8Array(buf));
             if (!img) {
-                this.emitLog(`[会话] 第 ${frame.frame} 帧的 PGM 解析失败（文件：${frame.img}），已跳过。`);
+                this.emitLog(`[会话] 第 ${frame.frame} 帧的 PPM 解析失败（文件：${frame.img}），已跳过。`);
             } else {
-                gray = img.gray;
+                rgb = img.rgb;
             }
         } catch (e) {
             this.emitLog(
@@ -495,13 +495,13 @@ export class SimSessionImpl implements SimSession {
                 cb(snap);
             }
         }
-if (!gray) {
+if (!rgb) {
             // 解析失败也要继续推进协议，否则会话会卡死在等待 ACK 上
             this.pushOrDrop({
                 index: frame.frame,
                 width: frame.w,
                 height: frame.h,
-                gray: new Uint8Array(frame.w * frame.h),
+                rgb: new Uint8Array(frame.w * frame.h * 3),
                 timing,
                 pic: frame.pic,
                 loadError: frame.loadError,
@@ -511,9 +511,9 @@ if (!gray) {
 
         this.pushOrDrop({
             index: frame.frame,
-            width: frame.w || (gray.length > 0 ? gray.length : 0),
+            width: frame.w || (rgb.length > 0 ? rgb.length / 3 : 0),
             height: frame.h,
-            gray,
+            rgb,
             timing,
             pic: frame.pic,
             loadError: frame.loadError,

@@ -173,20 +173,26 @@ export interface FramePacket {
     width: number;
     height: number;
     /**
-     * 灰度像素（长度 = width * height，每像素 1 字节）。
+     * RGB 像素（长度 = width * height * 3，每像素 R/G/B 三字节）。
      *
-     * ★ 契约变更记录（0.2.0）：原字段是 `grayBase64: string`，现改为 `Uint8Array`。
-     *   理由（见 docs/插件技术要点.md 坑 2，已在本机发行版源码核实）：
+     * ★ 契约变更记录（0.10.0）：原字段 `gray: Uint8Array`（每像素 1 字节灰度），
+     *   现改为 `rgb: Uint8Array`（每像素 3 字节）。
+     *   理由：核心的合成阶段曾把彩色标注按亮度折算成单通道灰度，
+     *   红/绿/青在暗色底图上落进同一个低区间，肉眼无法分辨，
+     *   表现为「绘制明明是彩色的，画面却变成灰度了」。
+     *   现在颜色原样透传到 canvas，标注一眼可辨。
+     *
+     * ★ 历史契约变更记录（0.2.0）：更早的字段是 `grayBase64: string`，
+     *   后改为 `Uint8Array`。理由（见 docs/插件技术要点.md 坑 2）：
      *     · `engines.vscode >= 1.57` 时，`Webview.postMessage` 对 ArrayBuffer/
      *       TypedArray 走「结构化克隆」快路径。VS Code 维护者给的实测数字是
      *       扩展宿主 → webview 约 10 s → 500 ms（10–20 倍）。
      *     · 真正的成本不是带宽而是【每条消息的序列化】，序列化跑在扩展宿主线程上；
      *       base64 会把序列化开销放大 33%，正好加在最贵的地方。
-     *     · 188x120 灰度 = 22560 B，base64 后 30080 B。
      *   连带约束：Node 的 `Buffer` 是 `Uint8Array` 的【子类】，克隆时可能被当成
      *   Buffer 处理而丢掉快路径，因此生产端必须显式 `new Uint8Array(...)` 拷一层。
      */
-    gray: Uint8Array;
+    rgb: Uint8Array;
     timing: TimingInfo;
     /** 本帧实际使用的【输入图】路径。 */
     pic?: string;

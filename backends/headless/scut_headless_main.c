@@ -44,8 +44,8 @@
  *    以及一直在工程根启动，三种情况下找到的都是同一组图。
  *
  *  ★ 为什么用文件传图像而不是 base64 内联：
- *      188x120 = 22560 字节，base64 后约 30 KB/帧。几十帧就会把
- *      管道塞满。写 PGM 文件让消费方按需读取更稳。
+ *      188x120 RGB = 67680 字节，base64 后约 90 KB/帧。几十帧就会把
+ *      管道塞满。写 PPM 文件让消费方按需读取更稳。
  *      文件通道也是计划书里「先用临时文件」决策的落实。
  * ========================================================================== */
 
@@ -173,7 +173,7 @@ typedef struct {
     int         list_vars;    /* 只列出变量后退出 */
     const char *pic_dir;      /* 测试图集目录 */
     const char *pic_ext;      /* 测试图扩展名（可逗号分隔多个） */
-    const char *out_dir;      /* 帧 PGM 输出目录 */
+    const char *out_dir;      /* 帧 PPM 输出目录 */
     const char *select_vars;  /* 逗号分隔，只输出这些变量 */
     int         frame_index;  /* 起始图片编号（0 或 1 起，随图集探测结果） */
     int         advance;      /* 每帧前进到下一张图（末尾回绕） */
@@ -1878,14 +1878,19 @@ static void build_vars_json(const options_t *o, char *out, size_t cap)
 }
 
 /* --------------------------------------------------------------------------
- * 帧写出：PGM (P5) 格式
+ *  帧写出：PPM (P6) 格式
  *
- * ★ 为什么选 PGM：它是未压缩、无依赖、十几行就能写的灰度格式，
- *   而且几乎任何工具都能读（ImageMagick / PIL / VS Code 预览）。
- *   换成 PNG 就需要引入编码器（zlib），与「核心零依赖」冲突。
- *   由消费方按需转成 PNG 更合适。
+ *  ★ 为什么从 PGM 改成 PPM：
+ *      输出缓冲现在是 RGB 三通道（见 bind/scut_bind.c），
+ *      PGM 只能表达单通道灰度。用它写 RGB 数据会得到一张颜色错乱的图 ——
+ *      而且格式头仍然写着 "P5"，消费方不会报任何错。
+ *      PPM(P6) 是 PGM 的彩色对应格式，头部只差一个魔数，
+ *      同样未压缩、无依赖，PIL / ImageMagick / VS Code 预览都能读。
+ *
+ *  ★ 为什么不用 PNG：需要引入编码器（zlib），与「核心零依赖」冲突。
+ *    由消费方按需转成 PNG 更合适。
  * -------------------------------------------------------------------------- */
-static int write_pgm(const char *path, const scut_u8 *gray, int w, int h, int stride)
+static int write_ppm(const char *path, const scut_u8 *rgb, int w, int h, int stride)
 {
     FILE *f;
     int   y;
@@ -1894,9 +1899,11 @@ static int write_pgm(const char *path, const scut_u8 *gray, int w, int h, int st
     if (f == 0) {
         return -1;
     }
-    fprintf(f, "P5\n%d %d\n255\n", w, h);
+    fprintf(f, "P6\n%d %d\n255\n", w, h);
     for (y = 0; y < h; y++) {
-        if (fwrite(gray + (size_t)y * (size_t)stride, 1, (size_t)w, f) != (size_t)w) {
+        /* stride 单位是【字节】，每像素 3 字节，所以一行是 w*3 字节。 */
+        if (fwrite(rgb + (size_t)y * (size_t)stride, 1, (size_t)w * 3u, f)
+            != (size_t)w * 3u) {
             fclose(f);
             return -1;
         }
@@ -1998,13 +2005,16 @@ static void on_frame(void *user)
         build_vars_json(o, vars_json, 81920);
     }
 
-    /* 合成：输出图像 + 覆盖层 → 最终灰度图 */
+    /* 合成：输出图像 + 覆盖层 → 最终 RGB 图
+     * ★ 调度器已经在 DRAW 之后把覆盖层合成进输出图了，
+     *   所以这里拿到的 out 就是最终画面（含标注）。 */
     w = scut_frame_width();
     h = scut_frame_height();
     out = scut_bind_output();
 
-    snprintf(path, sizeof(path), "%s/frame_%04d.pgm", o->out_dir, frame_no);
-    write_pgm(path, out, w, h, w);
+    /* 输出图每像素 3 字节，所以行步长 = 宽度 × 3（不是宽度！）。 */
+    snprintf(path, sizeof(path), "%s/frame_%04d.ppm", o->out_dir, frame_no);
+    write_ppm(path, out, w, h, w * 3);
 
     /* 本帧真正用到的输入图路径，随帧一起报出去（JSON 的 "pic" 字段）。
      * ★ 为什么每帧都要报，而不是在开头报一次：
@@ -2328,8 +2338,13 @@ int main(int argc, char **argv)
         return 3;
     }
 
+    /* ★ 两个 stride 的单位不同，必须分别算：
+ *     输出图每像素 3 字节 → 字节步长 = 宽 × 3
+ *     覆盖层每像素 1 个 u32 → 元素步长 = 宽
+ *   写成同一个 scut_bind_width() 是最自然也最危险的错。 */
     scut_draw_bind(scut_bind_output(), scut_bind_overlay(),
-                   scut_bind_width(), scut_bind_height(), scut_bind_width());
+                   scut_bind_width(), scut_bind_height(),
+                   scut_bind_width() * 3, scut_bind_width());
 
     /* --- 2) 解析测试图集并加载第一张图 ---
      *
@@ -2404,7 +2419,7 @@ int main(int argc, char **argv)
     /* --- 5) 装帧钩子并运行 --- */
     scut_set_frame_sink(on_frame, &o);
 
-    /* 帧输出目录（PGM 落盘处）。失败不致命：写文件时会报具体错误。
+    /* 帧输出目录（PPM 落盘处）。失败不致命：写文件时会报具体错误。
      * ★ 必须在第一帧之前建好：sink 每帧都会往这里写。 */
     ensure_dir(o.out_dir);
 

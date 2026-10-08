@@ -71,8 +71,8 @@ def run(cmd, cwd=None):
                           timeout=600)
 
 
-def read_pgm(path):
-    """读 P5 PGM，返回像素 bytes。跳过 3 行头（P5 / 宽高 / 最大值）。"""
+def read_ppm(path):
+    """读 P6 PPM，返回像素 bytes。跳过 3 行头（P6 / 宽高 / 最大值）。"""
     with open(path, 'rb') as f:
         data = f.read()
     # 头部可能含注释，稳健地按行找到第三行结束
@@ -197,10 +197,10 @@ def main():
         check(len(frames) > 0, '帧 JSON 全部可解析（其中 %d 行是真正的帧）' % len(frames))
 
         # 输出图（sink 写的是环境的输出图，即被深拷贝进来的结果图）
-        pgms = sorted(n for n in os.listdir(frames_dir)) if os.path.isdir(frames_dir) else []
-        check(len(pgms) > 0, '落盘了 %d 张帧图' % len(pgms))
-        if pgms:
-            body = read_pgm(os.path.join(frames_dir, pgms[0]))
+        ppms = sorted(n for n in os.listdir(frames_dir)) if os.path.isdir(frames_dir) else []
+        check(len(ppms) > 0, '落盘了 %d 张帧图' % len(ppms))
+        if ppms:
+            body = read_ppm(os.path.join(frames_dir, ppms[0]))
             nonzero = sum(1 for b in body if b != 0)
             check(nonzero > 0,
                   '输出图非全黑（%d / %d 非零像素）—— 结果图深拷贝生效'
@@ -248,7 +248,7 @@ def main():
         with open(os.path.join(proj, 'scut_project.json'), 'w', encoding='utf-8') as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
 
-        before = read_pgm(os.path.join(frames_dir, pgms[0])) if pgms else b''
+        before = read_ppm(os.path.join(frames_dir, ppms[0])) if ppms else b''
 
         r4 = run([sys.executable, BUILD, '--project', proj,
                   '--toolchain', args.toolchain])
@@ -260,9 +260,9 @@ def main():
                   '接线单元仍调用结果图搬运（新数组）')
             frames2 = os.path.join(work, 'frames2')
             run([exe, '--frames', '1', '--json', '--out', frames2], cwd=proj)
-            pgms2 = sorted(n for n in os.listdir(frames2)) if os.path.isdir(frames2) else []
-            if check(len(pgms2) > 0, '换了结果图后仍产出帧图'):
-                after = read_pgm(os.path.join(frames2, pgms2[0]))
+            ppms2 = sorted(n for n in os.listdir(frames2)) if os.path.isdir(frames2) else []
+            if check(len(ppms2) > 0, '换了结果图后仍产出帧图'):
+                after = read_ppm(os.path.join(frames2, ppms2[0]))
                 check(after != before,
                       '输出图内容随「结果图数组名」改变 —— 配置确实被读取')
 

@@ -10,11 +10,13 @@
  *      旧实现把 SCUT_DrawPoint 写进 EasyX 的 DIB 缓冲。一旦换成
  *      headless / Webview 后端，用户所有绘制调用会【静默失效】：
  *      不报错、不崩溃，只是什么都不画 —— 极难排查。
- *      现在绘制只写覆盖层，覆盖层由 frame 模块合成进灰度输出图。
+ *      现在绘制只写覆盖层，覆盖层由 frame 模块合成进输出图。
  *      呈现层只负责「把数组变成图」，绘制语义因此与后端彻底解耦。
  *
  *  ★ 覆盖层坐标与输出图坐标严格同源（同 w/h/stride），
  *    这样「算法看到的像素」和「标注画在哪」不可能错位。
+ *    ⚠ 注意两者的 stride 单位不同（覆盖层是 u32 元素，输出图是字节），
+ *      见下面 s_ovl_stride / s_rgb_stride 的说明。
  * ========================================================================== */
 
 #include "scut_draw.h"
@@ -30,11 +32,19 @@
  *  ★ 全部零初始化（静态存储期保证）。零初始化 = 「未绑定」，
  *    这正是我们要的语义：任何绘制在任何绑定之前都必须安全地什么都不做。
  * ========================================================================== */
-static scut_u8  *s_gray    = NULL;   /* 灰度输出图（PROCESS 写、绘制不写） */
+static scut_u8  *s_gray    = NULL;   /* 输出图（RGB 三字节/像素，PROCESS 写、绘制不写） */
 static scut_u32 *s_overlay = NULL;   /* 彩色覆盖层（绘制唯一目标） */
-static int       s_w       = 0;      /* 宽度（列数） */
+static int       s_w       = 0;      /* 宽度（列数，单位：像素） */
 static int       s_h       = 0;      /* 高度（行数） */
-static int       s_stride  = 0;      /* 覆盖层行步长（单位：u32 元素，不是字节） */
+/* 行步长，单位【不同】，必须分开存 —— 这是本文件最容易出错的地方：
+ *     s_ovl_stride : 覆盖层的行步长，单位是 u32 元素数（每像素 1 个 u32）→ 宽
+ *     s_rgb_stride : 输出图的行步长，单位是【字节】（每像素 3 字节）→ 宽 × 3
+ *   之前输出图是单通道灰度，两者步长相同，共用一个 s_stride 就够了；
+ *   改成 RGB 之后两者【不再相等】，若继续共用一个，
+ *   要么覆盖层越界（步长偏小），要么 RGB 每隔一行就错位（步长偏大）——
+ *   后者画面是「正常」的条纹状错位，不崩不报错，最难查。 */
+static int       s_ovl_stride = 0;
+static int       s_rgb_stride = 0;
 
 /* --------------------------------------------------------------------------
  *  8x8 点阵字体（ASCII 32..126，共 95 个字形）
@@ -207,15 +217,29 @@ static void scut_draw_unbind(void)
     s_overlay = NULL;
     s_w       = 0;
     s_h       = 0;
-    s_stride  = 0;
+    s_ovl_stride = 0;
+    s_rgb_stride = 0;
 }
 
-void scut_draw_bind(scut_u8 *gray, scut_u32 *overlay, int w, int h, int stride)
+/* --------------------------------------------------------------------------
+ *  绑定
+ *
+ *  ★★ stride 参数的语义在本函数【内部就分成了两个】★★
+ *
+ *      gray_stride : 输出图的行步长，单位【字节】。RGB 三通道下
+ *                    必须 = 宽度 × 3。
+ *      ovl_stride  : 覆盖层的行步长，单位【u32 元素】。
+ *
+ *  以前输出图是单通道，两者步长相同，可以只收一个 stride。
+ *  现在必须分别校验 —— 只校验其中一个会让另一个静默错位。
+ * -------------------------------------------------------------------------- */
+void scut_draw_bind(scut_u8 *gray, scut_u32 *overlay, int w, int h,
+                    int gray_stride, int ovl_stride)
 {
     /* ★ 严格校验，任一不满足就整体解绑。
      *
-     * 为什么 stride < w 必须拒绝：
-     *   stride 是行步长，必须至少能容纳一整行像素。若 stride < w，
+     * 为什么两个 stride 都要检查：
+     *   stride 是行步长，必须至少能容纳一整行。若不足，
      *   第 1 行起就会与前一行重叠 —— 写入不崩溃，只是画面错位、
      *   数据互相覆盖。这类 bug 在 188x120 这种小图上表现为
      *   「图案看起来怪怪的」，极易被忽略，所以宁可直接拒绝绑定。
@@ -223,7 +247,8 @@ void scut_draw_bind(scut_u8 *gray, scut_u32 *overlay, int w, int h, int stride)
      * 为什么 gray 也要求非 NULL：
      *   DrawPoint 不写 gray，但 OutImageSet/Get 与合成都要用。
      *   要求两者同时有效，才能保证「绑定成功」= 整个模块可用。 */
-    if (gray == NULL || overlay == NULL || w <= 0 || h <= 0 || stride < w) {
+    if (gray == NULL || overlay == NULL || w <= 0 || h <= 0
+        || gray_stride < w * 3 || ovl_stride < w) {
         scut_draw_unbind();
         return;
     }
@@ -232,7 +257,8 @@ void scut_draw_bind(scut_u8 *gray, scut_u32 *overlay, int w, int h, int stride)
     s_overlay = overlay;
     s_w       = w;
     s_h       = h;
-    s_stride  = stride;
+    s_rgb_stride = gray_stride;
+    s_ovl_stride = ovl_stride;
 
     /* ★★ 绑定成功后【立即把覆盖层清成透明哨兵】 ★★
      *
@@ -254,7 +280,7 @@ void scut_draw_bind(scut_u8 *gray, scut_u32 *overlay, int w, int h, int stride)
      *     把它固化在绑定点，任何调用方（headless / Webview / 将来任何一个）
      *     都自动获得正确的初始状态。
      *
-     * ★ 顺序：必须在 s_overlay / s_h / s_stride 赋值【之后】调用，
+     * ★ 顺序：必须在 s_overlay / s_h / s_ovl_stride 赋值【之后】调用，
      *   因为它读的正是这几个字段。 */
     scut_draw_clear_overlay();
 }
@@ -264,7 +290,7 @@ void scut_draw_bind(scut_u8 *gray, scut_u32 *overlay, int w, int h, int stride)
  *
  *  ★ 为什么调度器需要这个函数（本函数存在的全部理由）：
  *      帧内顺序是 PRE_FRAME → PROCESS → POST_FRAME → DRAW → sink → REPORT。
- *      标注是在 DRAW 阶段画上去的，而呈现后端读的是灰度输出图，
+ *      标注是在 DRAW 阶段画上去的，而呈现后端读的是输出图，
  *      所以【必须有人把 overlay 合成进 gray】。谁来做？答案是由调度器
  *      在 DRAW 之后统一做 —— 这样每个呈现后端都自动获得正确的标注，
  *      不需要各自记得合成（后端一旦忘记，用户的标注就会全部静默消失，
@@ -333,7 +359,7 @@ void scut_draw_clear_overlay(void)
      * 于是可以直接用 memset(..., 0xFF) 而不是逐元素写 u32，
      * 既最快又不会因为忘记改填充值而写错。 */
     {
-        size_t total = (size_t)s_h * (size_t)s_stride;   /* 元素个数（u32） */
+        size_t total = (size_t)s_h * (size_t)s_ovl_stride;   /* 元素个数（u32） */
         memset(s_overlay, 0xFF, total * sizeof(scut_u32));
     }
 }
@@ -357,7 +383,7 @@ void SCUT_DrawPoint(int x, int y, scut_u32 color)
 
     /* stride 可能大于 w（例如整幅图里开了 ROI 窗口），
      * 所以行偏移必须用 stride 而不是 w —— 用错会整体错位。 */
-    s_overlay[(size_t)y * (size_t)s_stride + (size_t)x] = color;
+    s_overlay[(size_t)y * (size_t)s_ovl_stride + (size_t)x] = color;
 }
 
 void SCUT_DrawLine(int x0, int y0, int x1, int y1, scut_u32 color)
@@ -509,11 +535,18 @@ void SCUT_DrawText(int x, int y, scut_u32 color, const char *fmt, ...)
 }
 
 /* ==========================================================================
- *  输出图像（灰度）
- * ========================================================================== */
+ *  输出图像（RGB 三通道）
+ *
+ *  ★ 输出缓冲现在是 RGB（见 bind/scut_bind.c 的说明），
+ *    所以这里的行步长【必须乘 3】：s_stride 的单位是"字节"，
+ *    而 s_w 是像素数。漏掉这个 ×3 是最自然的错误 ——
+ *    症状是"每隔一个像素取一个"，画面看起来像稀疏噪点，
+ *    而且不崩、不报错。
+ * -------------------------------------------------------------------------- */
 
 void SCUT_OutImageSet(int x, int y, scut_u8 value)
 {
+    scut_u8 *p;
     if (s_gray == NULL) {
         return;   /* 未绑定：静默无效 */
     }
@@ -522,16 +555,39 @@ void SCUT_OutImageSet(int x, int y, scut_u8 value)
     if (x < 0 || x >= s_w || y < 0 || y >= s_h) {
         return;
     }
-    s_gray[(size_t)y * (size_t)s_stride + (size_t)x] = value;
+    p = s_gray + (size_t)y * (size_t)s_rgb_stride + (size_t)x * 3u;
+    p[0] = value;   /* R */
+    p[1] = value;   /* G */
+    p[2] = value;   /* B —— 灰度值写成等值三通道即为"灰" */
+}
+
+void SCUT_OutImageSetRGB(int x, int y, scut_u8 r, scut_u8 g, scut_u8 b)
+{
+    scut_u8 *p;
+    if (s_gray == NULL) {
+        return;
+    }
+    if (x < 0 || x >= s_w || y < 0 || y >= s_h) {
+        return;
+    }
+    p = s_gray + (size_t)y * (size_t)s_rgb_stride + (size_t)x * 3u;
+    p[0] = r;
+    p[1] = g;
+    p[2] = b;
 }
 
 scut_u8 SCUT_OutImageGet(int x, int y)
 {
+    const scut_u8 *p;
     if (s_gray == NULL) {
         return 0;
     }
     if (x < 0 || x >= s_w || y < 0 || y >= s_h) {
         return 0;   /* 越界读返回 0，不返回未定义值 */
     }
-    return s_gray[(size_t)y * (size_t)s_stride + (size_t)x];
+    p = s_gray + (size_t)y * (size_t)s_rgb_stride + (size_t)x * 3u;
+    /* 灰度算法读取时给【亮度】（三通道不等时才有区别；
+       等值时就是它自己，所以绝大多数调用方察觉不到这个选择）。 */
+    return (scut_u8)(((scut_u32)p[0] * 299u + (scut_u32)p[1] * 587u
+                      + (scut_u32)p[2] * 114u + 500u) / 1000u);
 }

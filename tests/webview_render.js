@@ -38,10 +38,10 @@ const mediaDir = path.join(root, 'extension', 'media');
 const simviewJs = fs.readFileSync(path.join(mediaDir, 'simview.js'), 'utf8');
 const simviewCss = fs.readFileSync(path.join(mediaDir, 'simview.css'), 'utf8');
 
-/* ---- 从真实 PGM 里取一帧像素，喂给前端 ---- */
-function loadPgm(file) {
+/* ---- 从真实 PPM 里取一帧像素，喂给前端 ---- */
+function loadPpm(file) {
     const buf = fs.readFileSync(file);
-    // 解析 P5 头：P5\n<w> <h>\n255\n
+    // 解析 P6 头：P6\n<w> <h>\n255\n
     let pos = 0;
     const nextTok = () => {
         while (pos < buf.length && /\s/.test(String.fromCharCode(buf[pos]))) pos++;
@@ -55,18 +55,18 @@ function loadPgm(file) {
     const h = parseInt(nextTok(), 10);
     nextTok();                       // maxval
     pos++;                           // 单个空白
-    return { width: w, height: h, gray: Array.from(buf.slice(pos, pos + w * h)) };
+    return { width: w, height: h, rgb: Array.from(buf.slice(pos, pos + w * h * 3)) };
 }
 
 /* ---- 组织一份"像仿真进程真的发过来"的消息序列 ---- */
 const files = fs.existsSync(framesDir)
-    ? fs.readdirSync(framesDir).filter((f) => f.endsWith('.pgm')).sort()
+    ? fs.readdirSync(framesDir).filter((f) => f.endsWith('.ppm')).sort()
     : [];
 if (!files.length) {
-    console.log('SKIP: 没有 PGM 帧可喂（先跑一次仿真）');
+    console.log('SKIP: 没有 PPM 帧可喂（先跑一次仿真）');
     process.exit(0);
 }
-const img = loadPgm(path.join(framesDir, files[0]));
+const img = loadPpm(path.join(framesDir, files[0]));
 
 // ★ 消息契约以 media/simview.js 里的 switch(msg.type) 为准，
 //   并且 values 的【类型】以 simsession.ts 为准：
@@ -257,7 +257,7 @@ const feed = `
                  : catalog.map((c) => c.name)))} });
       send({ type: 'frame', index: 1,
              width: ${img.width}, height: ${img.height},
-             gray: new Uint8Array(${JSON.stringify(img.gray)}),
+             rgb: new Uint8Array(${JSON.stringify(img.rgb)}),
              timing: { processUs: 258.7, drawUs: 4.2, frameUs: 295.9,
                        processCycles: 825600, cyclesValid: true } });
       send({ type: 'vars', snapshots: ${JSON.stringify(realSnapshots || snapshots)},
@@ -270,11 +270,17 @@ const feed = `
       var out = { errors: window.__errors, sent: window.__sent,
                   canvases: cs.length, painted: [] };
       cs.forEach(function (c, i) {
-          var rec = { size: c.width + 'x' + c.height, nonzero: 0 };
+          var rec = { size: c.width + 'x' + c.height, nonzero: 0, colored: 0 };
           try {
               var d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
-              for (var k = 0; k < d.length; k += 4)
+              for (var k = 0; k < d.length; k += 4) {
                   if (d[k] || d[k+1] || d[k+2]) rec.nonzero++;
+                  /* ★ 真彩色断言：三通道不全相等的像素数。
+                   *   覆盖层标注（红/绿/黄/青/品红）必须真的以颜色出现。
+                   *   曾经的核心把彩色按亮度折成灰度，这条断言会直接归零 ——
+                   *   那正是「绘制是彩色的，画面却是灰度」的成因。 */
+                  if (d[k] !== d[k+1] || d[k+1] !== d[k+2]) rec.colored++;
+              }
           } catch (e) { rec.err = String(e); }
           out.painted.push(rec);
       });
@@ -371,7 +377,8 @@ if (!m) {
         console.log('  canvas 数量      : ' + r.canvases);
         (r.painted || []).forEach(function (p, i) {
             console.log('  canvas[' + i + ']      : ' + p.size +
-                        '  非零像素=' + p.nonzero + (p.err ? '  错误=' + p.err : ''));
+                        '  非零像素=' + p.nonzero + '  非灰度像素=' + p.colored +
+                        (p.err ? '  错误=' + p.err : ''));
         });
         console.log('  变量面板条目数   : ' + r.varItems);
         console.log('  变量区 canvas 数 : ' + r.varCanvases +
@@ -382,12 +389,16 @@ if (!m) {
         console.log('  处理时间显示     : ' + JSON.stringify(r.tProcessText));
         console.log('  前端主动发的消息 : ' + JSON.stringify(r.sent).slice(0, 200));
 
-        // 判定：画面画出来了 + 变量有条目 + 变量区没有残留的折线图 canvas
+        // 判定：画面画出来了 + 有彩色标注 + 变量有条目 + 变量区没有残留的折线图 canvas
         const painted = (r.painted || []).some((p) => p.nonzero > 0);
+        const colored = (r.painted || []).some((p) => p.colored > 0);
         const noSpark = r.varCanvases === 0;
-        const pass = r.canvases > 0 && painted && r.varItems > 0 && noSpark;
+        const pass = r.canvases > 0 && painted && colored && r.varItems > 0 && noSpark;
         console.log('\n  ==> 渲染判定: ' +
-            (pass ? '✅ 画面已绘制、变量面板有条目、变量区无折线图'
-                   : '❌ 未通过' + (noSpark ? '' : '（变量区还有 canvas）')));
+            (pass ? '✅ 画面已绘制、彩色标注可见、变量面板有条目、变量区无折线图'
+                   : '❌ 未通过'
+                     + (painted ? '' : '（画面全黑）')
+                     + (colored ? '' : '（没有非灰度像素：彩色标注没透传）')
+                     + (noSpark ? '' : '（变量区还有 canvas）')));
     }
 }

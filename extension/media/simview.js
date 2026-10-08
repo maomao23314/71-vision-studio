@@ -11,7 +11,7 @@
  *    asWebviewUri 出去的，源码即产物 —— 少一层就少一处会坏的地方。
  *
  *  ★ 协议（与 src/simview.ts 严格对应）：
- *    收到 {type:'frame', index,width,height,gray,timing}
+ *    收到 {type:'frame', index,width,height,rgb,timing}
  *    收到 {type:'vars',  snapshots:[{name,values[],truncated,total,dims,kind}], frame, timing}
  *    收到 {type:'catalog', variables:[...], selected:[...]}
  *    收到 {type:'status', running, exePath}
@@ -152,18 +152,23 @@
     rgba = imageData.data;
   }
 
-  function drawGray(gray, w, h) {
+  /* 图像是 RGB 三通道（每像素 R/G/B 三字节）→ canvas 的 RGBA。
+   *
+   * ★ alpha 一次性置 255（只在缓冲区重建时做）：每帧都写一遍纯属浪费，
+   *   而 alpha 恒为不透明，所以只写一次完全等价。
+   * ★ RGB 三字节直接抄进 RGBA 的前三槽即可，不需要任何换算 ——
+   *   这正是把输出缓冲从灰度改成真彩色之后最大的好处：
+   *   从"灰度扩成三通道"变成了"原样搬运"。 */
+  function drawRgb(rgb, w, h) {
     if (!ctx) {
       return;
     }
     ensureBuffers(w, h);
     var n = w * h;
-    // 灰度 → RGBA。alpha 一次性置 255（只在缓冲区重建时做）。
-    for (var i = 0, j = 0; i < n; i++, j += 4) {
-      var v = gray[i];
-      rgba[j] = v;
-      rgba[j + 1] = v;
-      rgba[j + 2] = v;
+    for (var i = 0, j = 0, k = 0; i < n; i++, j += 4, k += 3) {
+      rgba[j] = rgb[k];
+      rgba[j + 1] = rgb[k + 1];
+      rgba[j + 2] = rgb[k + 2];
       rgba[j + 3] = 255;
     }
     ctx.putImageData(imageData, 0, 0);
@@ -819,12 +824,12 @@ bind('btn-debug', function () { vscode.postMessage({ type: 'cmd', cmd: 'debug' }
     switch (msg.type) {
       case 'frame': {
         try {
-          var gray = msg.gray;
+          var rgb = msg.rgb;
           // 结构化克隆过来的是 Uint8Array；个别情况下可能是 ArrayBuffer
-          if (gray instanceof ArrayBuffer) {
-            gray = new Uint8Array(gray);
+          if (rgb instanceof ArrayBuffer) {
+            rgb = new Uint8Array(rgb);
           }
-          drawGray(gray, msg.width, msg.height);
+          drawRgb(rgb, msg.width, msg.height);
           showTiming(msg.timing, msg.index);
           // 显示本帧用的是哪张输入图 —— 逐帧推进时这是用户最先想知道的信息
           if (el.picInfo) {
