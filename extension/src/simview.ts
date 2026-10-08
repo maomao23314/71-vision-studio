@@ -22,7 +22,6 @@ import type { FramePacket, VariableManifest, VariableSnapshot, WatchedVariable }
 
 /** 视图 id（必须与 package.json 的 contributes.views 一致）。 */
 export const SIM_VIEW_ID = 'scut71.simview';
-export const VARS_VIEW_ID = 'scut71.variables';
 
 /** 视图种类：'sim' 会接收帧画面，'vars' 只显示变量面板（避免两处重复收帧）。 */
 type ViewKind = 'sim' | 'vars';
@@ -566,8 +565,7 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
 
     /* ------------------------------------------------------------ HTML */
 
-    private html(webview: vscode.Webview, kind: ViewKind,
-                surface: 'sidebar' | 'panel' = 'sidebar'): string {
+    private html(webview: vscode.Webview, kind: ViewKind): string {
         const nonce = crypto.randomBytes(16).toString('base64');
         const mediaRoot = vscode.Uri.joinPath(this.extensionUri, 'media');
         const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaRoot, 'simview.js'));
@@ -594,7 +592,7 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
 <link rel="stylesheet" href="${styleUri}">
 <title>SCUT-71 仿真视图</title>
 </head>
-<body data-kind="${kind}" data-surface="${surface}">
+<body data-kind="${kind}">
   <div id="app">
     <section id="screen-section">
       <div id="screen-wrap">

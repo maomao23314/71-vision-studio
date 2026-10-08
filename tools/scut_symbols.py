@@ -95,6 +95,16 @@ ATTR_RE = re.compile(r'^\s*<[0-9a-fA-F]+>\s+(DW_AT_\w+)\s*:\s*(.*)$',
 #       error: 'c' undeclared (first use in this function)
 FILE_SCOPE_DEPTH = 1
 
+# 图像尺寸的【展示用】副本，由 --image-size 传入（格式 "188x120"）。
+#
+# ★ 为什么让构建脚本传进来、而不在这里重新解析 config.h：
+#   尺寸的真值来源是 scut_project.json，而构建脚本已经读过它了。
+#   在这里再解析一遍等于把"同一件事有多个权威"引入进来 ——
+#   将来改了配置格式就会有一处漏改，而漏改的表现是错误提示里的数字不对，
+#   比不显示数字更误导人。
+#   它只用于错误信息，不参与任何生成逻辑，所以缺省值是安全的。
+IMAGE_SHAPE = "由工程配置决定的整幅图像尺寸"
+
 # objdump 对较长的字符串用间接引用，形如：
 #     DW_AT_name : (indirect string, offset: 0xa4): int
 # ★ 必须剥掉这个前缀，否则 'int' 会被当成未知类型名而退化为「按字节数猜」，
@@ -105,6 +115,15 @@ INDIRECT_RE = re.compile(r'^\(indirect string, offset: 0x[0-9a-f]+\):\s*')
 def clean_name(s):
     """剥掉 objdump 的 (indirect string, offset: ...) 前缀与首尾空白。"""
     return INDIRECT_RE.sub('', (s or '').strip()).strip()
+
+
+class CopyShapeError(Exception):
+    """结果图数组的形状不对（不是数组）。
+
+    ★ 单独开一个异常类型（而不是复用通用 Exception）是为了让
+      scut_build.py 能把它和"生成器内部出错"区分开：
+      前者是【用户配置问题】，要给可执行的下一步；
+      后者是脚本 bug，要给调用栈。两类问题的措辞完全不同。"""
 
 
 class Die:
@@ -325,34 +344,66 @@ def _copy_fn_text(out_array, variables):
       结果图数组的类型与作用域只有展开用户源码之后才知道 ——
       它可能是 static。放在包装单元里，这点不是问题。
 
-    ★★ 为什么地址写成 `(const unsigned char *)arr` 而不是 `&arr[0][0]`：
-      前者对一维、二维数组【都能编译】（数组名退化成"指向首元素的指针"，
-      地址值相同）；后者只对二维生效，一维数组会直接编译失败。
-      用户的数组长什么样我们事先不知道，所以选两边都成立的那种写法。
+    ★★ 为什么一定要在这里做「形状检查」★★
 
-    ★★ 为什么宽高传 0：
-      SCUT_EnvCopyOutput 的约定是「0 = 用环境的宽高」，而"结果图与
-      输入图同尺寸"是绝大多数情况。于是尺寸完全交给环境，
-      生成器不需要知道任何维度信息 —— 也就不依赖 DWARF 解析成功。
-      （DWARF 解析失败时构建会降级为直接编译原文件，
-        那条路径下没有变量表；依赖它的写法会在那里静默失效。）
+      SCUT_EnvCopyOutput(ptr, 0, 0) 的约定是"用环境的宽高"，
+      于是环境会按 H 行 × W 列去 memcpy。
+
+      如果用户填的是一个【标量】（例如 int g_threshold），
+      那么 `(const unsigned char *)g_threshold` 仍然是合法 C ——
+      编译通过、链接通过、运行不崩，只是每帧从那 4 字节的变量后面
+      越界读走约 22 KB，然后显示一张垃圾图。
+
+      这类错误【没有任何报错】，所以必须在生成期用 DWARF 里的维度信息
+      拦下来。代价是"DWARF 解析失败时无法生成搬运函数"，
+      但那条路径本来就已经降级为"不要变量清单"了，
+      而且此时生成的错误信息比越界读好得多。
+
+    ★ 尺寸传 0（=用环境尺寸）而不是写死维度：
+      结果图与输入图同尺寸是最常见的情况，交给环境统一处理更稳。
+      形状检查【单独做】，不靠传参兜底 —— 这样一维数组也不会被
+      当成 W×H 去越界读。
     """
     if not out_array:
         return ""
-    # ★★ 只在【声明了这个数组的文件】里生成函数体 ★★
-    #
-    #   每个 code/*.c 都会生成一个包装单元，而它们都会被链接进同一个程序。
-    #   如果每个包装单元都定义 scut_env_copy_output，链接期就是
-    #   "multiple definition" —— 而且报错信息指向生成文件，
-    #   用户完全看不懂（那文件他根本没写过）。
-    #
-    #   变量表里出现了这个数组，就说明它声明在本文件里（包装单元 =
-    #   #include 用户源码），于是"谁声明谁定义"，全局恰好一份。
-    owned = any(v['name'] == out_array for v in variables)
-    if not owned:
-        return (
-            "\n/* `%s` 不在本文件里声明 —— 搬运函数由声明它的那个\n"
-            " * 编译单元生成（全局只能有一份定义）。 */\n" % out_array)
+
+    # 找到这个数组在本文件里的声明
+    v = None
+    for cand in variables:
+        if cand['name'] == out_array:
+            v = cand
+            break
+
+    if v is None:
+        # 不在本文件里：要么是别的 TU 声明它（那由那个 TU 生成），
+        # 要么用户填错了名字（构建脚本最后会给出明确报错）。
+        return ("\n/* `%s` 不在本文件里声明 —— 搬运函数由声明它的那个\n"
+                " * 编译单元生成（全局只能有一份定义）。 */\n" % out_array)
+
+    dims = v['dims']
+    if len(dims) < 1:
+        raise CopyShapeError(
+            "「结果图数组名」指向的不是数组，而是一个标量：%s\n"
+            "    为什么必须拦住：环境要按【整幅图像】（%s）去读它，\n"
+            "    但这个变量只有 %d 个字节 —— 于是每帧都会越界读走一大片内存，\n"
+            "    得到一个垃圾画面，而且【不报错、不崩溃】，极难查到根因。\n"
+            "    下一步（任选其一）：\n"
+            "      1) 把它改成你代码里真正存放结果图的数组"
+            "（例如 unsigned char g_binary[SCUT_IMAGE_H][SCUT_IMAGE_W]）；\n"
+            "      2) 或者把这个设置留空 —— 画面将显示输入图本身。"
+            % (out_array, IMAGE_SHAPE, v['elem_bytes']))
+
+    # 元素个数：总元素数 / 元素字节数 = 元素个数
+    if len(dims) == 1:
+        # 一维数组：当作"一行"处理（高度 1）。不能当成 W×H 读，
+        # 那会越界；也不能拒绝，因为一维结果图是合理用法。
+        src = "&%s[0]" % out_array
+        w, h = dims[0], 1
+    else:
+        # 二维及更高：取【最后两维】当宽高，与 C 的 [行][列] 一致。
+        src = "&%s[0][0]" % out_array
+        w, h = dims[-1], dims[-2]
+
     return (
         "\n/* ------------------------------------------------------------------\n"
         " *  把结果图搬进环境输出图（逐像素深拷贝）。\n"
@@ -361,16 +412,14 @@ def _copy_fn_text(out_array, variables):
         " *    指向图像像素的指针表（逆透视等）。那些表的元素是地址，\n"
         " *    换掉目标缓冲会让它们集体悬空 —— 读随机内存、不报错。\n"
         " *\n"
-        " *  ★ 为什么地址用 `(const unsigned char *)%s`：\n"
-        " *    这种写法对一维、二维数组都能编译；&%s[0][0] 只对\n"
-        " *    二维生效。宽高传 0 表示交给环境按自己的尺寸处理，\n"
-        " *    于是这里不需要知道任何维度信息。\n"
+        " *  ★ 尺寸来自 DWARF 里的真实声明（%d x %d），\n"
+        " *    不是猜的 —— 填错形状会越界读，而那种错误不会报错。\n"
         " * ------------------------------------------------------------------ */\n"
         "void scut_env_copy_output(void)\n"
         "{\n"
-        "    SCUT_EnvCopyOutput((const unsigned char *)%s, 0, 0);\n"
+        "    SCUT_EnvCopyOutput((const unsigned char *)%s, %d, %d);\n"
         "}\n"
-        % (out_array, out_array, out_array))
+        % (w, h, src, w, h))
 
 
 def _emit_wrapper(args, variables):
@@ -439,7 +488,14 @@ def main():
     ap.add_argument('--output-array', default='',
                     help='结果图数组名。若它声明在本文件里，则生成'
                          'scut_env_copy_output() 供环境接线单元调用')
+    ap.add_argument('--image-size', default='',
+                    help='图像尺寸（"188x120"），只用于错误提示的措辞')
     args = ap.parse_args()
+
+    # 只影响错误信息的措辞，所以解析失败也不报错。
+    if args.image_size:
+        global IMAGE_SHAPE
+        IMAGE_SHAPE = args.image_size.replace('x', ' 行 × ') + " 列"
 
     r = subprocess.run([args.objdump, '--dwarf=info', args.obj],
                        capture_output=True, text=True, errors='replace')
@@ -487,7 +543,13 @@ def main():
         variables = [v for v in variables if v['total'] <= args.max_elems]
     variables.sort(key=lambda v: v['name'])      # 稳定可复现
 
-    _emit_wrapper(args, variables)
+    try:
+        _emit_wrapper(args, variables)
+    except CopyShapeError as exc:
+        # 用户配置问题：把中文说明原样打到 stderr 并给出专用退出码，
+        # 由 scut_build.py 转成构建错误（而不是让它冒成调用栈）。
+        print('[scut_symbols] %s' % exc, file=sys.stderr)
+        return 4
     _emit_manifest(args, variables)
 
     print('[scut_symbols] %s: 发现 %d 个全局变量 -> %s'

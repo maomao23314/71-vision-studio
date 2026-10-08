@@ -81,25 +81,32 @@ def main():
     args = ap.parse_args()
     proj = args.project
 
-    banner("1/7  端到端：模板工程 → 零注册用户代码 → 构建 → 运行")
+    banner("1/8  端到端：模板工程 → 零注册用户代码 → 构建 → 运行")
     # ★ 这条排在第一位：它验证的是【设计理念本身】（用户代码零注册、
     #   环境接管图像管道、配置真的生效）。后面的测试都是组件级的，
     #   组件都对但主线断了，这个环境依然是不可用的。
     run("e2e", [PY, os.path.join(HERE, "test_e2e_pipeline.py")])
 
-    banner("2/7  自动符号发现（35 变量 × gcc + clang）")
+    banner("2/8  接线单元边界（三条"静默算错"缺陷的回归）")
+    # ★ 这三条都是"构建成功、运行正常、结果悄悄是错的"：
+    #   同函数填两阶段（性能数字少一半）、--no-watch 重复定义、
+    #   结果图数组名指向标量（越界读）。它们不会让任何东西看起来坏掉，
+    #   所以必须有专门的测试盯着。
+    run("glue-edges", [PY, os.path.join(HERE, "test_glue_edges.py")])
+
+    banner("3/8  自动符号发现（35 变量 × gcc + clang）")
     run("symbols", [PY, os.path.join(HERE, "test_symbols.py"),
                     "--cc", "gcc", "--also", CLANG])
 
-    banner("3/7  JSON 协议合法性（插件依赖它）")
+    banner("4/8  JSON 协议合法性（插件依赖它）")
     run("json", [PY, os.path.join(HERE, "check_json_protocol.py")])
 
-    banner("4/7  插件纯逻辑（协议解析 / PGM / 诊断）")
+    banner("5/8  插件纯逻辑（协议解析 / PGM / 诊断）")
     run("extension", ["node", os.path.join(HERE, "extension_smoke.js"),
                       os.path.join(proj, ".scut", "frames"),
                       os.path.join(proj, ".scut", "bin", "scut_sim.exe")])
 
-    banner("5/7  调试器真实 DAP 会话（lldb-dap）")
+    banner("6/8  调试器真实 DAP 会话（lldb-dap）")
     # ★ 用户源文件名不再是固定的 main.c（模板默认给的是 camera.c，
     #   而且用户可以任意命名）。所以这里动态挑一个真实存在的 .c，
     #   避免测试因为"模板换了默认文件名"而误报失败。
@@ -119,7 +126,7 @@ def main():
                 os.path.join(proj, ".scut", "bin", "scut_sim.exe"),
                 user_c_src])
 
-    banner("6/7  Webview 渲染（真实 Chromium + 真实帧数据）")
+    banner("7/8  Webview 渲染（真实 Chromium + 真实帧数据）")
     wv_out = os.path.join(tempfile.gettempdir(), "scut_wv_test")
     ok, out = run("webview", ["node", os.path.join(HERE, "webview_render.js"),
                               os.path.join(proj, ".scut", "frames"), wv_out])
@@ -129,7 +136,7 @@ def main():
         print("  --> ❌ 脚本成功退出，但渲染判定未通过")
 
     if args.also_cn:
-        banner("7/7  端到端（含空格 + 中文的工程路径）")
+        banner("8/8  端到端（含空格 + 中文的工程路径）")
         cn = os.path.join(tempfile.gettempdir(), "scut proj 中文", "demo")
         if os.path.isdir(cn):
             run("cn-e2e", ["node", os.path.join(HERE, "extension_smoke.js"),
@@ -138,7 +145,7 @@ def main():
         else:
             print("  SKIP  中文路径工程不存在：%s" % cn)
     else:
-        banner("7/7  跳过（用 --also-cn 启用中文路径端到端）")
+        banner("8/8  跳过（用 --also-cn 启用中文路径端到端）")
 
     banner("汇总")
     npass = sum(1 for _, ok, _ in results if ok)

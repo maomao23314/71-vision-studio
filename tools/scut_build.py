@@ -1048,6 +1048,42 @@ def write_glue(gen_dir: str, cfg: Dict[str, Any]) -> str:
     all_names = list(dict.fromkeys(init_names + frame_names + post_names))
     decls = "\n".join("void %s(void);" % n for n in all_names)
 
+    # ★★ 同一个函数【不允许】被填进两个阶段 ★★
+    #
+    #   这条检查不是形式主义。它挡住的是一类"看起来完全正常、数字却是错的"缺陷：
+    #
+    #     把 image_process 同时填进「图像处理」和「后处理」时，
+    #     它会每帧跑【两遍】—— 一遍在计时的 PROCESS 里，一遍在不计时的 DRAW 里。
+    #     于是 processUs 只统计到其中一遍，而实际工作量翻倍：
+    #     报出来的算法耗时凭空少了一半，而画面、日志、变量全都正常。
+    #     用户拿这个数字去比较算法、判断优化效果，结论会直接错。
+    #
+    #   这比"直接报错"更危险的地方在于它【不报错】：构建成功、运行正常、
+    #   只有性能数字是假的。所以宁可在构建期拦住，并说清为什么。
+    #
+    #   （如果确实需要在两个阶段都做点什么，正确做法是写两个不同的函数，
+    #     让"哪一段该被计时"这件事在代码里是明确的。）
+    seen_phase: Dict[str, str] = {}
+    phase_of = ([(n, "初始化") for n in init_names]
+                + [(n, "图像处理") for n in frame_names]
+                + [(n, "后处理") for n in post_names])
+    for nm, ph in phase_of:
+        if nm in seen_phase:
+            raise ConfigParseError(
+                "同一个函数被填进了两个阶段：%s\n"
+                "    它同时出现在「%s」和「%s」里，于是每帧会被调用两次。\n"
+                "    为什么必须拦住：其中只有一次算进「处理时间」，"
+                "另一次不算 —— 报出来的算法耗时凭空少了一半，\n"
+                "    而画面、变量、日志全都正常，属于「数字是假的但看不出错」"
+                "的那一类问题。\n"
+                "    下一步（任选其一）：\n"
+                "      1) 从其中一个阶段删掉它"
+                "（多数情况应该只留在「图像处理」里）；\n"
+                "      2) 如果确实两个阶段都要做，请写成两个不同的函数，"
+                "让「哪一段该被计时」在代码里明确下来。"
+                % (nm, seen_phase[nm], ph))
+        seen_phase[nm] = ph
+
     def _calls(names: List[str]) -> str:
         if not names:
             return "    /* （未配置，本阶段不做任何事） */"
@@ -1313,6 +1349,9 @@ class UnitJob:
         self.ok = True
         self.used_wrapper = False
         self.warnings: List[str] = []
+        # 用户配置错误（不是编译错误）：整条构建要立刻停下并原文报出，
+        # 不能降级、不能继续 —— 见 build_one_unit 里对退出码 4 的处理。
+        self.config_error: str = ""
 
 
 def normalize_probe_obj_dwarf(objcopy: str, obj_path: str,
@@ -1388,6 +1427,7 @@ def build_one_unit(job: UnitJob, cc: str, objdump: str, python: str,
                    symbols_tool: str, base_flags: List[str], mode_flags: List[str],
                    probe_flags: List[str], include_dirs: List[str],
                    objcopy: str, auto_watch: bool, output_array: str,
+                   output_owner: Optional[str], image_size: str,
                    reporter: Reporter, log_lock: threading.Lock,
                    logs: List[str], proj: "Project") -> bool:
     """
@@ -1410,9 +1450,11 @@ def build_one_unit(job: UnitJob, cc: str, objdump: str, python: str,
         #   旧实现把两者绑在一起，于是关掉 autoWatch 就会得到一个
         #   链接错误（scut_env_copy_output 未定义）。
         #
-        # ★ 这里不需要 DWARF：搬运函数只用到【数组名】，
-        #   地址与尺寸的判断都交给编译器（见 scut_symbols._copy_fn_text）。
-        if output_array:
+        # ★★ 只有【数组的所有者】那个文件生成搬运函数 ★★
+        #   每个用户 .c 都参与链接；若人人都定义一遍，链接期就是
+        #   duplicate symbol —— 而报错指向生成文件，用户完全看不懂。
+        #   所有者由 find_output_owner 在 do_build 里预先探查好传进来。
+        if output_array and output_owner == job.src:
             with open(job.wrapped, "w", encoding="utf-8") as f:
                 f.write('/* 由 scut_build.py 生成（--no-watch 薄包装）：'
                         '只放结果图搬运，不做符号发现。 */\n')
@@ -1475,6 +1517,10 @@ def build_one_unit(job: UnitJob, cc: str, objdump: str, python: str,
             # 结果图数组名交给生成器：只有它展开了用户源码，
             # 才知道这个数组的真实类型与作用域。
             gen_cmd += ["--output-array", output_array]
+        if image_size:
+            # 尺寸只用于错误提示的措辞（"环境要按 120 行 × 188 列去读它"），
+            # 不参与任何生成逻辑 —— 真值来源始终是工程配置。
+            gen_cmd += ["--image-size", image_size]
         reporter.detail("  [2/3 生成] $ " + " ".join(
             '"%s"' % a if " " in a else a for a in gen_cmd))
         env = dict(os.environ)
@@ -1483,6 +1529,26 @@ def build_one_unit(job: UnitJob, cc: str, objdump: str, python: str,
         env["PYTHONUTF8"] = "1"
         r = run_cmd(gen_cmd, env=env)
         _append(r.out)
+        if r.code == 4:
+            # ★ 退出码 4 = 生成器发现【用户配置问题】（结果图数组名指向标量）。
+            #
+            #   这里【绝不能】降级为"直接编译原文件"：
+            #   那样会得到一个"构建成功但图是垃圾"的结果，
+            #   而用户配置错了这件事就被彻底掩盖了 —— 那正是要避免的。
+            #
+            #   ★ 保留完整的多行说明，只剥掉生成器的 [scut_symbols] 前缀：
+            #     "为什么必须拦住 / 下一步"才是用户真正要读的，
+            #     只取第一行等于把最有用的部分丢掉。
+            raw = (r.out or "").strip() or "结果图数组的形状不合法。"
+            kept = []
+            for line in raw.splitlines():
+                s = line.strip()
+                if s.startswith("[scut_symbols]"):
+                    s = s[len("[scut_symbols]"):].strip()
+                kept.append(s)
+            job.config_error = "\n".join(kept).strip()
+            job.ok = False
+            return False
         if r.code != 0 or not os.path.isfile(tmp_c):
             job.warnings.append(
                 "自动符号发现失败（%s），已改为直接编译原文件。"
@@ -1547,6 +1613,83 @@ def _thin_copy_fn(out_array: str) -> str:
         "{\n"
         "    SCUT_EnvCopyOutput((const unsigned char *)%s, 0, 0);\n"
         "}\n" % out_array)
+
+
+def _thin_copy_fn(out_array: str) -> str:
+    """
+    生成结果图搬运函数（--no-watch 路径用）。
+
+    ★ 为什么不复用 scut_symbols._copy_fn_text：
+      那条路径会顺手把变量清单也生成出来。--no-watch 的语义就是
+      "不要变量清单"，所以这里只写搬运函数本身，保持职责清晰。
+
+    ★ 宽高为什么传 0（= 用环境的宽高）：
+      这条路径刻意不做 DWARF 分析，拿不到数组维度。
+      形状安全性由 find_output_owner 的探针保证 ——
+      探针里带 sizeof(arr[0][0])，标量会在那里就被排除掉。
+    """
+    return (
+        "\n/* 把结果图搬进环境的输出图（逐像素深拷贝）。\n"
+        " * 深拷贝而不是换指针：算法里的逆透视指针表指向原图，\n"
+        " * 换掉目标缓冲会让它们集体悬空。 */\n"
+        "void scut_env_copy_output(void)\n"
+        "{\n"
+        "    SCUT_EnvCopyOutput((const unsigned char *)%s, 0, 0);\n"
+        "}\n" % out_array)
+
+
+def find_output_owner(sources: List[str], out_array: str, cc: str,
+                      base_flags: List[str], include_dirs: List[str],
+                      tmp_dir: str) -> Optional[str]:
+    """
+    在 --no-watch 路径下找出【哪一个用户 .c 声明了结果图数组】。
+
+    ★★ 为什么必须找出唯一的所有者 ★★
+
+      每个用户 .c 都会生成一个包装单元，而它们都参与链接。
+      如果每个包装单元都定义 scut_env_copy_output()，链接期就是
+      "duplicate symbol: scut_env_copy_output" —— 而报错指向生成文件，
+      用户完全看不懂（那文件他根本没写过）。
+
+      自动符号发现那条路靠 DWARF 的变量表判断归属；
+      --no-watch 明确不做 DWARF 分析，所以这里用【编译器本身】当判据。
+
+    ★ 为什么拿编译器当判据是合理的（而不是 hack）：
+      "这个数组在本文件里可见吗、它是不是数组" 本质上是编译期问题，
+      编译器就是唯一权威。我们让每个候选文件试编译一小段代码，
+      谁通过谁就是所有者。它顺带还挡掉了"填了个标量"这种误配 ——
+      因为探针里对非数组的 sizeof 写法根本编不过。
+
+    ★ 代价：最坏情况 N 次小编译（N = 用户 .c 个数，通常 1~5）。
+      --no-watch 是"跳过 DWARF 分析"的快速路径，
+      这点开销仍远小于一次 DWARF 解析 + 包装生成，没有违背它的语义。
+
+    返回所有者源文件的绝对路径；一个都不行时返回 None。
+    """
+    for src in sources:
+        probe = os.path.join(tmp_dir, "owner_probe.c")
+        obj = os.path.join(tmp_dir, "owner_probe.o")
+        try:
+            with open(probe, "w", encoding="utf-8") as f:
+                f.write('#include "scut_sdk.h"\n')
+                # ★ #include 用户源码而不是链接它：
+                #   #include 能看到 static 变量，链接看不到。
+                f.write('#include "%s"\n' % os.path.basename(src))
+                # 探针本体：既证明可见性，又证明它是【二维数组】。
+                # 对标量/一维数组，第二行 sizeof 编不过 —— 正是我们要的判据。
+                f.write("void scut_owner_probe(void)\n{\n")
+                f.write("    (void)sizeof(%s[0]);\n" % out_array)
+                f.write("    (void)sizeof(%s[0][0]);\n" % out_array)
+                f.write("}\n")
+        except OSError:
+            continue
+        # -I 用户源码所在目录：探针在 .scut 下，要用 basename 形式 #include 它。
+        cmd = ([cc] + base_flags + ["-I" + os.path.dirname(src)]
+               + include_dirs + ["-c", probe, "-o", obj])
+        rc = run_cmd(cmd)
+        if rc.code == 0:
+            return src
+    return None
 
 
 def _fallback_compile(job: UnitJob, cc: str, base_flags: List[str],
@@ -1971,12 +2114,46 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
     # 生成 scut_env_copy_output()。不在这里生成，是因为只有展开了用户
     # 源码才看得见该数组的真实类型与作用域。
     out_array = str(cfg.get("outputArray") or "").strip()
+    # 尺寸字符串只用于错误提示的措辞，不参与生成逻辑。
+    img_shape = "%d 行 × %d 列" % (img_h, img_w) if (img_w and img_h) else ""
+
+    # --no-watch 路径没有 DWARF 可用，所以事先用编译器探出数组的归属文件。
+    # 这一步只在真的需要搬运函数时才做（否则纯属浪费）。
+    out_owner: Optional[str] = None
+    if out_array and not auto_watch:
+        with timer.stage("定位结果图数组"):
+            probe_dir = tempfile.mkdtemp(prefix="scut_own_", dir=proj.scut_dir)
+            try:
+                out_owner = find_output_owner(sources, out_array, tc.cc,
+                                              base_flags, include_dirs,
+                                              probe_dir)
+            finally:
+                shutil.rmtree(probe_dir, ignore_errors=True)
+        if out_owner is None:
+            reporter.error(
+                "设置里指定的「结果图数组名」在 code/ 里找不到：%s\n"
+                "    原因：没有哪个 code/*.c 能在文件作用域里看到这个名字，\n"
+                "    或者它指向的不是二维数组"
+                "（环境要按【%s】的图像去读它）。\n"
+                "    下一步（任选其一）：\n"
+                "      1) 把它改成你代码里真正存放结果图的数组名"
+                "（例如 unsigned char g_binary[SCUT_IMAGE_H][SCUT_IMAGE_W]）；\n"
+                "      2) 或者把这个设置留空 —— 画面将显示输入图本身。\n"
+                "    说明：数组名填错只会影响「处理后的图像」显示，"
+                "不影响算法的编译与运行。"
+                % (out_array, img_shape or "环境配置的"))
+            timer.report()
+            return finish(2)
+        reporter.human("  结果图数组 : %s（声明在 %s）"
+                       % (out_array, os.path.relpath(out_owner, proj.root)))
+
     with timer.stage("编译用户代码（%d 个文件）" % len(jobs)):
         if workers == 1 or len(jobs) == 1:
             for j in jobs:
                 build_one_unit(j, tc.cc, tc.objdump, tc.python,
                                SYMBOLS_TOOL, base_flags, mode_flags, probe_flags,
                                include_dirs, objcopy, auto_watch, out_array,
+                               out_owner, img_shape,
                                reporter, log_lock, logs, proj)
         else:
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
@@ -1984,6 +2161,7 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
                     build_one_unit, j, tc.cc, tc.objdump, tc.python,
                     SYMBOLS_TOOL, base_flags, mode_flags, probe_flags,
                     include_dirs, objcopy, auto_watch, out_array,
+                    out_owner, img_shape,
                     reporter, log_lock, logs, proj)
                     for j in jobs]
                 concurrent.futures.wait(futs)
@@ -1991,6 +2169,18 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
     for j in jobs:
         for w in j.warnings:
             reporter.warn("%s：%s" % (os.path.relpath(j.src, proj.root), w))
+
+    # --- 6) 用户配置错误：立刻停下，原文报出 --------------------------------
+    #
+    # ★ 为什么必须在编译/链接【之前】拦下来：
+    #   这类错误（例如结果图数组名指向一个标量）不会让编译失败，
+    #   而是让程序每帧越界读一大片内存 —— 画面是垃圾，但不报错、不崩溃。
+    #   继续构建只会把一个"看不出来的错误"交付给用户。
+    for j in jobs:
+        if j.config_error:
+            reporter.error(j.config_error)
+            timer.report()
+            return finish(2)
 
     # --- 6a) 确认结果图搬运函数确实被生成了 ---------------------------------
     #
