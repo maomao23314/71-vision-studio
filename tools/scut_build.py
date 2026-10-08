@@ -1424,7 +1424,7 @@ def normalize_probe_obj_dwarf(objcopy: str, obj_path: str,
 
 
 def build_one_unit(job: UnitJob, cc: str, objdump: str, python: str,
-                   symbols_tool: str, base_flags: List[str], mode_flags: List[str],
+                   symbols_tool: str, base_flags: List[str], user_flags: List[str],
                    probe_flags: List[str], include_dirs: List[str],
                    objcopy: str, auto_watch: bool, output_array: str,
                    output_owner: Optional[str], image_size: str,
@@ -1461,10 +1461,10 @@ def build_one_unit(job: UnitJob, cc: str, objdump: str, python: str,
                 f.write('#include "scut_sdk.h"\n')
                 f.write('#include "%s"\n' % job.rel)
                 f.write(_thin_copy_fn(output_array))
-            cmd = [cc] + base_flags + mode_flags + include_dirs + \
+            cmd = [cc] + base_flags + user_flags + include_dirs + \
                   ["-c", job.wrapped, "-o", job.wrapped_obj]
         else:
-            cmd = [cc] + base_flags + mode_flags + include_dirs + \
+            cmd = [cc] + base_flags + user_flags + include_dirs + \
                   ["-c", job.src, "-o", job.wrapped_obj]
         reporter.detail("  $ " + " ".join('"%s"' % a if " " in a else a for a in cmd))
         r = run_cmd(cmd)
@@ -1484,7 +1484,7 @@ def build_one_unit(job: UnitJob, cc: str, objdump: str, python: str,
         job.warnings.append(
             "探针编译失败，已改为直接编译原文件（不会影响本次构建，"
             "但该文件的全局变量不会出现在变量面板里）。")
-        return _fallback_compile(job, cc, base_flags, mode_flags, include_dirs,
+        return _fallback_compile(job, cc, base_flags, user_flags, include_dirs,
                                  reporter, _append)
 
     # ---- DWARF 偏移写法规范化（见 normalize_probe_obj_dwarf 的说明） ------
@@ -1556,7 +1556,7 @@ def build_one_unit(job: UnitJob, cc: str, objdump: str, python: str,
                 "llvm-objdump（LLVM 21 已移除 --dwarf=info）。"
                 "请运行 doctor 查看详情。"
                 % (r.out.strip().splitlines()[-1] if r.out.strip() else "无输出"))
-            return _fallback_compile(job, cc, base_flags, mode_flags,
+            return _fallback_compile(job, cc, base_flags, user_flags,
                                      include_dirs, reporter, _append)
 
         try:
@@ -1566,14 +1566,14 @@ def build_one_unit(job: UnitJob, cc: str, objdump: str, python: str,
         except OSError as exc:
             job.warnings.append("生成物落盘失败（%s），已改为直接编译原文件。"
                                 % exc)
-            return _fallback_compile(job, cc, base_flags, mode_flags,
+            return _fallback_compile(job, cc, base_flags, user_flags,
                                      include_dirs, reporter, _append)
     finally:
         # 无论成败都清掉暂存目录，避免 .scut 下堆积临时文件
         shutil.rmtree(staging, ignore_errors=True)
 
     # ---- 第 3 遍：编译包装单元 = 真正的目标文件 ---------------------------
-    wrap_cmd = [cc] + base_flags + mode_flags + include_dirs + \
+    wrap_cmd = [cc] + base_flags + user_flags + include_dirs + \
                ["-c", job.wrapped, "-o", job.wrapped_obj]
     reporter.detail("  [3/3 包装] $ " + " ".join(
         '"%s"' % a if " " in a else a for a in wrap_cmd))
@@ -1585,7 +1585,7 @@ def build_one_unit(job: UnitJob, cc: str, objdump: str, python: str,
         job.warnings.append(
             "编译自动生成的包装单元失败，已改为直接编译原文件。"
             "该文件的全局变量不会出现在变量面板里，但算法本身可以正常运行。")
-        return _fallback_compile(job, cc, base_flags, mode_flags, include_dirs,
+        return _fallback_compile(job, cc, base_flags, user_flags, include_dirs,
                                  reporter, _append)
 
     job.used_wrapper = True
@@ -1693,7 +1693,7 @@ def find_output_owner(sources: List[str], out_array: str, cc: str,
 
 
 def _fallback_compile(job: UnitJob, cc: str, base_flags: List[str],
-                      mode_flags: List[str], include_dirs: List[str],
+                      user_flags: List[str], include_dirs: List[str],
                       reporter: Reporter, append) -> bool:
     """
     降级路径：直接编译用户原文件。
@@ -1701,8 +1701,11 @@ def _fallback_compile(job: UnitJob, cc: str, base_flags: List[str],
     ★ 需求明确要求：never fail the whole build because symbol discovery failed。
       「变量面板少几个变量」和「算法根本跑不起来」是严重性完全不同的两件事，
       绝不能让前者导致后者。
+
+    ★ 参数名写 user_flags 而不是 mode_flags：这里编的是【用户源码】，
+      必须恒为 -O0（可调试性要求），不能跟随 release 变成 -O2。
     """
-    cmd = [cc] + base_flags + mode_flags + include_dirs + \
+    cmd = [cc] + base_flags + user_flags + include_dirs + \
           ["-c", job.src, "-o", job.wrapped_obj]
     reporter.detail("  [降级] $ " + " ".join(
         '"%s"' % a if " " in a else a for a in cmd))
@@ -1953,11 +1956,9 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
             atomic_write_text(core_lib + ".sha256", _core_fingerprint() + "\n")
             reporter.human("  核心库已构建: %s" % core_lib)
 
-    # ⑧ 用户代码【强制 -O0】（用户原话："用户代码需要强制O0优化（不优化）"）：
-    #   -O2 会重排/合并语句、把变量优化进寄存器 —— 逐行调试时断点漂移、
-    #   变量看不到值，与"仿真环境用于理解算法行为"的目标直接冲突。
-    #   release 模式只影响核心库与链接参数，用户源码永远 -O0。
-    mode_flags = ["-g", "-O0"]
+    # 注：用户代码的优化等级由下面的 user_flags 统一决定（恒 -O0），
+    # 见"用户代码与【非环境代码】的优化等级"那段说明。
+
     # --- 3) 工程配置 → 生成编译期契约头 + 环境接线单元 ---------------------
     #
     # ★ 配置的唯一入口是 scut_project.json（插件设置界面维护）。
@@ -2068,8 +2069,25 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
     #        「变量面板坏了」。探针阶段保持 -O0 就不丢变量。
     #     2) -g 是 DWARF 的来源，自动发现完全依赖它。
     probe_flags = ["-g", "-O0"]
-    mode_flags = (["-g", "-O0"] if args.mode == "debug"
-                  else ["-O2", "-DNDEBUG"])
+
+    # ★★ 用户代码与【非环境代码】的优化等级在这里分开 ★★
+    #
+    #   需求原话：「用户代码需要强制 O0 优化（不优化）」。
+    #   原因很实在：-O2 会重排、合并语句、把变量优化进寄存器，于是逐行调试时
+    #   断点漂移、变量看不到值 —— 与"仿真环境用于理解算法行为"直接冲突。
+    #   所以用户源码【恒为 -O0】，跟 debug/release 无关。
+    #
+    #   而环境自己的代码（bind 单元、呈现后端）不属于用户算法，
+    #   release 模式对它们提升等级不会影响可调试性 ——
+    #   想看"优化后的真实耗时"时，优化的对象本来就应该是环境开销。
+    #
+    #   ★ 曾经这里只有一套 mode_flags，release 时会把用户代码也压成 -O2，
+    #     直接违反上面这条需求（而且注释还写着"用户源码永远 -O0"）——
+    #     注释与实现不一致是最容易骗过 review 的一类 bug，所以拆成两个变量，
+    #     让"谁该被优化"在代码里一眼可见。
+    user_flags = ["-g", "-O0"]
+    env_flags = (["-g", "-O0"] if args.mode == "debug"
+                 else ["-O2", "-DNDEBUG"])
 
     reporter.human("")
 
@@ -2078,7 +2096,7 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
     # 核心库零重编 —— 这是整套架构的核心收益。
     bind_obj = os.path.join(proj.obj_dir, "scut_bind.o")
     with timer.stage("编译 bind 单元"):
-        bind_cmd = ([tc.cc] + base_flags + mode_flags + include_dirs
+        bind_cmd = ([tc.cc] + base_flags + env_flags + include_dirs
                     + ["-c", bind_src, "-o", bind_obj])
         reporter.detail("  $ " + " ".join(
             '"%s"' % a if " " in a else a for a in bind_cmd))
@@ -2151,7 +2169,7 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
         if workers == 1 or len(jobs) == 1:
             for j in jobs:
                 build_one_unit(j, tc.cc, tc.objdump, tc.python,
-                               SYMBOLS_TOOL, base_flags, mode_flags, probe_flags,
+                               SYMBOLS_TOOL, base_flags, user_flags, probe_flags,
                                include_dirs, objcopy, auto_watch, out_array,
                                out_owner, img_shape,
                                reporter, log_lock, logs, proj)
@@ -2159,7 +2177,7 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
                 futs = [ex.submit(
                     build_one_unit, j, tc.cc, tc.objdump, tc.python,
-                    SYMBOLS_TOOL, base_flags, mode_flags, probe_flags,
+                    SYMBOLS_TOOL, base_flags, user_flags, probe_flags,
                     include_dirs, objcopy, auto_watch, out_array,
                     out_owner, img_shape,
                     reporter, log_lock, logs, proj)
@@ -2229,7 +2247,7 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
     #   而那正是我们想暴露的问题（比静默不执行好得多）。
     glue_obj = os.path.join(proj.obj_dir, "scut_env_glue.o")
     with timer.stage("编译环境接线"):
-        gcmd = ([tc.cc] + base_flags + mode_flags + include_dirs
+        gcmd = ([tc.cc] + base_flags + user_flags + include_dirs
                 + ["-c", glue_path, "-o", glue_obj])
         reporter.detail("  $ " + " ".join(
             '"%s"' % a if " " in a else a for a in gcmd))
@@ -2313,7 +2331,7 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
                     continue
                 src = os.path.join(bdir, name)
                 obj = os.path.join(proj.obj_dir, "backend_" + name[:-2] + ".o")
-                cmd = ([tc.cc] + base_flags + mode_flags + include_dirs
+                cmd = ([tc.cc] + base_flags + env_flags + include_dirs
                        + ["-c", src, "-o", obj])
                 reporter.detail("  $ " + " ".join(
                     '"%s"' % a if " " in a else a for a in cmd))
