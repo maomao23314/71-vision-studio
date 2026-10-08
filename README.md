@@ -1,168 +1,186 @@
 # SCUT-71 Vision Studio
 
-> 智能车视觉仿真环境 · **VS Code 插件形态** · 上手即用
+> 智能车视觉仿真环境 · **VS Code 插件形态** · 装上就能用
 
-**代号**：`SCUT-71-vision-studio`
-**状态**：核心可运行、构建链路已打通、插件已装进 `71-Vision` profile
+**状态**：核心链路已实测打通（新建工程 → 编译 → 运行 → 变量面板 → 日志）。
 
 ---
 
 ## 一句话目标
 
-> 用户**只写自己的视觉算法**，仿真、编译、调试、可视化全部自动就位。
+> 用户**只写自己的视觉算法**，其余（编译、喂图、计时、可视化）全部自动就位。
+> 而且算法代码能**原样拷上车**。
 
 ---
 
-## 现在能做什么（已实测）
+## 30 秒上手
 
-| 能力 | 状态 |
-|---|---|
-| 用户写零行注册代码，环境自动发现全部全局变量（含 `static`） | ✅ 实测 35 变量 × gcc/clang 全部正确 |
-| 构建：环境库 + 用户代码 + 后端，一键完成 | ✅ 实测（含空格+中文路径） |
-| 仿真运行：加载真实测试图、逐帧推进、输出图像与变量 | ✅ 实测 36 帧全部非黑 |
-| 彩色调试标注（点/线/框/文字）合成进输出图 | ✅ 实测红绿蓝三线 + 文字 |
-| headless 后端（无窗口批处理 / CI） | ✅ 可运行 |
-| 变量选择（只输出关心的那几个） | ✅ `--select` |
-| 单步一帧（供 IDE 逐步调试） | ✅ `--step` |
-| VS Code 插件编译、打包、装入 profile | ✅ 已装进 `71-Vision` |
-| **Webview 仿真视图 + 变量面板 + 曲线** | ✅ **真实 Chromium 渲染验证** |
-| **调试：断点/调用栈/读变量** | ✅ **真实 DAP 会话验证（15/15）** |
+1. 装插件（VSIX）。
+2. 命令面板 → **SCUT-71: 新建仿真工程** → 选个空目录。
+3. 把测试图丢进工程的 `pic/1/`（命名 `1.bmp`、`2.bmp`…）。
+4. 命令面板 → **SCUT-71: 配置本工程** → 填你的图像处理函数名。
+5. 按 `Ctrl+Shift+B` 编译，然后 `→` 看下一张图。
 
-**视觉证据**（headless 三帧连跑，真实赛道图）：
-
-![三帧仿真输出](docs/proof_frames.png)
-
-**Webview 面板**（真实 Chromium 渲染同一份前端资源）：
-
-![Webview 面板](docs/proof_webview.png)
-
-> 面板里可以看到：帧图像、`THRE 75 / LOST 0` 调试文字、计时读数、
-> 工具栏、4 个变量勾选框（带真实数值、截断提示）、以及由数组画出的曲线。
-
-> 图中文字是环境**内置 8×8 字库**渲染的，彩色标注来自核心 —— 全部不依赖任何图形库。
-> 三帧分别是 `pic/1/1.bmp`、`2.bmp`、`3.bmp`，可见 `--advance` 生效。
+> 本机没有编译器也没关系：第一次编译时插件会**自动下载**一份精简版
+> LLVM-MinGW 到插件目录（约 165 MB，只下一次）。
 
 ---
 
-## 快速开始
-
-### 1. 环境（已就绪）
-
-| 组件 | 位置 |
-|---|---|
-| LLVM-MinGW 21.1.1（clang/clangd/lldb-dap + sysroot） | `D:\TOOLS\llvm-mingw` |
-| binutils `objdump`（自动发现用，**不能**用 llvm-objdump） | `D:\TOOLS\mingw-w64\bin` |
-| Python 3.12 | `D:\TOOLS\anaconda3` |
-
-### 2. 新建工程
-
-```powershell
-Copy-Item -Recurse SCUT-71-vision-studio\templates\starter 我的视觉工程
-```
-
-工程结构（**只有 `code/` 是你需要改的**）：
+## 三层结构
 
 ```
-我的视觉工程/
-├── code/camera.c    ← ★ 你唯一要改的文件（名字与真车工程一致，可直接拷上车）
-├── config.h         ← 图像尺寸（编译期契约，改完只需重编这一处）
-├── pic/1/           ← 你自己的测试图集（模板不附带图，见 pic/1/README-pic.txt）
-└── .scut/           ← 生成物（构建缓存、变量清单、帧输出）
+① 插件显示层    extension/           只管 UI：设置、变量面板、图像、日志
+        ↕  设置(scut_project.json) + stdin/stdout JSON
+② 仿真环境层    tools/ core/ bind/   提供输入图、收集变量、合成绘制、计时、喂图集
+        ↕  构建时生成的接线单元
+③ 用户代码      code/*.c             只有算法
 ```
 
-### 3. 构建
-
-```powershell
-python SCUT-71-vision-studio\tools\scut_build.py --project 我的视觉工程 --toolchain D:\TOOLS\llvm-mingw
-```
-
-首次构建会连核心库一起编译（约 1.5 秒），之后**改算法不再重编环境**。
-
-环境自检：
-
-```powershell
-python tools\scut_build.py doctor --project 我的视觉工程 --toolchain D:\TOOLS\llvm-mingw
-```
-
-### 4. 运行
-
-```powershell
-cd 我的视觉工程
-.scut\bin\scut_sim.exe --frames 36 --advance --out frames
-```
-
-| 参数 | 说明 |
-|---|---|
-| `--frames N` | 跑 N 帧 |
-| `--advance` | 每帧切换到下一张测试图（到末尾回卷） |
-| `--step` | 每帧后等一行输入（IDE 单步用） |
-| `--json` | stdout 输出机器可读协议（进度走 stderr） |
-| `--select A,B` | 只输出这两个变量 |
-| `--list-vars` | 列出自动发现的变量后退出 |
-| `--pic DIR` / `--frame N` | 指定图集 / 起始张号 |
+**依赖是单向的**：①→②→③。用户代码不知道 ① 和 ② 存在。
 
 ---
 
 ## 写你的算法
 
-**你不需要写 `main()`** —— 环境已经有了。你只需要注册回调：
+你只需要写**普通的 C 函数**，不需要任何注册宏：
 
 ```c
+/* code/camera.c */
 #include "scut_sdk.h"
 
-/* 这些变量【不用注册】，环境会自动发现并列进变量面板 */
-int g_threshold     = 0;
-int g_left_line[SCUT_IMAGE_H];
-static int s_histogram[256];      /* static 也能被发现 */
+/* 输入图像由环境提供：全局数组，名字与车载工程一致，地址恒定。
+ * （声明在生成的 scut_config.h 里，你不用自己 extern） */
 
-static void my_process(void)
+int g_threshold = 0;                       /* 会被自动发现，面板里勾选即可看 */
+unsigned char g_binary[SCUT_IMAGE_H][SCUT_IMAGE_W];   /* 结果图 */
+
+void camera_init(void)                     /* 开机一次（填进「初始化函数」） */
 {
-    const scut_u8 *img;
-    int w, h;
-
-    img = SCUT_GetInputImage(&w, &h);   /* 只在 PROCESS 阶段有效 */
-    if (!img) return;
-
-    /* ... 你的算法 ... */
-
-    SCUT_OutImageSet(x, y, value);      /* 写结果图（灰度） */
+    /* 建查找表、清缓冲 */
 }
 
-static void my_draw(void)               /* 不计入处理时间 */
+void camera_process(void)                  /* 每帧（填进「图像处理函数」）★ 计时段 */
 {
-    SCUT_DrawPoint(x, y, SCUT_COLOR_RED);
-    SCUT_DrawText(2, 2, SCUT_COLOR_WHITE, "THRE %d", g_threshold);
+    int x, y;
+    for (y = 0; y < SCUT_IMAGE_H; y++) {
+        for (x = 0; x < SCUT_IMAGE_W; x++) {
+            g_binary[y][x] = (mt9v03x_image[y][x] > g_threshold) ? 255 : 0;
+        }
+    }
 }
 
-static void my_report(void)             /* 不计入处理时间 */
+void camera_draw(void)                     /* 每帧（填进「后处理函数」）不计时 */
 {
-    SCUT_Log(SCUT_LOG_INFO, "阈值=%d", g_threshold);
+    SCUT_DrawPoint(10, 10, SCUT_COLOR_RED);
 }
-
-/* 一条语句注册，可放在任意文件的任意位置 */
-SCUT_REGISTER(SCUT_ROLE_PROCESS, 100, "my_process", my_process)
-SCUT_REGISTER(SCUT_ROLE_DRAW,    100, "my_draw",    my_draw)
-SCUT_REGISTER(SCUT_ROLE_REPORT,  100, "my_report",  my_report)
 ```
 
-### 角色与计时口径
+然后在设置里填：
 
-| 角色 | 何时调用 | 计时 |
+| 设置项 | 填什么 |
+|---|---|
+| 图像处理函数 | `camera_process` |
+| 初始化函数 | `camera_init` |
+| 后处理函数 | `camera_draw`（每行一个，按顺序调用） |
+| 结果图数组名 | `g_binary` |
+
+### 为什么用户代码里没有 `SCUT_INIT` / `SCUT_FRAME`
+
+因为**调用关系属于宿主，不属于算法**。车载工程的 `main()` 里同样要按顺序
+调用 `ImagePerspective_Init()` → `image_process()`，也就是说这些信息本来
+就写在宿主里。
+
+环境把这件事也接了过去：注册信息存在工程的 `scut_project.json`，
+构建时生成一个接线单元去调用你的函数。于是 `code/` 可以**直接拷上车**。
+
+> 你的三个函数必须是**非 static** 的 `void f(void)`。
+> 这不是额外限制 —— 车上 `main()` 要调用它们，本来就得如此。
+
+### 关于输入图：地址恒定是关键
+
+环境提供的 `mt9v03x_image` **地址永远不变**。这一点对车载算法是硬需求：
+逆透视之类会建立一张「指向图像像素的指针表」，开机建一次长期使用。
+如果输入图每帧换一块内存，那张表里的指针会**集体悬空** ——
+读到随机内存，不崩溃、不报错，只是画面诡异。
+
+### 关于结果图：深拷贝
+
+环境每帧把你指定的结果图数组**逐像素深拷贝**到显示缓冲。
+刻意不用「换个指针」的做法：理由和上面一样，指针表会悬空。
+
+---
+
+## 计时口径（决定性能数据可不可比）
+
+| 阶段 | 何时调用 | 计时 |
 |---|---|---|
-| `INIT` | 开机一次 | **不计** |
-| `PRE_FRAME` | 每帧处理前 | 计 |
-| `PROCESS` | 图像处理主体 | **计（这是"处理时间"）** |
-| `POST_FRAME` | 每帧处理后 | 计 |
-| `DRAW` | 绘制标注 | **不计** |
-| `REPORT` | 输出 LOG | **不计** |
-| `SHUTDOWN` | 退出清理 | 不计 |
+| 初始化 | 开机一次 | **不计** |
+| 图像处理 | 每帧 | **计 → `processUs` ★ 这是"算法耗时"** |
+| 后处理 | 每帧 | **不计**（绘图/日志，单独统计成 `drawUs`） |
 
-> **为什么绘制不计时**：车载程序上没有"画点给屏幕看"这件事，
-> 算进去会让性能数据失真。但绘图仍是真实开销，所以单独给出 `draw_us`。
+**为什么绘图与日志不计时**：车上没有"画点给屏幕看"这件事 ——
+`SCUT_Draw*` / `SCUT_Log` 在移植层里就是空实现。把它算进处理时间，
+等于拿主机侧调试设施冒充车载算法，性能数据会直接失真。
 
-> **优先级必须显式写**：跨编译单元的构造函数执行顺序是**未定义**的
-> （实测 GCC 下甚至是逆序）。环境按 `(role, priority, name)` 稳定排序，
-> 所以回调之间有依赖时，靠优先级表达，不要靠书写顺序。
+**主看周期数**（`cycles`）而不是微秒：周期数跨机器可比，
+微秒是墙钟时间，换台电脑就没有参考意义。
+
+---
+
+## 变量面板
+
+| 分组 | 来源 | 显示 |
+|---|---|---|
+| **主动暴露** | 代码里显式 `SCUT_Watch` 注册的（通常是结构体成员） | 排前面、蓝色高亮 |
+| **自动捕获** | 构建时扫描调试信息发现的全部全局量（含 `static`） | 排后面、灰色 |
+
+判据是客观的：**运行期注册表里有、编译期清单里没有** → 主动暴露。
+不需要你额外标注。
+
+**勾选后不需要重新编译**：变量快照每帧全量发送，勾选变化只影响显示。
+
+> 边界：从未被引用过的 `static` 变量会被编译器整个删掉，发现不了 ——
+> 这与调试器的行为一致。
+
+---
+
+## 配置放在哪
+
+| 文件 | 内容 | 谁维护 |
+|---|---|---|
+| **工程根 `scut_project.json`** | 尺寸、输入/结果图数组名、三个钩子 | 插件设置界面（跟着工程进 git） |
+| VS Code 用户设置 | 工具链路径、下载开关、图集、编译模式 | 你自己（跟着这台机器） |
+| `.scut/gen/*`（生成物） | 编译期契约头、接线单元 | 构建脚本，**不要手改** |
+
+> 为什么配置不放在 `config.h`：那个文件同时扮演"编译期契约"和
+> "一堆可调参数"两个角色，用户改后者时会顺手改前者，然后满屏红波浪线。
+> 现在契约由构建脚本按 JSON 生成，职责清楚了。
+> 老工程仍然兼容 `config.h`。
+
+---
+
+## 运行期设置（改完立即生效，不用重编译）
+
+- `scut71.picDir` / `scut71.picExt` —— 图集目录与后缀
+- `scut71.startFrame` —— 从第几张开始
+- `scut71.processRepeat` —— 每帧重复调用处理函数的次数（抵消计时抖动）
+- `scut71.benchRepeat` —— 「测速」按钮重复次数
+
+**编译期设置**（改完要重编译）：图像宽高、数组名、钩子函数名。
+图像尺寸之所以必须留在编译期：C 语言里数组大小必须是常量，
+而算法里到处是 `int line[SCUT_IMAGE_H];`。这是语言的硬约束。
+
+---
+
+## 按钮与快捷键
+
+| 动作 | 键 | 说明 |
+|---|---|---|
+| 编译 | `Ctrl+Shift+B` | 编译前会**自动停掉正在运行的仿真进程**（否则 Windows 会锁住 exe 导致链接失败） |
+| 上一张 / 下一张 | `←` / `→` | **不重启进程**，算法内部状态保留 |
+| 测速 | `F9` | 同一张图重复 N 次取平均周期数 |
+| 停止 | `Shift+F5` | |
+| 打开运行日志 | — | 你的 `SCUT_Log` 输出在这里（可搜索、可复制） |
 
 ---
 
@@ -170,68 +188,52 @@ SCUT_REGISTER(SCUT_ROLE_REPORT,  100, "my_report",  my_report)
 
 ```
 SCUT-71-vision-studio/
-├── core/                环境核心（预编译成静态库，config-agnostic）
-│   ├── include/         公开头文件（scut_sdk.h 是用户唯一要看的）
-│   └── src/             实现：注册表 / 调度 / 绘制 / 帧 / 日志 / 输入
-├── bind/                ★ 唯一知道编译期尺寸的地方（Bind TU）
-├── backends/
-│   └── headless/        无窗口后端
-├── extension/           VS Code 插件（TypeScript）
+├── core/               环境核心（预编译成静态库，config-agnostic）
+│   ├── include/        公开头文件（scut_sdk.h 是用户唯一要看的）
+│   └── src/            注册表 / 调度 / 绘制 / 帧 / 日志 / 输入 / 观察表
+├── bind/               ★ 唯一知道编译期尺寸的地方
+├── backends/headless/  呈现后端（提供 main，把帧交给插件）
 ├── tools/
-│   ├── scut_symbols.py  ★ 自动符号发现（DWARF）
-│   └── scut_build.py    构建编排
-├── templates/           新建工程模板
-│   ├── starter/         code/camera.c + config.h（故意不含测试图）
-│   └── README-pic.txt   测试图集放法说明（新建工程时拷进 pic/1/）
-├── tests/               回归测试（fixtures/pic/1/ 存真实测试图）
-└── docs/                计划书 / 实测证据 / 插件技术要点
+│   ├── scut_build.py   构建编排 + 生成契约头与接线单元
+│   └── scut_symbols.py DWARF 自动符号发现
+├── extension/          VS Code 插件（TypeScript）
+├── templates/starter/  新建工程模板（scut_project.json + code/camera.c）
+├── tests/              回归测试
+└── docs/               架构设计 / 实测证据 / 历史记录
 ```
 
 ---
 
-## 关键设计决策
+## 文档
 
-| 决策 | 内容 | 为什么 |
-|---|---|---|
-| **库方向反转** | 环境做 `.a`，用户代码做 `.o` | 消除 `--whole-archive` 地雷；改算法不重编环境 |
-| **Bind TU** | 唯一知道编译期尺寸的编译单元 | C 里数组大小必须是编译期常量，这是绕不过的 |
-| **包装单元** | `user.wrapped.c` 先 `#include` 用户源码再注册 | 只有这样才够得着 `static` 变量 |
-| **绘制下沉核心** | 绘制写进覆盖层，调度器负责合成 | 否则换个后端，标注就**静默消失**（旧环境栽在这） |
-| **去除 EasyX** | 改用内置 BMP 解码 | EasyX 要求手动拷库进编译器目录，是最大的上手摩擦 |
-| **clangd 而非 cpptools** | Apache-2.0 WITH LLVM-exception | cpptools 许可证限制「只能配微软产品」，不能随插件分发 |
-| **QEMU 留接口** | 时钟源抽象成接口 | 确定性计时代价大，先做 `-O0`/`-O2` 双档对照 |
+- **[docs/架构设计.md](docs/架构设计.md)** —— 重构后的架构基线，**改代码前先看它**
+- `docs/需求记录与工程结构.md` —— 历轮需求的原始记录（历史）
+- `docs/实测证据.md` —— 实测数据（历史，部分实现已变）
 
 ---
 
-## 已知边界（不隐藏）
+## 已知边界（不隐瞒）
 
-1. **"整帧耗时"不含呈现本身**。后端抓帧的开销单独扣除，避免"后端越慢算法看着越慢"。
-2. **仿真 ≠ 真机性能**。默认 `-O0`（可调试）；真机是 `-O2`/`-Os`。
-3. **只有被使用过的变量才会出现在面板里**。从未被引用的 `static` 会被编译器整个删除（clang 尤其积极），这与调试器行为一致。
-4. **PNG/JPEG 暂不支持**，目前只认 BMP（`stb_image` 集成是后续工作）。
-5. **中文文字不支持**（内置 8×8 ASCII 字库），会渲染成占位方框。
-6. **C 语言无法 100% 阻止蓄意绕过**防呆（可以直接访问全局数组），但访问器能挡住无意误用。
+1. **中文标注不支持**：内置 8×8 ASCII 字库，非 ASCII 画占位方框。
+2. **JPEG 不支持**：BMP + PNG（8 位、非交织、自带 inflate）。
+3. **结构体字段名不可知**：不解析 DWARF 成员表，只能整体报大小。
+   要看具体字段就用 `SCUT_Watch` 主动注册该成员。
+4. **从未被引用的 static 发现不了**：被编译器删掉了。
+5. **仿真 ≠ 真机性能**：用户代码恒为 `-O0`（保证断点与变量可见）；
+   看优化后耗时请用 release 模式（只影响环境库）。
+6. **阶段门控是防呆不是防护**：C 语言无法阻止直接访问全局数组。
 
 ---
 
 ## 测试
 
-> **一条命令跑完全部**（推荐）：
-
 ```powershell
-python tests\run_all_tests.py --also-cn
+python tests\run_all_tests.py
 ```
 
-当前结果：**6/6 通过**（含空格 + 中文路径）。分项：
-
-| # | 测试 | 内容 |
-|---|---|---|
-| 1 | `test_symbols.py` | 自动符号发现，35 变量 × gcc + clang |
-| 2 | `check_json_protocol.py` | 仿真输出是严格合法 JSON |
-| 3 | `extension_smoke.js` | 插件协议解析 / PGM / 诊断，42 项 |
-| 4 | `dap_smoke.js` | **真实 DAP 调试会话**，15 项 |
-| 5 | `webview_render.js` | **真实 Chromium 渲染** Webview 前端 |
-| 6 | 中文路径端到端 | 同上协议测试跑在含中文+空格的路径上 |
+第一条就是**端到端**测试（32 项断言）：从模板建工程 → 零注册用户代码 →
+构建 → 运行 → 检查输出图非黑、计时非零、日志可达。
+它验证的是**设计理念本身**，而不是某个函数。
 
 ---
 

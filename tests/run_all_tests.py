@@ -21,6 +21,16 @@ import subprocess
 import sys
 import tempfile
 
+# Windows 控制台默认是 GBK，直接 print ✅/❌ 会抛 UnicodeEncodeError
+# —— 而且是在【最后打印结果】那一步抛，等于跑完所有测试才崩，
+# 用户看到的是"跑完了但报错"，完全不知道测试到底过没过。
+# 统一把标准输出改成 UTF-8（不可编码的字符替换掉），保证任何终端都能跑完。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, ValueError):
+    pass
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
