@@ -57,12 +57,6 @@ scut_phase_t scut_input_get_phase(void);
 int  scut_input_violations(void);
 void scut_input_reset_violations(void);
 
-/* --- 输出图像的写入门控 ---
- * 与输入图对称：只有在 DRAW 阶段（呈现接线所在处）才允许写输出图。
- * 算法阶段直接写输出图属于误用 —— 正确做法是写自己的结果数组，
- * 由接线单元在 DRAW 阶段搬运。 */
-int  scut_output_write_allowed(void);
-
 #ifdef __cplusplus
 }
 #endif
