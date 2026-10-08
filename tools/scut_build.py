@@ -58,7 +58,7 @@ scut_build.py —— SCUT-71 Vision Studio 构建编排层。
     --dwarf=info（只剩 =frames），直接失败。
 
     实测：clang 21 + binutils 2.30，加 -gdwarf-4 后 35/35 变量全部正确发现。
-    所以探针编译恒用 -gdwarf-4，与 debug/release 无关。
+    所以探针编译恒用 -gdwarf-4（固定不变）。
 
     ★ 另一个实测坑：clang 输出 DWARF 偏移是「八位补零」(0x0000002a)，
       binutils 输出是「不定长」(0x2a)。scut_symbols.py 只认后者。
@@ -1473,7 +1473,7 @@ def build_one_unit(job: UnitJob, cc: str, objdump: str, python: str,
             job.ok = False
         return job.ok
 
-    # ---- 第 1 遍：探针编译（-g -O0，独立于 debug/release） ----------------
+    # ---- 第 1 遍：探针编译（-g -O0，固定） ----------------
     probe_cmd = [cc] + base_flags + probe_flags + include_dirs + \
                 ["-c", job.src, "-o", job.obj]
     reporter.detail("  [1/3 探针] $ " + " ".join(
@@ -1703,7 +1703,7 @@ def _fallback_compile(job: UnitJob, cc: str, base_flags: List[str],
       绝不能让前者导致后者。
 
     ★ 参数名写 user_flags 而不是 mode_flags：这里编的是【用户源码】，
-      必须恒为 -O0（可调试性要求），不能跟随 release 变成 -O2。
+      必须恒为 -O0（可调试性要求），不能跟随环境变成 -O2。
     """
     cmd = [cc] + base_flags + user_flags + include_dirs + \
           ["-c", job.src, "-o", job.wrapped_obj]
@@ -1743,9 +1743,9 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
 
     reporter.human("SCUT-71 Vision Studio 构建")
     reporter.human("  工程目录: %s" % proj.root)
-    reporter.human("  构建模式: %s" % ("debug（可调试，-g -O0）"
-                                       if args.mode == "debug"
-                                       else "release（-O2 -DNDEBUG）"))
+    # ★ 优化等级不是"模式"，而是固定约定（用户要求：Build Mode 参数没有意义）：
+    #   用户算法恒 -g -O0（断点不漂移、变量看得见），环境自身恒 -O2（跑得快）。
+    reporter.human("  优化: 用户代码 -g -O0（可调试）· 环境 -O2")
 
     # --- 0) 工程合法性 -----------------------------------------------------
     if not os.path.isdir(proj.root):
@@ -1873,9 +1873,15 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
             os.path.join(sdk_core_inc_dir, n)
             for n in os.listdir(sdk_core_inc_dir) if n.endswith(".h"))
 
+    # 核心库的编译参数（环境自身，恒 -O2 —— 见下面 user_flags/env_flags 的说明）。
+    # ★ 必须参与内容指纹：否则改了优化等级指纹却不变，旧的 -O0 核心库会被
+    #   一直复用，表现为"改了构建参数却没生效"，不报错、极难发现。
+    core_flags = ["-std=c11", "-O2", "-Wall", "-Wextra"]
+
     def _core_fingerprint() -> str:
-        """核心库全部输入（.c/.h + 编译器命令模板）的内容指纹。"""
+        """核心库全部输入（编译参数 + .c/.h + bind 源码）的内容指纹。"""
         h = hashlib.sha256()
+        h.update((" ".join(core_flags)).encode("utf-8"))
         for p in sorted(core_sources + core_headers + [bind_src]):
             h.update(os.path.basename(p).encode("utf-8", "replace"))
             try:
@@ -1916,7 +1922,7 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
             for src in core_sources:
                 obj = os.path.join(core_stage,
                                    os.path.basename(src)[:-2] + ".o")
-                cmd = ([tc.cc, "-std=c11", "-O0", "-Wall", "-Wextra"]
+                cmd = ([tc.cc] + core_flags
                        + ["-I" + sdk_core_inc_dir, "-I" + sdk_core_src_dir]
                        + ["-c", src, "-o", obj])
                 reporter.detail("  $ " + " ".join(
@@ -2062,32 +2068,34 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
     objcopy = _find_objcopy(tc.cc)
 
     base_flags = ["-std=c11", "-Wall", "-Wextra"] + cfg_flags
-    # 探针 flags：★ 恒用 -g -O0，与 debug/release 无关。
+    # 探针 flags：★ 恒用 -g -O0（固定不变）。
     #   理由（两条都是实测）：
-    #     1) release 的 -O2 会把「未使用的 static」整个删掉（clang 有权这么做），
+    #     1) 环境侧的 -O2 会把「未使用的 static」整个删掉（clang 有权这么做），
     #        那些变量在目标文件里根本不存在，自然发现不了 —— 用户会以为
     #        「变量面板坏了」。探针阶段保持 -O0 就不丢变量。
     #     2) -g 是 DWARF 的来源，自动发现完全依赖它。
     probe_flags = ["-g", "-O0"]
 
-    # ★★ 用户代码与【非环境代码】的优化等级在这里分开 ★★
+    # ★★ 用户代码与【环境代码】的优化等级固定分开，不提供开关 ★★
     #
-    #   需求原话：「用户代码需要强制 O0 优化（不优化）」。
-    #   原因很实在：-O2 会重排、合并语句、把变量优化进寄存器，于是逐行调试时
-    #   断点漂移、变量看不到值 —— 与"仿真环境用于理解算法行为"直接冲突。
-    #   所以用户源码【恒为 -O0】，跟 debug/release 无关。
+    #   用户需求原话：
+    #     · "用户代码需要强制 O0 优化（不优化）"
+    #     · "Scut71: Build Mode 参数没有意义，说了 C 代码只要 O0，别的部分可以优化"
     #
-    #   而环境自己的代码（bind 单元、呈现后端）不属于用户算法，
-    #   release 模式对它们提升等级不会影响可调试性 ——
-    #   想看"优化后的真实耗时"时，优化的对象本来就应该是环境开销。
+    #   用户代码恒 -g -O0：-O2 会重排、合并语句、把变量优化进寄存器，
+    #   逐行调试时断点漂移、变量看不到值 —— 与"用仿真理解算法行为"直接冲突。
+    #
+    #   环境自身（bind 单元、核心库、呈现后端、接线单元）恒 -O2：
+    #   它们不是算法，优化只影响环境开销，不影响可调试性，还能让仿真更接近
+    #   真机节奏。原来把它做成 `--mode` 选项，用户既看不懂也没必要选，
+    #   现在直接写死成上面的约定。
     #
     #   ★ 曾经这里只有一套 mode_flags，release 时会把用户代码也压成 -O2，
     #     直接违反上面这条需求（而且注释还写着"用户源码永远 -O0"）——
     #     注释与实现不一致是最容易骗过 review 的一类 bug，所以拆成两个变量，
     #     让"谁该被优化"在代码里一眼可见。
     user_flags = ["-g", "-O0"]
-    env_flags = (["-g", "-O0"] if args.mode == "debug"
-                 else ["-O2", "-DNDEBUG"])
+    env_flags = ["-O2"]
 
     reporter.human("")
 
@@ -2245,9 +2253,11 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
     # ★ 放在用户代码【之后】编译：它的函数声明来自用户代码，
     #   若用户函数名填错，这里会给出"未定义符号"的链接期错误，
     #   而那正是我们想暴露的问题（比静默不执行好得多）。
+    # ★ 用 env_flags 而不是 user_flags：接线单元属于【环境】，
+    #   不是用户算法 —— 环境部分恒 -O2（用户代码恒 -O0，见上面的说明）。
     glue_obj = os.path.join(proj.obj_dir, "scut_env_glue.o")
     with timer.stage("编译环境接线"):
-        gcmd = ([tc.cc] + base_flags + user_flags + include_dirs
+        gcmd = ([tc.cc] + base_flags + env_flags + include_dirs
                 + ["-c", glue_path, "-o", glue_obj])
         reporter.detail("  $ " + " ".join(
             '"%s"' % a if " " in a else a for a in gcmd))
@@ -2713,7 +2723,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "示例：\n"
             "  python tools/scut_build.py --project .\n"
-            "  python tools/scut_build.py --project . --mode release --jobs 8\n"
+            "  python tools/scut_build.py --project . --jobs 8\n"
             "  python tools/scut_build.py doctor --project .\n"
             "  python tools/scut_build.py clean  --project .\n"
             "  python tools/scut_build.py --project . --json   # 给插件用\n"
@@ -2724,8 +2734,6 @@ def build_parser() -> argparse.ArgumentParser:
                    help="build（默认）/ doctor / clean")
     p.add_argument("--project", required=True,
                    help="工程目录（含 code/ 与 config.h）")
-    p.add_argument("--mode", choices=["debug", "release"], default="debug",
-                   help="debug = -g -O0（可调试，默认）；release = -O2 -DNDEBUG")
     p.add_argument("--toolchain", default="",
                    help="工具链根目录。省略时按 SCUT71_TOOLCHAIN 环境变量、"
                         r"D:\TOOLS\llvm-mingw、PATH 的顺序自动探测")

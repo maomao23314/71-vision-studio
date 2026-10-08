@@ -222,7 +222,8 @@ export class SimSessionImpl implements SimSession {
             }
             for (const line of this.stderrSplitter.flush()) {
                 if (line.trim().length > 0) {
-                    this.emitLog(`[stderr] ${line}`);
+                    // 与 onStderr 同一规则：用户日志行不能加前缀（否则上层认不出）
+                    this.emitLog(line.startsWith('[LOG] ') ? line : `[stderr] ${line}`);
                 }
             }
             this.child = undefined;
@@ -397,12 +398,18 @@ export class SimSessionImpl implements SimSession {
     }
 
     private onStderr(chunk: Buffer): void {
-        // 仿真进程的中文提示（找不到图集等）走 stderr，直接透传给「输出」面板
+        // 仿真进程的 stderr 上有两类内容：
+        //   · 用户算法的 SCUT_Log 输出：行首是后端加的 `[LOG] ` 标记
+        //   · 环境自身的中文提示（找不到图集等）
+        // ★ 用户日志行必须【原样透传】：此前这里统一加 `[仿真] ` 前缀，
+        //   把 `[LOG] ` 标记埋进了行中间，上层再也认不出它是不是用户日志
+        //   （结果就是侧边栏日志区永远是空的，见 simview.pushLog 的说明）。
         const text = chunk.toString('utf8');
         for (const line of this.stderrSplitter.push(text)) {
-            if (line.trim().length > 0) {
-                this.emitLog(`[仿真] ${line}`);
+            if (line.trim().length === 0) {
+                continue;
             }
+            this.emitLog(line.startsWith('[LOG] ') ? line : `[仿真] ${line}`);
         }
     }
 

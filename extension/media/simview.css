@@ -274,11 +274,29 @@ button.ghost:hover {
   padding: 2px 0 4px;
 }
 
+/* ★★ 「变量查看」能滚动的前提是三层都受限 ★★
+ *
+ *   历史 bug（用户报「变量查看页面无法滚动」）：
+ *     #vars-section 是 flex 容器、overflow:hidden，但中间的 #vars-body
+ *     是个普通块，既不 flex 也不设高度 —— 它的高度等于内容高度，
+ *     于是 #vars-list 的 overflow-y:auto 永远没有可滚动的空间，
+ *     超出的部分直接被 #vars-section 的 overflow:hidden 裁掉。
+ *   修法：让 #vars-body 也参与 flex（占满剩余高度、min-height:0 允许收缩），
+ *   这样 #vars-list 才真正被"框"在一个固定高度里，滚动条才出现。 */
+#vars-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 #vars-list {
   list-style: none;
   margin: 0;
   padding: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   flex: 1 1 auto;
   min-height: 0;
 }
@@ -350,6 +368,12 @@ canvas.spark {
 
 #log-body.collapsed {
   display: none;
+}
+
+.log-hint {
+  font-size: 11px;
+  line-height: 1.45;
+  padding: 2px 4px 4px;
 }
 
 #log {
@@ -485,18 +509,24 @@ canvas.spark {
   color: var(--vscode-descriptionForeground, rgba(128, 128, 128, 0.9));
 }
 
-/* 主动暴露的条目整体略作强调（只在名字上，不改布局） */
-.pick-item.is-manual .var-name {
+/* 主动暴露的条目整体略作强调（只在名字上，不改布局）
+ * ★ 勾选区（.pick-item）与查看区（.var-item）共用同一条规则：
+ *   用户要求"主动暴露的放前面、两者用颜色区分"，两个区都得体现，
+ *   只改一处会让"查看"区看起来还是没分组。 */
+.pick-item.is-manual .var-name,
+.var-item.is-manual .var-name {
   color: var(--vscode-charts-blue, var(--vscode-textLink-foreground, #3794ff));
   font-weight: 600;
 }
 
 /* 自动捕获的条目名字压暗，视觉上退到后面 */
-.pick-item.is-auto .var-name {
+.pick-item.is-auto .var-name,
+.var-item.is-auto .var-name {
   color: var(--vscode-descriptionForeground, rgba(160, 160, 160, 0.95));
 }
 
-.pick-item.is-auto label:hover .var-name {
+.pick-item.is-auto label:hover .var-name,
+.var-item.is-auto:hover .var-name {
   color: var(--vscode-foreground);
 }
 
@@ -538,38 +568,6 @@ table.struct-table td {
   border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
   color: var(--vscode-descriptionForeground, #999);
 }
-
-/* 「变量面板」视图已被合并进单一视图；这条兜底规则保留，
- * 以防旧 profile 里还留着 scut71.variables 的持久化布局。 */
-body[data-kind="vars"] #screen-section,
-body[data-kind="vars"] #toolbar {
-  display: none;
-}
-
-/* 注意：这里曾经有一整套 body[data-surface="panel"] 规则，
- * 服务于「在编辑器区开一个大图面板（独立窗口）」。
- * 那条链路已经删掉了（用户明确说"那个独立窗口的按钮和功能暂时删掉吧，
- * 目前的实现方式完全不好用"），于是选择器永远不会匹配 ——
- * 留着它只会让后来者以为还有面板模式。 */
-
-body[data-surface="panel"] #screen-wrap {
-  flex: 1 1 auto;
-  min-height: 0;
-  align-items: center;
-  justify-content: center;
-}
-
-/* 面板模式：变量/日志默认收起（脚本会先设好 state，这里只是兜底） */
-body[data-surface="panel"] #pick-body,
-body[data-surface="panel"] #log-body {
-  display: none;
-}
-
-/* 面板模式：浮动按钮常显（不要求鼠标移入）——大图上找按钮更难 */
-body[data-surface="panel"] #screen-actions {
-  opacity: 1;
-}
-
 
 /* ==========================================================================
  *  勾选区 / 查看区 【统一样式】

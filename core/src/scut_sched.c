@@ -386,6 +386,13 @@ static void run_one_frame(void)
                             : 0;
     s_timing.cycles_valid   = s_cycles_valid;
 
+    /* --- 2b. 默认底图：输入图 → 输出图（不计入 process_us） ---
+     *
+     * ★ 位置同样有语义：必须在 PROCESS 之后（此时输入图已由后端填好）、
+     *   在 DRAW 之前（DRAW 里若配了结果图数组会覆盖它，覆盖层再叠上去）。
+     *   这一拷贝不受 --repeat 影响 —— 它是"呈现"的事，不是算法的事。 */
+    scut_env_seed_output_from_input();
+
     /* --- 3. DRAW（独立计时，绝不并入 process_us） ---
      *
      * draw_enabled == 0 时整个 DRAW 阶段不执行：配置里写的

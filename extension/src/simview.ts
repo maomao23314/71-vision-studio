@@ -58,8 +58,6 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
     private lastFrameIndex = 0;
     /** 上一条加载失败的原因（通知去重用）。 */
     private lastLoadError: string | undefined;
-    /** 是否已经因为收到算法日志而自动显示过「运行日志」面板（只做一次）。 */
-    private userLogShown = false;
     /** 上次弹加载失败通知的时间戳（节流用，毫秒）。 */
     private lastLoadErrorAt = 0;
     private disposables: vscode.Disposable[] = [];
@@ -314,31 +312,33 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
     /**
      * 把一行日志分流到正确的地方。
      *
-     * ★ 两条通道，各有各的用途（用户原话："我程序输出的LOG还是没有单独的窗口啊"）：
+     * ★★ 曾经的真实 bug（用户原话："我程序输出的LOG还是没有单独的窗口啊，
+     *    输出的内容看不到"）★★
      *
-     *     [LOG] 前缀 = 用户算法 SCUT_Log 的输出
-     *                  → 独立的「输出」面板（可搜索、可复制、可拖高度、不占侧边栏）
-     *     其余       = 环境自身的会话日志（启动命令、翻页、错误提示）
-     *                  → 侧边栏的日志折叠区（轻量，随操作滚动）
+     *   后端把用户日志写成 stderr 上的 `[LOG] 正文`，
+     *   而本类收到 stderr 后【又加了一层前缀】变成 `[仿真] [LOG] 正文`，
+     *   于是下面 `startsWith('[LOG] ')` 永远为假 —— 用户的日志被当成
+     *   "环境日志"塞进了「构建」输出通道，而侧边栏「日志」折叠区
+     *   （HTML 里早就画好了、脚本也支持）从来收不到任何消息，永远是空的。
+     *   现在两层一起修：stderr 那侧不再叠前缀（见 simsession.onStderr），
+     *   这里则把用户日志真正 post 给 webview。
      *
-     * ★ 为什么要分流而不是都放一处：
-     *   用户算法的日志是【他要看的东西】，可能几十行；
-     *   环境日志是【排查用的东西】，平时折叠着就好。
-     *   混在一起的结果是用户每次都要在噪声里找自己的输出。
-     *
-     * ★ 首次收到用户日志时自动把输出面板显示出来：
-     *   否则用户根本不知道日志去了哪 —— 一个看不见的窗口等于没有窗口。
-     *   只在第一次弹（用 userLogShown 记），之后不再抢焦点。
+     * ★ 分流规则：
+     *     [LOG] 前缀 = 用户算法 SCUT_Log 的输出 → 侧边栏「运行日志」折叠区（主）
+     *                                            +「SCUT-71 运行日志」输出通道（附带）
+     *     其余       = 环境自身的会话日志 → 「SCUT-71 构建」输出通道
      */
     public pushLog(line: string): void {
         if (line.startsWith('[LOG] ')) {
-            const ch = getSimLogChannel();
-            ch.appendLine(line.slice(6));
-            if (!this.userLogShown) {
-                this.userLogShown = true;
-                ch.show(true);      // true = 不抢焦点，只把面板带出来
-                this.deps.log('[视图] 检测到算法日志，已打开「SCUT-71 运行日志」输出面板。');
+            const text = line.slice(6);
+            // ① 主入口：侧边栏里的「运行日志」折叠区（与变量/计时同一种组件）。
+            //    用户要的就是这个 —— "像选择变量、变量查看、计时那样的可展开菜单"。
+            for (const v of this.views) {
+                v.post({ type: 'log', line: text });
             }
+            // ② 附带：底部的「SCUT-71 运行日志」输出通道。
+            //    侧边栏窄、不能搜索；这里可以搜索/复制/拖高。两处同源，不冲突。
+            getSimLogChannel().appendLine(text);
             return;
         }
         this.deps.log(line);
@@ -364,10 +364,9 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
             picDir: this.deps.getPicDir(),
             selected: [...this.selected],
         });
-        s.onLog((line) => {
-            this.deps.log(line);
-            this.pushLog(line);
-        });
+        // ★ 只交给 pushLog 一处分流：它内部决定去 webview / 输出通道 /
+        //   环境日志通道。此前这里先 deps.log 再 pushLog，非用户日志会被记两遍。
+        s.onLog((line) => this.pushLog(line));
         s.onFrame((f) => this.onFrame(f));
         s.onVariables((v) => this.pushSnapshot(v));
         s.onExit(() => {
@@ -521,6 +520,9 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
                     /* 交给扩展主命令执行 —— 这样"编译"只有一条实现路径，
                      * 视图里的按钮和命令面板里的命令走的是同一段代码。 */
                     void vscode.commands.executeCommand('scut71.build');
+                } else if (cmd === 'debug') {
+                    /* 走扩展主命令 —— 与视图标题栏的「调试」图标是同一条实现路径。 */
+                    void vscode.commands.executeCommand('scut71.debug');
                 } else if (cmd === 'bench') {
                     /* 测速 = 同一张图重复 N 次取平均（旧环境 R 键的做法）。
                      * 与「运行」的分工：运行回答"多路况下表现如何"，
@@ -530,8 +532,6 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
                     void this.prevPic();
                 } else if (cmd === 'nextPic') {
                     void this.nextPic();
-                } else if (cmd === 'clearLog') {
-                    this.pushLog('');
                 }
                 break;
             }
@@ -640,6 +640,7 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
 
     <section id="toolbar">
       <button id="btn-build" title="编译仿真程序 (Ctrl+Shift+B)">编译</button>
+      <button id="btn-debug" class="primary" title="启动调试（F5）：下断点、单步、看调用栈">调试</button>
       <span class="toolbar-sep"></span>
       <button id="btn-prev" class="primary" title="上一张图 (←)">◀ 上一张</button>
       <button id="btn-next" class="primary" title="下一张图 (→)">下一张 ▶</button>
@@ -724,12 +725,13 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
     <section id="log-section" class="collapsible">
       <header id="log-header">
         <span class="chevron">▸</span>
-        <span class="title">日志</span>
+        <span class="title">运行日志</span>
         <span id="log-count" class="dim"></span>
         <span class="spacer"></span>
         <button id="btn-clear" class="ghost" title="清空日志">清空</button>
       </header>
       <div id="log-body" class="collapsed">
+        <div class="log-hint dim">你代码里 <code>SCUT_Log(...)</code> 的输出会出现在这里。折叠状态下标题上的行数就是提示。</div>
         <pre id="log"></pre>
       </div>
     </section>

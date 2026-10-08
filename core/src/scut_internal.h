@@ -51,6 +51,12 @@ typedef enum {
 void scut_input_set_phase(int phase);
 scut_phase_t scut_input_get_phase(void);
 
+/* --- 默认底图（实现在 scut_input.c） ---
+ * 把输入图（摄像头画面）拷进输出图，作为"用户没配结果图数组"时的显示内容。
+ * 必须在 DRAW 之前调用：DRAW 里若配了结果图数组，scut_env_copy_output()
+ * 会覆盖它，覆盖层再叠在最上面。 */
+void scut_env_seed_output_from_input(void);
+
 /* --- 防呆违规计数 ---
  * 用户在设计外的阶段访问输入图像时递增。
  * 目前只用于 stderr 的一次性提示（见 scut_input.c）。 */

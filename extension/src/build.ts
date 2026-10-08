@@ -301,7 +301,7 @@ export async function build(options: BuildOptions, ctx: BuildContext): Promise<B
     return vscode.window.withProgress(
         {
             location: vscode.ProgressLocation.Notification,
-            title: `SCUT-71：正在编译（${options.mode === 'debug' ? '可调试 -O0' : '发布 -O2'}）`,
+            title: 'SCUT-71：正在编译（用户代码 -O0 可调试）',
             cancellable: true,
         },
         async (progress, token): Promise<BuildResult> => {
@@ -322,7 +322,7 @@ export async function build(options: BuildOptions, ctx: BuildContext): Promise<B
             const dirs = projectDirs(root);
             ch.appendLine(`\n===== SCUT-71 构建 ${new Date().toLocaleString()} =====`);
             ch.appendLine(`工程目录：${root}`);
-            ch.appendLine(`模式：${options.mode}  自动符号发现：${options.autoWatch ? '开' : '关'}`);
+            ch.appendLine(`优化：用户代码 -O0（可调试）· 环境 -O2   自动符号发现：${options.autoWatch ? '开' : '关'}`);
 
             // ---- 2) 定位构建脚本 ----
             //
@@ -548,10 +548,9 @@ async function runBuildScript(
     const args: string[] = [
         script,
         '--project', dirs.root,
-        '--mode', options.mode,
         '--json',
     ];
-    if (options.mode === 'debug' && tc.root) {
+    if (tc.root) {
         args.push('--toolchain', tc.root);
     }
     if (!options.autoWatch) {

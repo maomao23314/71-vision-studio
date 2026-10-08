@@ -85,7 +85,10 @@ export class ScutDebugConfigurationProvider implements vscode.DebugConfiguration
                 request: 'launch',
                 name: 'SCUT-71 仿真调试',
                 program: '${workspaceFolder}/.scut/bin/scut_sim.exe',
-                args: ['--json', '--frames', '1'],
+                // ★ 调试用参数：跑 1 帧就停，方便下断点、单步。
+                //   刻意【不加 --json】—— 调试控制台里显示人话（"[帧 1] 处理 …"）
+                //   比一行 JSON 有用得多；SCUT_Log 走 stderr，照样能看到。
+                args: ['--frames', '1'],
             },
         ];
     }
@@ -145,7 +148,7 @@ export class ScutDebugConfigurationProvider implements vscode.DebugConfiguration
 
         const args = Array.isArray(config.args) && config.args.length > 0
             ? config.args
-            : ['--json', '--frames', '1'];
+            : ['--frames', '1'];
 
         // 合并出最终配置：补齐 program / args / cwd / env
         const resolved: vscode.DebugConfiguration = {

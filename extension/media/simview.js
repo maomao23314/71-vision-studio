@@ -67,9 +67,6 @@
     screen: document.getElementById('screen'),
     placeholder: document.getElementById('placeholder'),
     tProcess: document.getElementById('t-process'),
-    tDraw: document.getElementById('t-draw'),
-    tReport: document.getElementById('t-report'),
-    tFrame: document.getElementById('t-frame'),
     tCycles: document.getElementById('t-cycles'),
     tIndex: document.getElementById('t-index'),
     timingHeader: document.getElementById('timing-header'),
@@ -384,28 +381,6 @@
 
   /* -------------------------------------------------------- 变量面板 */
 
-  function kindToNum(kind) {
-    // 与 core/include/scut_watch.h 的 scut_watch_type_t 枚举一一对应
-    switch (kind) {
-      case 'SCUT_T_I8': return 0;
-      case 'SCUT_T_U8': return 1;
-      case 'SCUT_T_I16': return 2;
-      case 'SCUT_T_U16': return 3;
-      case 'SCUT_T_I32': return 4;
-      case 'SCUT_T_U32': return 5;
-      case 'SCUT_T_I64': return 6;
-      case 'SCUT_T_U64': return 7;
-      case 'SCUT_T_F32': return 8;
-      case 'SCUT_T_F64': return 9;
-      case 'SCUT_T_BOOL': return 10;
-      case 'SCUT_T_PTR': return 11;
-      case 'SCUT_T_STR': return 12;
-      case 'SCUT_T_ENUM': return 13;
-      case 'SCUT_T_STRUCT': return 14;
-      default: return -1;
-    }
-  }
-
   function ensureSelectionInitialised() {
     if (selectedInitialised) {
       return;
@@ -553,7 +528,10 @@
         picked.push({
           name: s.name,
           dims: k2.dims, kind: k2.kind, isStatic: false,
-          total: s.total
+          total: s.total,
+          // ★ manual 必须带过来：查看区也要像勾选区那样区分
+          //   「主动暴露」与「自动捕获」（用户要求：主动在前、颜色区分）。
+          manual: k2.manual === true
         });
       }
       if (picked.length === 0) {
@@ -562,10 +540,28 @@
       }
       el.varsHint.textContent = '';
 
+      // ★ 主动暴露的排前面。快照的顺序来自后端注册顺序（自动注册在先、
+      //   手动 SCUT_Watch 在后），不排序的话"主动暴露"永远沉在最底下。
+      //   排序稳定：同类内部保持原顺序。
+      picked.sort(function (a, b) {
+        return (b.manual ? 1 : 0) - (a.manual ? 1 : 0);
+      });
+
+      var lastGroup = null;
       for (var p = 0; p < picked.length; p++) {
         var cv = picked[p];
+        // 分组标题：与勾选区同一套文案，让两个区一眼能对上
+        if (lastGroup === null || cv.manual !== lastGroup) {
+          var gsep = document.createElement('li');
+          gsep.className = 'pick-group ' + (cv.manual ? 'manual' : 'auto');
+          gsep.textContent = cv.manual
+            ? '主动暴露（代码里显式注册）'
+            : '自动捕获（编译期扫描到）';
+          el.varsList.appendChild(gsep);
+          lastGroup = cv.manual;
+        }
         var li2 = document.createElement('li');
-        li2.className = 'var-item';
+        li2.className = 'var-item' + (cv.manual ? ' is-manual' : ' is-auto');
         li2.setAttribute('data-name', cv.name);
 
         var head = document.createElement('div');
@@ -735,6 +731,7 @@
 
   bind('btn-stop', function () { vscode.postMessage({ type: 'cmd', cmd: 'stop' }); });
   bind('btn-build', function () { vscode.postMessage({ type: 'cmd', cmd: 'build' }); });
+bind('btn-debug', function () { vscode.postMessage({ type: 'cmd', cmd: 'debug' }); });
   // 图集翻页：上一张 / 下一张（走扩展的设置项，IDE 重启后仍停留原地）
   bind('btn-prev', function () { vscode.postMessage({ type: 'cmd', cmd: 'prevPic' }); });
   bind('btn-next', function () { vscode.postMessage({ type: 'cmd', cmd: 'nextPic' }); });
@@ -975,6 +972,8 @@
   setOpen('log');
   applyZoom();
 
-  log('仿真视图已就绪。');
+  // ★ 刻意不往日志区写"视图已就绪"这类环境消息：
+  //   那一区现在只放【用户算法 SCUT_Log 的输出】，混进环境噪声会让
+  //   "日志区到底有没有我的输出"变得难判断。
   vscode.postMessage({ type: 'ready' });
 })();

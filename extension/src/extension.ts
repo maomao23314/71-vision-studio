@@ -270,9 +270,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(SIM_VIEW_ID, simView),
-        // ★ 第二个视图共用同一个 provider 实例：
-        //   变量面板与仿真视图需要看到【同一份】勾选状态；
-        //   用两个实例会让两边勾选不同步（这是「保持简单」的刻意选择）。
+        // ★ 把 provider 自己也算进 subscriptions：它的 dispose() 负责收掉
+        //   仿真子进程，插件卸载/窗口关闭时不会留下孤儿进程。
         simView,
     );
 
@@ -295,6 +294,11 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('scut71.openSimView', () => commandOpenSimView()),
         vscode.commands.registerCommand('scut71.bench', () => simView.bench()),
         vscode.commands.registerCommand('scut71.run', () => simView.run()),
+        // ★ 独立的「调试」入口：不再只靠 F5。
+        //   F5 在没有 launch.json 时要靠 VS Code 自己挑调试器，
+        //   旁边还装着 cpptools（也认 C 文件），用户很容易走错 ——
+        //   这里给一个"点了就调"的按钮，入口唯一且明确。
+        vscode.commands.registerCommand('scut71.debug', () => commandDebug(simView, log)),
         vscode.commands.registerCommand('scut71.stop', () => commandStop(simView, log)),
         vscode.commands.registerCommand('scut71.prevPic', () => simView.prevPic()),
         vscode.commands.registerCommand('scut71.nextPic', () => simView.nextPic()),
@@ -349,12 +353,17 @@ export function deactivate(): void {
  *  命令实现
  * ========================================================================== */
 
-/** 取构建选项（统一从设置里读，保证命令面板与其它入口行为一致）。 */
+/**
+ * 取构建选项（统一从设置里读，保证命令面板与其它入口行为一致）。
+ *
+ * ★ 没有「构建模式」：优化等级是工程约定而非用户选项 ——
+ *   用户算法恒 `-g -O0`（可调试），环境自身恒 `-O2`（跑得快）。
+ *   （原来的 Scut71: Build Mode 参数只影响环境库，对用户没有意义，
+ *     已按用户要求删除。）
+ */
 function buildOptions(): BuildOptions {
     const cfg = vscode.workspace.getConfiguration('scut71');
-    const mode = cfg.get<string>('buildMode', 'debug');
     return {
-        mode: mode === 'release' ? 'release' : 'debug',
         autoWatch: cfg.get<boolean>('autoWatch', true),
     };
 }
@@ -429,7 +438,7 @@ async function commandBuild(
     await simView.stop();
 
     const options = buildOptions();
-    log(`[构建] ${describeProject(project)}（模式 ${options.mode}，自动发现 ${options.autoWatch ? '开' : '关'}）`);
+    log(`[构建] ${describeProject(project)}（自动发现 ${options.autoWatch ? '开' : '关'}）`);
 
     let result: BuildResult;
     try {
@@ -548,6 +557,40 @@ async function commandOpenSimView(): Promise<void> {
 
 
 
+
+/**
+ * 「调试」：显式启动一个 scut71 调试会话。
+ *
+ * ★ 为什么要有这个命令（用户原话："最最重要的调试功能打不开"）：
+ *   之前唯一的入口是 F5，而 F5 在没有 launch.json 时要由 VS Code
+ *   自己挑调试器 —— 本机还装着 ms-vscode.cpptools（同样认 C 文件），
+ *   于是按 F5 很可能落到 cppdbg 上（它需要 launch.json，自然"打不开"）。
+ *   （更糟的是旧版还把 F5 绑给了「运行 N 帧」，在仿真视图里按 F5 直接是运行。）
+ *   现在：F5 恢复成 VS Code 标准的"开始调试"含义，
+ *   另外给一个图标按钮，走我们自己的类型 scut71 —— 入口唯一、不歧义。
+ */
+async function commandDebug(simView: SimViewProvider, log: (line: string) => void): Promise<void> {
+    // 先停掉正在跑的仿真进程：同一份 exe 同时被"运行"和"调试"两份进程用，
+    // 用户看到的画面与断点命中的不是同一个进程，没有任何线索能看出来。
+    await simView.stop();
+
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    const config: vscode.DebugConfiguration = {
+        type: DEBUG_TYPE,
+        request: 'launch',
+        name: 'SCUT-71 仿真调试',
+    };
+    log('[调试] 正在启动调试会话…');
+    // startDebugging 会走 registerDebugConfigurationProvider 注册的
+    // resolveDebugConfiguration —— 也就是补齐 program / args / cwd / PATH
+    // 的那段逻辑，与 F5 完全同一条路径，不重复实现。
+    const ok = await vscode.debug.startDebugging(folder, config);
+    if (!ok) {
+        log('[调试] 调试会话未能启动。'
+            + '常见原因：还没编译（先按 Ctrl+Shift+B）、没有识别到工程、'
+            + '或没找到 lldb-dap。上方如果有错误提示，按提示操作即可。');
+    }
+}
 
 async function commandStop(simView: SimViewProvider, log: (line: string) => void): Promise<void> {
     log('[命令] 停止仿真。');
