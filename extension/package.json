@@ -301,6 +301,24 @@
           "type": "boolean",
           "default": true,
           "description": "编译时自动发现全局变量（关闭可加快构建，但变量面板会是空的）"
+        },
+        "scut71.initFunctions": {
+          "type": "string",
+          "default": "",
+          "editPresentation": "multilineText",
+          "markdownDescription": "**初始化函数**（启动时调用一次，不计时）。\n\n填用户代码里的函数名，每行一个，按顺序执行。例如：\n\n    my_init\n    Perspective_Init\n\n留空 = 没有初始化钩子。注册写在【插件设置】里而不是用户代码里，这样用户代码保持与车载工程完全一致、直接可移植。"
+        },
+        "scut71.frameFunctions": {
+          "type": "string",
+          "default": "",
+          "editPresentation": "multilineText",
+          "markdownDescription": "**图像处理函数**（每帧调用，★ 计时段 —— 测速测的就是它）。\n\n填用户代码里的函数名，每行一个。例如：\n\n    image_process\n\n留空 = 没有处理钩子（画面只显示输入图）。"
+        },
+        "scut71.postFunctions": {
+          "type": "string",
+          "default": "",
+          "editPresentation": "multilineText",
+          "markdownDescription": "**后处理函数**（每帧调用一次，不计时：覆盖层、日志等观测用）。\n\n填用户代码里的函数名，每行一个。例如：\n\n    my_draw\n    my_report\n"
         }
       }
     }

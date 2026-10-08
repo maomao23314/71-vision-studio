@@ -35,15 +35,116 @@ interface AttachedView {
     visible: () => boolean;
 }
 
-interface AttachedViewImpl {
+export interface SimViewDeps {
+    /** 当前可执行文件路径（构建产物）。未构建时返回 undefined。 */
+    getExePath(): string | undefined;
+    /** 工具链 bin 目录（子进程 PATH 前置用）。未就绪时返回 undefined。 */
+    getToolchainBin(): string | undefined;
+    /** 用户勾选的图集目录（设置项）。未设置时返回 undefined。 */
+    getPicDir(): string | undefined;
+    /** 环境日志（写进侧边栏日志折叠区）。 */
+    log(line: string): void;
+}
+export class SimViewProvider implements vscode.WebviewViewProvider {
+    extensionUri: vscode.Uri;
+    deps: SimViewDeps;
+    private views = new Set<AttachedView>();
+    private session: SimSessionImpl | undefined;
+    private manifest: VariableManifest | undefined;
+    private selected = new Set<string>();
+    private lastExePath: string | undefined;
+    /** 变量快照缓存：webview 重建（切走再切回）时立刻把面板填上，不用等下一帧。 */
+    private lastSnapshot: VariableSnapshot[] = [];
+    private lastTiming: FramePacket['timing'] | undefined;
+    private lastFrameIndex = 0;
+    /** 上一条加载失败的原因（通知去重用）。 */
+    private lastLoadError: string | undefined;
+    /** 上次弹加载失败通知的时间戳（节流用，毫秒）。 */
+    private lastLoadErrorAt = 0;
+    private disposables: vscode.Disposable[] = [];
+
+    constructor(extensionUri: vscode.Uri, deps: SimViewDeps) {
+        this.extensionUri = extensionUri;
+        this.deps = deps;
+    }
+
     dispose(): void {
-        this.panel?.dispose();
-        this.panel = undefined;
         for (const d of this.disposables.splice(0)) {
             d.dispose();
         }
         this.views.clear();
         void this.stop();
+    }
+
+    /* --------------------------------------------------------- 视图注册 */
+
+    /**
+     * 侧边栏视图被打开时由 VS Code 调用。
+     *
+     * ★ 坑 1：enableScripts / localResourceRoots 只能在这里设。
+     *   写在 registerWebviewViewProvider 的第三个参数上是类型错误
+     *   （那里的内联类型只有 retainContextWhenHidden 一个字段）。
+     * ★ 坑 2：不用 retainContextWhenHidden（默认 false）—— webview 文档
+     *   隐藏时销毁、重现时重建，所以状态用 getState/setState 持久化。
+     */
+    public resolveWebviewView(
+        view: vscode.WebviewView,
+        context: vscode.WebviewViewResolveContext,
+        _token: vscode.CancellationToken,
+    ): void {
+        const kind: ViewKind = view.viewType === SIM_VIEW_ID ? 'sim' : 'vars';
+        view.webview.options = {
+            enableScripts: true,
+            localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'media')],
+        };
+        view.webview.html = this.html(view.webview, kind);
+        const attached: AttachedView = {
+            kind,
+            post: (msg: unknown) => {
+                void view.webview.postMessage(msg);
+            },
+            visible: () => view.visible,
+        };
+        this.views.add(attached);
+        // 不可见即停止产帧（停在我们这侧：不放行下一帧），可见即恢复。
+        const visSub = view.onDidChangeVisibility(() => {
+            this.deps.log(`[视图] 可见性变化：${view.visible ? '可见' : '隐藏'}`);
+            this.updateProduction();
+            if (view.visible) {
+                // webview 文档是新建的，什么都不记得 → 补齐上下文
+                this.sendCatalog(attached);
+                this.sendSnapshot();
+                this.sendStatus();
+            }
+        });
+        // 被用户彻底隐藏（右键取消勾选）会 dispose，摘掉集合避免推给死 webview
+        const dispoSub = view.onDidDispose(() => {
+            this.views.delete(attached);
+            visSub.dispose();
+            dispoSub.dispose();
+            this.updateProduction();
+        });
+        const msgSub = view.webview.onDidReceiveMessage((raw: unknown) => {
+            this.handleMessage(raw);
+        });
+        this.disposables.push(visSub, dispoSub, msgSub);
+        // 恢复 webview 持久化的状态（勾选）
+        const st = context.state as { selected?: unknown } | undefined;
+        if (st && Array.isArray(st.selected)) {
+            for (const n of st.selected) {
+                if (typeof n === 'string') {
+                    this.selected.add(n);
+                }
+            }
+            this.deps.log(`[视图] 从持久化状态恢复 ${this.selected.size} 个勾选变量。`);
+        }
+        this.updateProduction();
+    }
+
+    /** 宿主收到每帧快照时调用：缓存 + 推给 webview。 */
+    public pushSnapshot(snap: VariableSnapshot[]): void {
+        this.lastSnapshot = snap;
+        this.sendSnapshot();
     }
 
     /* ----------------------------------------------------------- 对外 API */
@@ -383,13 +484,6 @@ interface AttachedViewImpl {
                     void this.prevPic();
                 } else if (cmd === 'nextPic') {
                     void this.nextPic();
-                } else if (cmd === 'openPanel') {
-                    /* 在编辑器区打开大图。
-                     * ★ 为什么不是 resize 侧边栏：侧边栏宽度由 VS Code 布局决定，
-                     *   188x120 放大到能看清边缘时必然超出栏宽。
-                     *   编辑器区可以拉满、可以分屏、可以随时关，
-                     *   这才是"既要大又要还在 IDE 里"的正确解法。 */
-                    this.openPanel();
                 } else if (cmd === 'clearLog') {
                     this.pushLog('');
                 }

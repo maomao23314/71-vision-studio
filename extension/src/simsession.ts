@@ -55,7 +55,7 @@ export class SimSessionImpl implements SimSession {
     private readonly exitCbs: Array<(code: number | null) => void> = [];
 
     /** 选中的变量名。变了要重启进程才能让 --select 生效（见 setSelectedVariables）。 */
-    private selected: string[];
+
 
     /** 背压：只允许一帧在途。 */
     private inFlightFrame = -1;
@@ -74,7 +74,7 @@ export class SimSessionImpl implements SimSession {
     constructor(opts: SimSessionOptions) {
         this.opts = opts;
         this.exePath = opts.exePath;
-        this.selected = opts.selected ? [...opts.selected] : [];
+
     }
 
     get frameInFlight(): boolean {
@@ -370,10 +370,9 @@ export class SimSessionImpl implements SimSession {
      *     · 如果启动时带了 --select，则记录「需要重启才生效」，
      *       由 UI 提示用户，而不是偷偷重启。
      */
-    setSelectedVariables(names: string[]): void {
-        // 只更新宿主侧的过滤名单 —— 快照每帧全量发，这里只是过滤口径变化，
-        // 【不需要重启进程，更不需要重新编译】（用户原话：勾选后要能动态捕获）。
-        this.selected = [...names];
+    setSelectedVariables(_names: string[]): void {
+        // 快照每帧全量发，宿主侧按勾选过滤 —— 这里无事可做。
+        // （保留方法：SimSession 接口的一部分，未来若后端支持运行期 select 可复用。）
     }
 
 

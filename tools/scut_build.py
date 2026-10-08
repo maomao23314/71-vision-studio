@@ -1369,11 +1369,8 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
                         "    这是环境自身的问题，不是你的算法问题。\n"
                         "    下一步：把上面的编译输出贴给我们。"
                         % os.path.basename(src))
-    # ⑧ 用户代码【强制 -O0】（用户原话："用户代码需要强制O0优化（不优化）"）：
-    #   -O2 会重排/合并语句、把变量优化进寄存器 —— 逐行调试时断点漂移、
-    #   变量看不到值，与"仿真环境用于理解算法行为"的目标直接冲突。
-    #   release 模式只影响核心库与链接参数，用户源码永远 -O0。
-    mode_flags = ["-g", "-O0"]
+                    return finish(2)
+                core_objs.append(obj)
 
             ar = shutil.which("ar") or shutil.which("llvm-ar")
             if not ar:
@@ -1399,6 +1396,11 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
             os.replace(tmp_lib, core_lib)
             reporter.human("  核心库已构建: %s" % core_lib)
 
+    # ⑧ 用户代码【强制 -O0】（用户原话："用户代码需要强制O0优化（不优化）"）：
+    #   -O2 会重排/合并语句、把变量优化进寄存器 —— 逐行调试时断点漂移、
+    #   变量看不到值，与"仿真环境用于理解算法行为"的目标直接冲突。
+    #   release 模式只影响核心库与链接参数，用户源码永远 -O0。
+    mode_flags = ["-g", "-O0"]
     # --- 3) 编译期契约头文件 ------------------------------------------------
     #
     # 三条路径，优先级从高到低：
