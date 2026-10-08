@@ -1,0 +1,320 @@
+{
+  "name": "scut-71-vision-studio",
+  "displayName": "SCUT-71 Vision Studio",
+  "description": "智能车视觉仿真环境 —— 只写算法，其余交给环境",
+  "version": "0.8.2",
+  "publisher": "scut-racing",
+  "license": "GPL-3.0",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Debuggers",
+    "Visualization"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onDebugResolve:scut71",
+    "onStartupFinished"
+  ],
+  "files": [
+    "out/**",
+    "media/**",
+    "templates/**",
+    "sdk/**",
+    "package.json",
+    "README.md"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "scut71.doctor",
+        "title": "环境自检",
+        "category": "SCUT-71",
+        "icon": "$(heart)"
+      },
+      {
+        "command": "scut71.build",
+        "title": "编译仿真程序",
+        "category": "SCUT-71",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "scut71.newProject",
+        "title": "新建仿真工程",
+        "category": "SCUT-71",
+        "icon": "$(new-folder)"
+      },
+      {
+        "command": "scut71.openSimView",
+        "title": "打开仿真视图",
+        "category": "SCUT-71",
+        "icon": "$(device-camera)"
+      },
+      {
+        "command": "scut71.bench",
+        "title": "测速（同图重复 N 次取平均）",
+        "category": "SCUT-71",
+        "icon": "$(dashboard)"
+      },
+      {
+        "command": "scut71.stop",
+        "title": "停止",
+        "category": "SCUT-71",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "scut71.selectVariables",
+        "title": "选择要观察的变量",
+        "category": "SCUT-71",
+        "icon": "$(checklist)"
+      },
+      {
+        "command": "scut71.prevPic",
+        "title": "上一张图",
+        "category": "SCUT-71",
+        "icon": "$(chevron-left)"
+      },
+      {
+        "command": "scut71.nextPic",
+        "title": "下一张图",
+        "category": "SCUT-71",
+        "icon": "$(chevron-right)"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "scut71.build",
+        "key": "ctrl+shift+b",
+        "mac": "cmd+shift+b",
+        "when": "!inDebugMode"
+      },
+      {
+        "command": "scut71.stop",
+        "key": "shift+f5",
+        "mac": "shift+f5",
+        "when": "view == scut71.simview"
+      },
+      {
+        "command": "scut71.bench",
+        "key": "f9",
+        "mac": "f9",
+        "when": "view == scut71.simview"
+      },
+      {
+        "command": "scut71.prevPic",
+        "key": "left",
+        "mac": "left",
+        "when": "view == scut71.simview"
+      },
+      {
+        "command": "scut71.nextPic",
+        "key": "right",
+        "mac": "right",
+        "when": "view == scut71.simview"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "scut71.build",
+          "when": "view == scut71.simview",
+          "group": "navigation@1"
+        },
+        {
+          "command": "scut71.bench",
+          "when": "view == scut71.simview",
+          "group": "navigation@3"
+        },
+        {
+          "command": "scut71.prevPic",
+          "when": "view == scut71.simview",
+          "group": "navigation@5"
+        },
+        {
+          "command": "scut71.nextPic",
+          "when": "view == scut71.simview",
+          "group": "navigation@6"
+        },
+        {
+          "command": "scut71.stop",
+          "when": "view == scut71.simview",
+          "group": "navigation@7"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "scut71.build",
+          "when": "resourceLangId == c || resourceLangId == cpp",
+          "group": "navigation@1"
+        },
+        {
+          "command": "scut71.nextPic",
+          "when": "resourceLangId == c || resourceLangId == cpp",
+          "group": "navigation@3"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "scut71.build",
+          "when": "resourceLangId == c || resourceLangId == cpp",
+          "group": "scut71@1"
+        }
+      ],
+      "commandPalette": []
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "scut71",
+          "title": "SCUT-71 Vision",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "scut71": [
+        {
+          "id": "scut71.simview",
+          "name": "仿真",
+          "type": "webview"
+        }
+      ]
+    },
+    "debuggers": [
+      {
+        "type": "scut71",
+        "label": "SCUT-71 仿真调试",
+        "languages": [
+          "c",
+          "cpp"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": [],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "要调试的可执行文件（留空则自动使用 .scut/bin/scut_sim.exe）"
+              },
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "传给仿真程序的命令行参数"
+              },
+              "cwd": {
+                "type": "string",
+                "description": "工作目录（留空则用工程根目录）"
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "scut71",
+            "request": "launch",
+            "name": "SCUT-71 仿真调试"
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "SCUT-71: 调试仿真程序",
+            "description": "调试 .scut/bin/scut_sim.exe（路径自动补齐，不需要手写）",
+            "body": {
+              "type": "scut71",
+              "request": "launch",
+              "name": "SCUT-71 仿真调试"
+            }
+          }
+        ]
+      }
+    ],
+    "breakpoints": [
+      {
+        "language": "c"
+      },
+      {
+        "language": "cpp"
+      }
+    ],
+    "configurationDefaults": {
+      "C_Cpp.intelliSenseEngine": "disabled"
+    },
+    "configuration": {
+      "title": "SCUT-71 Vision Studio",
+      "properties": {
+        "scut71.toolchainPath": {
+          "type": "string",
+          "default": "",
+          "description": "工具链根目录（留空则依次探测：SCUT71_TOOLCHAIN 环境变量 → D:\\TOOLS\\llvm-mingw → PATH）"
+        },
+        "scut71.autoInstallToolchain": {
+          "type": "boolean",
+          "default": true,
+          "description": "缺少工具链时提示安装步骤"
+        },
+        "scut71.picDir": {
+          "type": "string",
+          "default": "",
+          "description": "测试图集目录。留空 = 用工程里的 pic/1。运行期设置，改完立即生效，不需要重新编译。"
+        },
+        "scut71.picExt": {
+          "type": "string",
+          "default": "",
+          "description": "测试图后缀，可用逗号分隔多个（例如 \".bmp,.png\"，按顺序优先匹配）。留空 = 用工程 config.h 的 SCUT_PIC_EXT。运行期设置。注意：目前解码器只支持 BMP，其它格式会明确报错而不是静默失败。"
+        },
+        "scut71.startFrame": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0,
+          "description": "从图集里的第几张图开始。0 起图集（存在 0.bmp/0.png）可设 0；1 起图集最小 1（设 0 会被后端夹回 1）。"
+        },
+        "scut71.processRepeat": {
+          "type": "number",
+          "default": 1,
+          "minimum": 1,
+          "description": "每帧重复调用图像处理函数的次数。设成 100 之类可以看到更稳定的平均耗时（单次太快时计时抖动大）。运行期设置。"
+        },
+        "scut71.benchRepeat": {
+          "type": "number",
+          "default": 1000,
+          "minimum": 1,
+          "description": "「测速」按钮在同一张图上重复调用图像处理的次数（沿用旧仿真环境 R 键的做法：跑很多次取平均 cycles）。次数越大读数越稳，但等待越久。"
+        },
+        "scut71.buildMode": {
+          "type": "string",
+          "enum": [
+            "debug",
+            "release"
+          ],
+          "enumDescriptions": [
+            "debug：-g -O0，可断点单步（默认）",
+            "release：-O2 -DNDEBUG，用来看优化后的耗时"
+          ],
+          "default": "debug",
+          "description": "编译配置。release 用来看 -O2 后的真实耗时，这也是做算法优化的主要手段之一"
+        },
+        "scut71.autoWatch": {
+          "type": "boolean",
+          "default": true,
+          "description": "编译时自动发现全局变量（关闭可加快构建，但变量面板会是空的）"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "sync-sdk": "node scripts/sync-sdk.js",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package --no-dependencies --allow-missing-repository"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.4.0",
+    "@vscode/vsce": "^2.24.0"
+  }
+}

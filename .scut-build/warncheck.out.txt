@@ -1,0 +1,21 @@
+source exists: True
+source path  : D:\22车队管理\一轮考核\视觉组\SCUT-71-vision-studio\backends\headless\scut_headless_main.c
+source bytes : 102912
+
+=== gcc -O2 -DNDEBUG === exit=0  diagnostics=0
+    cmd: gcc -std=c11 -Wall -Wextra -O2 -DNDEBUG -ID:\22车队管理\一轮考核\视觉组\SCUT-71-vision-studio\core\include -ID:\22车队管理\一轮考核\视觉组\SCUT-71-vision-studio\core\src -ID:\22车队管理\一轮考核\视觉组\集成仿真环境测试\scut71-project -ID:\22车队管理\一轮考核\视觉组\集成仿真环境测试\scut71-project\.scut\gen -ID:\22车队管理\一轮考核\视觉组\集成仿真环境测试\scut71-project\code -c D:\22车队管理\一轮考核\视觉组\SCUT-71-vision-studio\backends\headless\scut_headless_main.c -o C:\Users\SQY\AppData\Local\Temp\wcheck_gcc_O2.o
+    (no compiler output at all)
+
+=== gcc -g -O0 === exit=0  diagnostics=0
+    cmd: gcc -std=c11 -Wall -Wextra -g -O0 -ID:\22车队管理\一轮考核\视觉组\SCUT-71-vision-studio\core\include -ID:\22车队管理\一轮考核\视觉组\SCUT-71-vision-studio\core\src -ID:\22车队管理\一轮考核\视觉组\集成仿真环境测试\scut71-project -ID:\22车队管理\一轮考核\视觉组\集成仿真环境测试\scut71-project\.scut\gen -ID:\22车队管理\一轮考核\视觉组\集成仿真环境测试\scut71-project\code -c D:\22车队管理\一轮考核\视觉组\SCUT-71-vision-studio\backends\headless\scut_headless_main.c -o C:\Users\SQY\AppData\Local\Temp\wcheck_gcc_g.o
+    (no compiler output at all)
+
+=== clang -O2 -DNDEBUG === exit=0  diagnostics=0
+    cmd: D:\TOOLS\llvm-mingw\bin\clang.exe -std=c11 -Wall -Wextra -O2 -DNDEBUG -ID:\22车队管理\一轮考核\视觉组\SCUT-71-vision-studio\core\include -ID:\22车队管理\一轮考核\视觉组\SCUT-71-vision-studio\core\src -ID:\22车队管理\一轮考核\视觉组\集成仿真环境测试\scut71-project -ID:\22车队管理\一轮考核\视觉组\集成仿真环境测试\scut71-project\.scut\gen -ID:\22车队管理\一轮考核\视觉组\集成仿真环境测试\scut71-project\code -c D:\22车队管理\一轮考核\视觉组\SCUT-71-vision-studio\backends\headless\scut_headless_main.c -o C:\Users\SQY\AppData\Local\Temp\wcheck_clang_O2.o
+    (no compiler output at all)
+
+=== clang -g -O0 === exit=0  diagnostics=0
+    cmd: D:\TOOLS\llvm-mingw\bin\clang.exe -std=c11 -Wall -Wextra -g -O0 -ID:\22车队管理\一轮考核\视觉组\SCUT-71-vision-studio\core\include -ID:\22车队管理\一轮考核\视觉组\SCUT-71-vision-studio\core\src -ID:\22车队管理\一轮考核\视觉组\集成仿真环境测试\scut71-project -ID:\22车队管理\一轮考核\视觉组\集成仿真环境测试\scut71-project\.scut\gen -ID:\22车队管理\一轮考核\视觉组\集成仿真环境测试\scut71-project\code -c D:\22车队管理\一轮考核\视觉组\SCUT-71-vision-studio\backends\headless\scut_headless_main.c -o C:\Users\SQY\AppData\Local\Temp\wcheck_clang_g.o
+    (no compiler output at all)
+
+RESULT: PASS (zero warnings, gcc + clang, -O2 and -O0)

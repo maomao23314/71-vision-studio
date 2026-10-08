@@ -1,0 +1,635 @@
+/* ==========================================================================
+ *  simview.css —— 仿真视图样式
+ *  --------------------------------------------------------------------------
+ *  ★ 全部颜色一律走 VS Code 主题变量（--vscode-*）。
+ *    写死颜色会在浅色主题下变成"白底白字"，而学生十有八九用的是浅色主题。
+ *    变量名来自 VS Code 的「主题颜色」参考页；取不到时用 fallback 兜底。
+ *  ★ 布局用 flex + min-height:0，这样日志区能正确收缩，
+ *    否则在窄侧边栏里 <pre> 会把整个面板撑出横向滚动。
+ * ========================================================================== */
+
+:root {
+  --scut-gap: 6px;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  font-family: var(--vscode-font-family, sans-serif);
+  font-size: var(--vscode-font-size, 13px);
+  color: var(--vscode-foreground, #ccc);
+  background: var(--vscode-sideBar-background, transparent);
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  gap: var(--scut-gap);
+  padding: var(--scut-gap);
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+/* ------------------------------------------------------------ 画面区域 */
+
+#screen-section {
+  flex: 0 0 auto;
+}
+
+/* 画面区右上角的浮层按钮组
+ * ★ 为什么用绝对定位浮在画面角上：
+ *   侧边栏宽度有限，工具栏再占一行会明显压缩画面。
+ *   浮层只在鼠标移入画面区时出现，平时不占空间也不干扰看图。 */
+#screen-actions {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  gap: 3px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+  z-index: 5;
+}
+
+#screen-section {
+  position: relative;   /* 作为 #screen-actions 的定位参照 */
+}
+
+#screen-section:hover #screen-actions,
+#screen-actions:focus-within {
+  opacity: 1;
+}
+
+#screen-actions button {
+  padding: 2px 7px;
+  font-size: 11px;
+  line-height: 1.5;
+  border-radius: 3px;
+  /* 浮在图像上，必须自带底色才看得清 */
+  background: var(--vscode-button-secondaryBackground, rgba(40, 40, 40, 0.85));
+  color: var(--vscode-button-secondaryForeground, #ddd);
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.4));
+}
+
+#screen-actions button.primary {
+  background: var(--vscode-button-background, #0e639c);
+  color: var(--vscode-button-foreground, #fff);
+}
+
+/* 计时独立成栏（可折叠） */
+
+
+.collapsible > header:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.12));
+}
+
+.collapsible > header .chevron {
+  width: 10px;
+  color: var(--vscode-descriptionForeground, #888);
+}
+
+#timing-body.collapsed {
+  display: none;
+}
+
+#timing-summary {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.timing-note {
+  margin-top: 3px;
+  line-height: 1.45;
+}
+
+.toolbar-sep {
+  flex: 0 0 1px;
+  align-self: stretch;
+  margin: 2px 2px;
+  background: var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+}
+
+#screen-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 90px;
+  padding: 4px;
+  background: var(--vscode-editor-background, #1e1e1e);
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: 3px;
+  overflow: auto;
+}
+
+#screen {
+  display: block;
+  /* ★ 关键：灰度图放大时必须保留硬边，
+     否则浏览器会做双线性插值，188x120 放大后糊成一团，
+     学生根本看不出边缘在哪 —— 而找边正是这个项目的全部内容。 */
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  background: #000;
+}
+
+#placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  color: var(--vscode-descriptionForeground, #888);
+  font-size: 12px;
+  line-height: 1.6;
+  pointer-events: none;
+}
+
+.dim {
+  color: var(--vscode-descriptionForeground, #888);
+  opacity: 0.85;
+}
+
+/* --------------------------------------------------------------- 计时 */
+
+.timing {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin-top: 4px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--vscode-descriptionForeground, #999);
+}
+
+.timing b {
+  color: var(--vscode-foreground, #ddd);
+  font-weight: 600;
+}
+
+/* ------------------------------------------------------------- 工具栏 */
+
+#toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+button {
+  font-family: inherit;
+  font-size: 12px;
+  padding: 3px 9px;
+  color: var(--vscode-button-foreground, #fff);
+  background: var(--vscode-button-background, #0e639c);
+  border: 1px solid transparent;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+button:hover {
+  background: var(--vscode-button-hoverBackground, #1177bb);
+}
+
+button:active {
+  transform: translateY(1px);
+}
+
+button:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, #007fd4);
+  outline-offset: 1px;
+}
+
+button.danger {
+  background: var(--vscode-inputValidation-errorBorder, #be1100);
+  color: var(--vscode-foreground, #fff);
+}
+
+button.ghost {
+  color: var(--vscode-foreground, #ccc);
+  background: var(--vscode-button-secondaryBackground, transparent);
+  border-color: var(--vscode-panel-border, rgba(128, 128, 128, 0.4));
+}
+
+button.ghost:hover {
+  background: var(--vscode-button-secondaryHoverBackground, rgba(128, 128, 128, 0.18));
+}
+
+.runN {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+#runN-count {
+  width: 4.6em;
+  padding: 3px 4px;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--vscode-input-foreground, #ccc);
+  background: var(--vscode-input-background, #3c3c3c);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 3px;
+}
+
+#runN-count:focus {
+  outline: 1px solid var(--vscode-focusBorder, #007fd4);
+}
+
+/* --------------------------------------------------------------- 状态 */
+
+.status {
+  font-size: 11px;
+  padding: 3px 6px;
+  border-radius: 3px;
+  color: var(--vscode-descriptionForeground, #999);
+  background: var(--vscode-textBlockQuote-background, rgba(128, 128, 128, 0.1));
+  word-break: break-all;
+}
+
+/* ----------------------------------------------------------- 变量面板 */
+
+#vars-section {
+  flex: 1 1 auto;
+  min-height: 60px;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+  padding-top: 4px;
+  overflow: hidden;
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+.hint {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--vscode-descriptionForeground, #999);
+  padding: 2px 0 4px;
+}
+
+#vars-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.var-item {
+  padding: 2px 0 4px;
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.15));
+}
+
+.var-head {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.var-head input[type="checkbox"] {
+  margin: 0;
+  flex: 0 0 auto;
+}
+
+.var-name {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+  color: var(--vscode-foreground, #ddd);
+}
+
+.var-meta {
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground, #888);
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.var-body {
+  padding: 2px 0 0 18px;
+}
+
+.var-value {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--vscode-textPreformat-foreground, var(--vscode-foreground, #ccc));
+  word-break: break-all;
+  max-height: 6.5em;
+  overflow-y: auto;
+}
+
+canvas.spark {
+  display: block;
+  width: 100%;
+  height: 34px;
+  margin-top: 3px;
+  /* canvas 的 CSS 尺寸和位图尺寸不一致时，曲线会被平滑放大。
+     对曲线来说这没问题（我们就是要平滑），所以这里【不】用 pixelated。 */
+  background: var(--vscode-editor-background, rgba(0, 0, 0, 0.2));
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+  border-radius: 2px;
+}
+
+/* --------------------------------------------------------------- 日志 */
+
+#log-section {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+  padding-top: 4px;
+}
+
+#log-body.collapsed {
+  display: none;
+}
+
+#log {
+  margin: 0;
+  max-height: 26vh;
+  overflow-y: auto;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--vscode-descriptionForeground, #999);
+}
+
+/* ==========================================================================
+ *  画面区交互（缩放 / 平移）
+ *  --------------------------------------------------------------------------
+ *  ★ 拖动时把光标换成抓手，是"可以拖"唯一的视觉线索。
+ *    没有它，用户不会知道放大之后还能移动视野。
+ * ========================================================================== */
+
+#screen-wrap.dragging {
+  cursor: grabbing;
+}
+
+#screen-wrap {
+  cursor: grab;
+}
+
+/* 图片信息行：显示"第 N 帧 · pic/1/3.bmp" */
+.pic-info {
+  margin-top: 3px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ==========================================================================
+ *  变量勾选区（与查看区分离）
+ * ========================================================================== */
+
+#pick-body.collapsed {
+  display: none;
+}
+
+.pick-hint {
+  margin-bottom: 5px;
+  line-height: 1.5;
+}
+
+#pick-filter {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 5px;
+  padding: 3px 6px;
+  font-size: 12px;
+  color: var(--vscode-input-foreground, #ccc);
+  background: var(--vscode-input-background, #3c3c3c);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 2px;
+}
+
+.pick-tools {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 5px;
+}
+
+#pick-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 32vh;
+  overflow-y: auto;
+}
+
+.pick-item {
+  padding: 1px 0;
+}
+
+.pick-item label {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  cursor: pointer;
+  padding: 1px 4px;
+  border-radius: 2px;
+}
+
+.pick-item label:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.12));
+}
+
+.pick-empty {
+  padding: 6px 4px;
+}
+
+/* ==========================================================================
+ *  变量查看区
+ * ========================================================================== */
+
+#vars-body.collapsed {
+  display: none;
+}
+
+button.tiny {
+  margin-top: 4px;
+  padding: 1px 6px;
+  font-size: 11px;
+}
+
+/* 结构体字段展开：诚实说明"字段名不可知" */
+.struct-detail {
+  margin-top: 4px;
+}
+
+.struct-note {
+  line-height: 1.5;
+  margin-bottom: 4px;
+}
+
+table.struct-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 11px;
+}
+
+table.struct-table th,
+table.struct-table td {
+  text-align: left;
+  padding: 1px 6px;
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+  color: var(--vscode-descriptionForeground, #999);
+}
+
+/* 「变量面板」视图已被合并进单一视图；这条兜底规则保留，
+ * 以防旧 profile 里还留着 scut71.variables 的持久化布局。 */
+body[data-kind="vars"] #screen-section,
+body[data-kind="vars"] #toolbar {
+  display: none;
+}
+
+/* ==========================================================================
+ *  编辑器区大图面板（独立窗口）
+ *  --------------------------------------------------------------------------
+ *  ★ 为什么需要单独一套规则：
+ *    侧边栏是【竖直窄条】，画 188×120 的横图怎么放都挤；
+ *    编辑器区是【横向大块】，正好和图的形状匹配。
+ *    所以面板模式下：画面区占满剩余高度，画布按【宽高都适应】缩放，
+ *    变量/日志默认折叠 —— 把空间全部让给画面。
+ * ========================================================================== */
+
+/* 面板模式：画面区吃掉剩余空间 */
+body[data-surface="panel"] #screen-section {
+  flex: 1 1 auto;
+  min-height: 0;          /* 允许 flex 子项收缩，否则会撑破容器 */
+  display: flex;
+  flex-direction: column;
+}
+
+body[data-surface="panel"] #screen-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 面板模式：变量/日志默认收起（脚本会先设好 state，这里只是兜底） */
+body[data-surface="panel"] #pick-body,
+body[data-surface="panel"] #log-body {
+  display: none;
+}
+
+/* 面板模式：浮动按钮常显（不要求鼠标移入）——大图上找按钮更难 */
+body[data-surface="panel"] #screen-actions {
+  opacity: 1;
+}
+
+
+/* ==========================================================================
+ *  勾选区 / 查看区 【统一样式】
+ *  --------------------------------------------------------------------------
+ *  ★ 为什么单独写一段（用户原话："选择变量和查看变量我不知道为什么
+ *    同一个组件要长得不一样"）：
+ *    两区是同一个"变量"概念的两个视图，行内结构不同（一边是复选框、
+ *    一边是数值），但【字号、行距、缩进、hover 反馈】必须完全一致，
+ *    否则看起来像两个不同的工具拼在一起。
+ *    早期两套类名各自定义，字号差 1px、间距差 2px —— 肉眼就能看出"不像"。
+ *    这里用同一组选择器把它们拉齐，以后改一处两边同步变。
+ * ========================================================================== */
+
+.pick-list,
+#pick-list,
+#vars-list {
+  font-size: 12px;
+}
+
+#pick-list .pick-item,
+#vars-list .var-item {
+  /* 相同的行高与内边距：两区对齐 */
+  padding: 2px 4px;
+  line-height: 1.5;
+}
+
+#pick-list .pick-item label,
+#vars-list .var-head {
+  /* 相同的内部布局 */
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 1px 2px;
+  border-radius: 2px;
+}
+
+#pick-list .pick-item label:hover,
+#vars-list .var-item:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.12));
+}
+
+#pick-list .var-name,
+#vars-list .var-name {
+  /* 名字列固定宽度，两区的名字左对齐 —— 视觉上像同一张表 */
+  flex: 0 0 auto;
+  min-width: 9em;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+  color: var(--vscode-foreground, #ddd);
+}
+
+#pick-list .var-meta,
+#vars-list .var-meta {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground, #888);
+}
+
+/* ==========================================================================
+ *  可折叠区块标题 —— 全部区块（勾选/查看/计时/日志）统一用这一条
+ *  --------------------------------------------------------------------------
+ *  ★ 为什么必须只有一条（用户原话："选择变量和查看变量我不知道为什么
+ *    同一个组件要长得不一样"）：
+ *    早期 #vars-section 的 header 有一条专属规则（11px + 大写 + 字距），
+ *    其它区块用 .collapsible > header（无这些）—— 同一个界面里两套标题，
+ *    一边大一边小、一边全大写一边正常，看起来像两个不同的工具。
+ *    现在所有区块的标题字号/颜色/间距完全一致。
+ * ========================================================================== */
+.collapsible > header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  padding: 3px 6px;
+  border-radius: 3px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--vscode-foreground, #ddd);
+}
+
+.collapsible > header .title {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.collapsible > header:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.12));
+}
+
+.collapsible > header .chevron {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground, #999);
+}
+
+.collapsible > header .dim,
+.collapsible > header [id$="-count"],
+.collapsible > header [id$="-summary"] {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--vscode-descriptionForeground, #999);
+}
