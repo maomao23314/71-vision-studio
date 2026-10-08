@@ -54,7 +54,7 @@ function resolveProgram(
     if (!project) {
         return {
             reason: '没有识别到仿真工程，也没有在 launch 配置里指定 program。\n'
-                + '    下一步：用「文件 → 打开文件夹」打开含 code/ 与 config.h 的工程目录，'
+                + '    下一步：用「文件 → 打开文件夹」打开含 code/ 的工程目录，'
                 + '或者先执行「SCUT-71: 新建仿真工程」。',
         };
     }
@@ -111,10 +111,10 @@ export class ScutDebugConfigurationProvider implements vscode.DebugConfiguration
             // 与「用户全程不见 JSON」直接冲突）。
             void vscode.window.showErrorMessage(
                 'SCUT-71 调试无法启动：没有识别到仿真工程，launch 配置里也没有指定 program。\n'
-                + '    原因：仿真程序的位置要么由工程目录（含 code/ 与 config.h）推断，'
+                + '    原因：仿真程序的位置要么由工程目录（含 code/）推断，'
                 + '要么由你在 launch 配置里显式给出；两者都没有时无法确定要调试什么。\n'
                 + '    下一步（任选其一）：\n'
-                + '      1) 用「文件 → 打开文件夹」打开含 code/ 与 config.h 的工程目录；\n'
+                + '      1) 用「文件 → 打开文件夹」打开含 code/ 的工程目录；\n'
                 + '      2) 执行「SCUT-71: 新建仿真工程」从头建一个；\n'
                 + '      3) 在 launch 配置里显式写 program。',
             );

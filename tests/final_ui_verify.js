@@ -42,7 +42,7 @@ console.log('  后端输出     :', allVars.length, `（catalog 内 ${onlyCatalo
 console.log('  手动注册的   :', onlyManual.map((v) => v.name).join(', '));
 
 const selectedNames = catalog.map((v) => v.name);
-const timing = { processUs: 114.2, drawUs: 3.9, reportUs: 516.4,
+const timing = { processUs: 114.2, drawUs: 3.9,
                  frameUs: 680.0, processCycles: 14957296, cyclesValid: true };
 
 const mediaDir = path.join(root, 'extension', 'media');

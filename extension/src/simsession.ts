@@ -438,7 +438,6 @@ export class SimSessionImpl implements SimSession {
         const timing: TimingInfo = {
             processUs: frame.timing.processUs,
             drawUs: frame.timing.drawUs,
-            reportUs: frame.timing.reportUs,
             frameUs: frame.timing.frameUs,
             processCycles: frame.timing.processCycles,
             cyclesValid: frame.timing.cyclesValid,

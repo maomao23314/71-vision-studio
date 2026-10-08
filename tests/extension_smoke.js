@@ -49,7 +49,7 @@ console.log('\n=== 2. parseFrameLine：仿真帧协议 ===');
         frame: 7, w: 188, h: 120,
         img: 'C:\\a\\b\\frame_0007.pgm',
         pic: 'pic/1/7.bmp',
-        timing: { processUs: 123.5, drawUs: 4.25, reportUs: 1.5,
+        timing: { processUs: 123.5, drawUs: 4.25,
                   frameUs: 130.0, cycles: 456789, cyclesValid: true }
     });
     const f = protocol.parseFrameLine(line);

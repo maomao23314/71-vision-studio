@@ -174,10 +174,17 @@ export function parseJsonLoose(text: string): unknown {
  *  帧行 / 变量行
  * ========================================================================== */
 
+/**
+ * 一帧的计时。
+ *
+ * ★ 字段集与后端的 JSON 严格对应（见 scut_headless_main.c 的 printf）。
+ *   后端曾经还发一个 reportUs，但「REPORT 阶段」已经从核心的调度模型里删掉
+ *   （绘制与日志现在同在 DRAW 阶段、一起计入 drawUs），
+ *   所以这里不再有 reportUs —— 留着它只会是一个恒为 0 的假字段。
+ */
 export interface FrameTiming {
     processUs: number;
     drawUs: number;
-    reportUs: number;
     frameUs: number;
     /** JSON 字段名是 cycles，对应 scut_timing_t.process_cycles */
     processCycles: number;
@@ -239,7 +246,6 @@ export function parseFrameLine(line: string): FrameLine | undefined {
         timing: {
             processUs: num(t.processUs),
             drawUs: num(t.drawUs),
-            reportUs: num(t.reportUs),
             frameUs: num(t.frameUs),
             processCycles: num(t.cycles),
             cyclesValid: t.cyclesValid === true,

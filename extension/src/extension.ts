@@ -408,7 +408,7 @@ async function commandBuild(
     const project = projectOf();
     if (!project) {
         const choice = await vscode.window.showWarningMessage(
-            'SCUT-71：没有找到仿真工程（需要含 code/ 与 config.h 的文件夹）。',
+            'SCUT-71：没有找到仿真工程（需要含 code/ 的文件夹）。',
             '新建工程',
             '打开文件夹',
         );
@@ -481,7 +481,7 @@ async function commandNewProject(context: vscode.ExtensionContext): Promise<void
         void vscode.window.showErrorMessage(
             'SCUT-71：找不到工程模板 templates/starter/。\n'
             + '    原因：模板应该随插件一起打包；若你是从源码调试插件，'
-            + '请确认仓库里存在 templates/starter/config.h。\n'
+            + '请确认仓库里存在 templates/starter/scut_project.json。\n'
             + '    下一步：重新安装插件，或从仓库的 templates/starter 手动复制。',
         );
         return;

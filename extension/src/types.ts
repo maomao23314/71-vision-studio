@@ -173,11 +173,15 @@ export interface FramePacket {
 }
 
 export interface TimingInfo {
+    /** ★ 算法耗时：只有 PROCESS 阶段被计入（环境的核心指标） */
     processUs: number;
+    /** 绘制 + 搬运结果图 + 打日志的耗时（不计入 processUs） */
     drawUs: number;
-    reportUs: number;
+    /** 整帧跨度，不含呈现后端自身的开销 */
     frameUs: number;
+    /** 处理器周期数（跨机器可比，比微秒更有意义） */
     processCycles: number;
+    /** 周期数是否可信（TSC 是否可用） */
     cyclesValid: boolean;
 }
 

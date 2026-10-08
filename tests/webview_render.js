@@ -189,10 +189,10 @@ const feed = `
       send({ type: 'frame', index: 1,
              width: ${img.width}, height: ${img.height},
              gray: new Uint8Array(${JSON.stringify(img.gray)}),
-             timing: { processUs: 258.7, drawUs: 4.2, reportUs: 1.1, frameUs: 295.9,
+             timing: { processUs: 258.7, drawUs: 4.2, frameUs: 295.9,
                        processCycles: 825600, cyclesValid: true } });
       send({ type: 'vars', snapshots: ${JSON.stringify(snapshots)}, frame: 1,
-             timing: { processUs: 258.7, drawUs: 4.2, reportUs: 1.1, frameUs: 295.9,
+             timing: { processUs: 258.7, drawUs: 4.2, frameUs: 295.9,
                        processCycles: 825600, cyclesValid: true } });
   };
   window.__result = function () {
