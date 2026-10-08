@@ -23,6 +23,14 @@ import type { BuildOptions, BuildResult, ScutProject } from './types';
 import { detectToolchain, peekToolchain, resetToolchainCache, runDoctor } from './toolchain';
 import { createProjectFromTemplate, describeProject, detectProject, locatePicReadme, locateTemplateDir } from './project';
 import { build, disposeBuildOutputChannel, getBuildOutputChannel } from './build';
+import {
+    CONFIG_FILENAME,
+    hasHooks,
+    pullConfigFromSettings,
+    pushConfigToSettings,
+    readConfig,
+    writeConfig,
+} from './projectconfig';
 
 /**
  * 用户算法 SCUT_Log 的独立输出通道（VS Code 底部「输出」面板）。
@@ -53,6 +61,128 @@ import {
 /** 构建产物相对工程根的路径（与 tools/scut_build.py 的 Project.exe_path 一致）。 */
 function exePathOf(project: ScutProject): string {
     return path.join(project.outDir, 'bin', 'scut_sim.exe');
+}
+
+/**
+ * 属于「工程配置」的设置项。
+ *
+ * ★ 为什么要有这份清单：这些设置项是 scut_project.json 的【编辑界面】，
+ *   改动必须落盘到工程里；而工具链路径之类是「本机环境」，
+ *   不该进工程文件（换台机器就不同）。两类混在一起会互相污染。
+ */
+const CONFIG_SETTING_KEYS = [
+    'imageWidth', 'imageHeight', 'inputArray', 'outputArray',
+    'initFunctions', 'frameFunctions', 'postFunctions',
+];
+
+/**
+ * 启动时把工程配置同步进设置界面。
+ *
+ * ★ 方向是 JSON → 设置，不是反过来：
+ *   scut_project.json 是【真值来源】（它跟着工程走，能进 git），
+ *   设置界面只是这台机器上的一个编辑视图。
+ *   若反过来（设置覆盖 JSON），换台机器打开工程时，
+ *   空的用户设置会把工程里正确的配置清掉。
+ */
+async function syncConfigOnActivate(log: (l: string) => void): Promise<void> {
+    const project = detectProject();
+    if (!project) {
+        return;
+    }
+    const { config, error } = readConfig(project.root);
+    if (error) {
+        log(`[配置] ${error}`);
+        return;
+    }
+    if (!config) {
+        // 首次打开：把设置界面里的值（可能是老版本的）落盘成 JSON
+        const fromSettings = pullConfigFromSettings();
+        try {
+            writeConfig(project.root, fromSettings);
+            await pushConfigToSettings(fromSettings);
+            log(`[配置] 已为工程创建 ${CONFIG_FILENAME}。`);
+        } catch (e) {
+            log(`[配置] 创建 ${CONFIG_FILENAME} 失败：${e instanceof Error ? e.message : String(e)}`);
+        }
+        if (!hasHooks(fromSettings)) {
+            log('[配置] 还没有配置「图像处理函数」——执行「SCUT-71: 配置本工程」即可开始。');
+        }
+        return;
+    }
+    try {
+        await pushConfigToSettings(config);
+        log(`[配置] 已从 ${CONFIG_FILENAME} 载入工程配置（${config.image.width}x${config.image.height}）。`);
+    } catch (e) {
+        log(`[配置] 同步到设置界面失败（不影响构建）：${e instanceof Error ? e.message : String(e)}`);
+    }
+}
+
+/**
+ * 「配置本工程」向导。
+ *
+ * ★ 为什么需要这个命令（而不是只依赖设置界面）：
+ *   设置界面有几十个条目，用户不知道该填哪几个。而一个工程真正必须填的
+ *   只有【图像处理函数】一项 —— 其它都能用默认值跑起来。
+ *   这里用几个输入框把这条必经之路走完，填完立刻可用。
+ */
+async function commandSetupProject(log: (l: string) => void): Promise<void> {
+    const project = detectProject();
+    if (!project) {
+        void vscode.window.showWarningMessage(
+            'SCUT-71：没有找到仿真工程（需要含 code/ 的文件夹）。\n'
+            + '    下一步：用「文件 → 打开文件夹」打开你的工程。');
+        return;
+    }
+
+    const { config: existing, error } = readConfig(project.root);
+    if (error) {
+        void vscode.window.showErrorMessage(`SCUT-71：${error}`);
+        return;
+    }
+    const base = existing ?? pullConfigFromSettings();
+
+    const frameFn = await vscode.window.showInputBox({
+        title: 'SCUT-71：配置本工程（1/2）',
+        prompt: '哪一个是你的图像处理函数？填函数名（必须是非 static 的 void f(void)）',
+        value: base.hooks.frame.join('\n'),
+        placeHolder: '例如 image_process',
+        validateInput: (v) => v.trim().length === 0 ? '必须填一个处理函数名，否则环境无法运行' : undefined,
+    });
+    if (frameFn === undefined) {
+        return;
+    }
+
+    const outputArray = await vscode.window.showInputBox({
+        title: 'SCUT-71：配置本工程（2/2）',
+        prompt: '哪个数组存放你的结果图？（留空 = 画面显示输入图本身）',
+        value: base.outputArray,
+        placeHolder: '例如 binary_image',
+    });
+    if (outputArray === undefined) {
+        return;
+    }
+
+    const next = {
+        ...base,
+        outputArray: outputArray.trim(),
+        hooks: { ...base.hooks, frame: frameFn.split(/[\n,;]/).map((s) => s.trim()).filter(Boolean) },
+    };
+    try {
+        writeConfig(project.root, next);
+        await pushConfigToSettings(next);
+    } catch (e) {
+        void vscode.window.showErrorMessage(
+            `SCUT-71：写入 ${CONFIG_FILENAME} 失败：${e instanceof Error ? e.message : String(e)}`);
+        return;
+    }
+    log(`[配置] 已保存：处理函数 ${next.hooks.frame.join(', ')}`
+        + `，结果图 ${next.outputArray || '(未设置)'}`);
+
+    const go = await vscode.window.showInformationMessage(
+        'SCUT-71：工程配置已保存。现在可以编译了。', '立即编译');
+    if (go === '立即编译') {
+        await vscode.commands.executeCommand('scut71.build');
+    }
 }
 
 function fileExists(p: string): boolean {
@@ -168,19 +298,38 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('scut71.prevPic', () => simView.prevPic()),
         vscode.commands.registerCommand('scut71.nextPic', () => simView.nextPic()),
         vscode.commands.registerCommand('scut71.selectVariables', () => commandSelectVariables(simView)),
+        vscode.commands.registerCommand('scut71.setupProject', () => commandSetupProject(log)),
+        vscode.commands.registerCommand('scut71.showLog', () => getSimLogChannel().show(true)),
     );
+
+    // ---- 启动时把工程配置同步进设置界面（设置界面是编辑 UI，JSON 是真值）----
+    void syncConfigOnActivate(log);
 
     // ---- 配置变化：工具链路径改了要重新探测 ----
     context.subscriptions.push(
         vscode.workspace.onDidChangeConfiguration((e) => {
-            if (e.affectsConfiguration('scut71.toolchainPath')) {
+            if (e.affectsConfiguration('scut71.toolchainPath')
+                || e.affectsConfiguration('scut71.autoDownloadToolchain')) {
                 resetToolchainCache();
-                log('[配置] scut71.toolchainPath 已变化，工具链缓存已清除，下次使用会重新探测。');
+                log('[配置] 工具链相关设置已变化，缓存已清除，下次使用会重新探测。');
                 void detectToolchain().then((tc) => {
                     log(tc.cc
                         ? `[配置] 重新探测完成：clang = ${tc.cc}`
                         : '[配置] 重新探测完成：仍然没有找到 clang。');
                 });
+            }
+            // 工程配置类选项变化 → 落盘到 scut_project.json
+            if (CONFIG_SETTING_KEYS.some((k) => e.affectsConfiguration(`scut71.${k}`))) {
+                const p = projectOf();
+                if (p) {
+                    const cfg = pullConfigFromSettings();
+                    try {
+                        writeConfig(p.root, cfg);
+                        log(`[配置] 已写入 ${CONFIG_FILENAME}（改「图像尺寸」后需要重新编译）。`);
+                    } catch (err) {
+                        log(`[配置] 写入 ${CONFIG_FILENAME} 失败：${err instanceof Error ? err.message : String(err)}`);
+                    }
+                }
             }
         }),
     );

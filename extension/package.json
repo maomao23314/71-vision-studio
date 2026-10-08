@@ -47,6 +47,18 @@
         "icon": "$(new-folder)"
       },
       {
+        "command": "scut71.setupProject",
+        "title": "配置本工程（填处理函数名）",
+        "category": "SCUT-71",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "scut71.showLog",
+        "title": "打开运行日志",
+        "category": "SCUT-71",
+        "icon": "$(output)"
+      },
+      {
         "command": "scut71.openSimView",
         "title": "打开仿真视图",
         "category": "SCUT-71",
@@ -249,40 +261,82 @@
         "scut71.toolchainPath": {
           "type": "string",
           "default": "",
-          "description": "工具链根目录（留空则依次探测：SCUT71_TOOLCHAIN 环境变量 → D:\\TOOLS\\llvm-mingw → PATH）"
+          "description": "【本机环境】编译工具链根目录（含 bin/clang.exe）。留空 = 依次探测：SCUT71_TOOLCHAIN 环境变量 → 插件自动下载的目录 → D:\\TOOLS\\llvm-mingw → PATH。"
         },
-        "scut71.autoInstallToolchain": {
+        "scut71.autoDownloadToolchain": {
           "type": "boolean",
           "default": true,
-          "description": "缺少工具链时提示安装步骤"
+          "description": "【本机环境】缺少工具链时自动下载精简版 LLVM-MinGW 到插件目录（约 165MB，只需一次）。关掉后可手动指定上面的路径。"
+        },
+        "scut71.imageWidth": {
+          "type": "number",
+          "default": 188,
+          "minimum": 1,
+          "maximum": 4096,
+          "markdownDescription": "**【工程配置】图像宽度（像素）**\n\n★ 这是编译期契约：C 语言里数组大小必须是常量，而算法里到处是 `int line[SCUT_IMAGE_H];`。改完需要**重新编译**。\n\n改这个值请同时确认 `pic/` 里的测试图尺寸一致，否则会被裁剪。"
+        },
+        "scut71.imageHeight": {
+          "type": "number",
+          "default": 120,
+          "minimum": 1,
+          "maximum": 4096,
+          "markdownDescription": "**【工程配置】图像高度（像素）**\n\n★ 编译期契约，改完需要重新编译。说明同「图像宽度」。"
+        },
+        "scut71.inputArray": {
+          "type": "string",
+          "default": "mt9v03x_image",
+          "markdownDescription": "**【工程配置】输入图像数组名**\n\n环境会提供一个**同名同形状、地址恒定**的全局数组，你的算法像在车上那样直接按名字读它即可。\n\n默认 `mt9v03x_image` 是车载库的惯例命名，所以**保持默认最省事**——你的算法代码一个字都不用改。\n\n★ 地址恒定很重要：逆透视这类「指向图像像素的指针表」靠它才能长期有效。"
+        },
+        "scut71.outputArray": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "**【工程配置】结果图数组名**\n\n填你算法里存放结果图的数组名（例如 `binary_image`）。环境每帧把它**逐像素深拷贝**到显示缓冲。\n\n留空 = 画面显示输入图本身（看不到算法结果）。\n\n★ 为什么是深拷贝而不是换指针：算法里往往有指向图像像素的指针表（逆透视），换指针会让它们集体悬空——读到随机内存且不报错。"
+        },
+        "scut71.initFunctions": {
+          "type": "string",
+          "default": "",
+          "editPresentation": "multilineText",
+          "markdownDescription": "**【工程配置】初始化函数**（开机调用一次，不计时）\n\n填你代码里的函数名，每行一个，按顺序调用。例如：\n\n```\ncamera_init\n```\n\n★ 这些函数必须是**非 static** 的 `void f(void)`。这不是额外限制——车上 `main()` 要调用它们，本来就得如此。\n\n★ 你的代码里**不需要**写任何注册宏：调用关系留在环境侧，代码才能直接拷上车。"
+        },
+        "scut71.frameFunctions": {
+          "type": "string",
+          "default": "",
+          "editPresentation": "multilineText",
+          "markdownDescription": "**【工程配置】图像处理函数**（每帧调用，★ 计时段）\n\n填你算法的主入口函数名，每行一个。例如：\n\n```\nimage_process\n```\n\n「测速」按钮测的就是这一段的耗时，所以这里只放**真正的算法**——画图、打日志请填到下面的后处理里。"
+        },
+        "scut71.postFunctions": {
+          "type": "string",
+          "default": "",
+          "editPresentation": "multilineText",
+          "markdownDescription": "**【工程配置】后处理函数**（每帧调用，不计时）\n\n画调试标注、打日志这类**观测用**代码填这里。例如：\n\n```\ncamera_draw\ncamera_report\n```\n\n★ 为什么必须分开：放在处理函数里会把画图/打印的耗时算进「处理时间」，让性能数据失真（实测能虚高 8 倍）。"
         },
         "scut71.picDir": {
           "type": "string",
           "default": "",
-          "description": "测试图集目录。留空 = 用工程里的 pic/1。运行期设置，改完立即生效，不需要重新编译。"
+          "description": "【运行期】测试图集目录。留空 = 用工程里的 pic/1。改完立即生效，不需要重新编译。"
         },
         "scut71.picExt": {
           "type": "string",
           "default": "",
-          "description": "测试图后缀，可用逗号分隔多个（例如 \".bmp,.png\"，按顺序优先匹配）。留空 = 用工程 config.h 的 SCUT_PIC_EXT。运行期设置。注意：目前解码器只支持 BMP，其它格式会明确报错而不是静默失败。"
+          "description": "【运行期】测试图后缀，逗号分隔多个按顺序优先匹配（例如 \".bmp,.png\"）。留空 = 默认 .bmp。支持 BMP 与 8 位 PNG。"
         },
         "scut71.startFrame": {
           "type": "number",
           "default": 1,
           "minimum": 0,
-          "description": "从图集里的第几张图开始。0 起图集（存在 0.bmp/0.png）可设 0；1 起图集最小 1（设 0 会被后端夹回 1）。"
+          "description": "【运行期】从第几张图开始。0 起编号的图集（存在 0.bmp）可设 0。"
         },
         "scut71.processRepeat": {
           "type": "number",
           "default": 1,
           "minimum": 1,
-          "description": "每帧重复调用图像处理函数的次数。设成 100 之类可以看到更稳定的平均耗时（单次太快时计时抖动大）。运行期设置。"
+          "description": "【运行期】每帧重复调用图像处理的次数。设大（如 100）可抵消计时抖动，读到更稳定的平均耗时。"
         },
         "scut71.benchRepeat": {
           "type": "number",
           "default": 1000,
           "minimum": 1,
-          "description": "「测速」按钮在同一张图上重复调用图像处理的次数（沿用旧仿真环境 R 键的做法：跑很多次取平均 cycles）。次数越大读数越稳，但等待越久。"
+          "description": "【运行期】「测速」按钮在同一张图上重复调用图像处理的次数。次数越大读数越稳，但等待越久。"
         },
         "scut71.buildMode": {
           "type": "string",
@@ -295,30 +349,12 @@
             "release：-O2 -DNDEBUG，用来看优化后的耗时"
           ],
           "default": "debug",
-          "description": "编译配置。release 用来看 -O2 后的真实耗时，这也是做算法优化的主要手段之一"
+          "description": "【本机环境】编译配置。用户源码【恒为 -O0】（保证断点与变量可见）；release 只影响环境库与链接参数。"
         },
         "scut71.autoWatch": {
           "type": "boolean",
           "default": true,
-          "description": "编译时自动发现全局变量（关闭可加快构建，但变量面板会是空的）"
-        },
-        "scut71.initFunctions": {
-          "type": "string",
-          "default": "",
-          "editPresentation": "multilineText",
-          "markdownDescription": "**初始化函数**（启动时调用一次，不计时）。\n\n填用户代码里的函数名，每行一个，按顺序执行。例如：\n\n    my_init\n    Perspective_Init\n\n留空 = 没有初始化钩子。注册写在【插件设置】里而不是用户代码里，这样用户代码保持与车载工程完全一致、直接可移植。"
-        },
-        "scut71.frameFunctions": {
-          "type": "string",
-          "default": "",
-          "editPresentation": "multilineText",
-          "markdownDescription": "**图像处理函数**（每帧调用，★ 计时段 —— 测速测的就是它）。\n\n填用户代码里的函数名，每行一个。例如：\n\n    image_process\n\n留空 = 没有处理钩子（画面只显示输入图）。"
-        },
-        "scut71.postFunctions": {
-          "type": "string",
-          "default": "",
-          "editPresentation": "multilineText",
-          "markdownDescription": "**后处理函数**（每帧调用一次，不计时：覆盖层、日志等观测用）。\n\n填用户代码里的函数名，每行一个。例如：\n\n    my_draw\n    my_report\n"
+          "description": "【本机环境】编译时自动发现全局变量（关闭可加快构建，但变量面板会是空的）"
         }
       }
     }

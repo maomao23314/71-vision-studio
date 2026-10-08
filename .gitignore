@@ -5,3 +5,8 @@ extension/sdk/
 extension/templates/
 .scut/
 frames/
+
+# 构建脚本的临时探测目录（不属于源码，且曾留下过期的预编译库）
+.scut-build/
+*.sha256
+

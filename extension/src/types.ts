@@ -88,6 +88,17 @@ export interface WatchedVariable {
     declLine?: string;
     /** 由生成器给出的默认勾选建议（大缓冲默认不勾，避免卡 UI） */
     defaultSelected: boolean;
+    /**
+     * 是不是「主动暴露」的变量（代码里显式 SCUT_Watch 注册的）。
+     *
+     * ★ 判据：运行期注册表里有、编译期 DWARF 清单里没有 → 主动暴露。
+     *   见 extension/src/build.ts 的 augmentManifestFromRuntime。
+     *
+     * ★ 为什么要区分：主动注册的通常是"作者认为最关键的量"
+     *   （例如结构体里的 cam_err），理应排在前面、并且视觉上更醒目；
+     *   自动捕获的是编译器看到的一切，属于"顺带发现"，排后面即可。
+     */
+    manual?: boolean;
 }
 
 export interface VariableManifest {

@@ -465,12 +465,34 @@
         el.pickList.appendChild(e1);
       } else {
         var shown = 0;
+        /* ★ 分组显示：主动暴露的排前面，自动捕获的排后面。
+         *
+         *   catalog 已经由宿主侧排好序（主动在前，见 build.ts 的
+         *   augmentManifestFromRuntime），这里只需要在【分界处】插一个
+         *   小标题，让用户一眼看出两类变量的界线。
+         *
+         *   为什么用"插标题"而不是"渲染两遍列表"：
+         *     搜索过滤时同一段代码要同时作用于两组，渲染两遍会让过滤逻辑
+         *     重复一遍（很容易只改一处，造成两组行为不一致）。 */
+        var lastManual = null;
         for (var i = 0; i < catalog.length; i++) {
           var v = catalog[i];
           if (filter && v.name.toLowerCase().indexOf(filter) < 0) { continue; }
+          var isManual = v.manual === true;
+          if (lastManual === null || isManual !== lastManual) {
+            if (shown > 0 || !filter) {
+              var sep = document.createElement('li');
+              sep.className = isManual ? 'pick-group manual' : 'pick-group auto';
+              sep.textContent = isManual
+                ? '主动暴露（代码里显式注册）'
+                : '自动捕获（编译期扫描到）';
+              el.pickList.appendChild(sep);
+            }
+            lastManual = isManual;
+          }
           shown++;
           var li = document.createElement('li');
-          li.className = 'pick-item';
+          li.className = 'pick-item' + (isManual ? ' is-manual' : ' is-auto');
           var lab = document.createElement('label');
           var cb = document.createElement('input');
           cb.type = 'checkbox';

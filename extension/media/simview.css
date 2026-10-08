@@ -450,6 +450,57 @@ canvas.spark {
 }
 
 /* ==========================================================================
+ *  变量分组：主动暴露（前面、醒目） vs 自动捕获（后面、灰）
+ *
+ *  ★ 为什么用【颜色】而不是两个独立列表：
+ *    用户要求"主动暴露的放在前面，二者用颜色区分，比如自动捕获的用灰色"。
+ *    颜色 + 位置双重区分，比分成两个折叠区更省空间，
+ *    而且搜索过滤时两组仍然能被同一段逻辑统一处理。
+ *
+ *  ★ 为什么主动暴露用强调色而不是加粗：
+ *    加粗会改变行高，让密集的勾选列表看起来参差不齐；
+ *    颜色不改变布局，扫视时同样一眼可辨。
+ * ========================================================================== */
+
+.pick-group {
+  margin: 6px 0 2px;
+  padding: 2px 4px;
+  font-size: 0.85em;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+}
+
+.pick-group:first-child {
+  margin-top: 0;
+}
+
+/* 主动暴露：用主题的强调色（跟随配色方案，不会在浅色主题下看不清） */
+.pick-group.manual {
+  color: var(--vscode-charts-blue, var(--vscode-textLink-foreground, #3794ff));
+}
+
+/* 自动捕获：灰色，明确表示"这是顺带发现的" */
+.pick-group.auto {
+  color: var(--vscode-descriptionForeground, rgba(128, 128, 128, 0.9));
+}
+
+/* 主动暴露的条目整体略作强调（只在名字上，不改布局） */
+.pick-item.is-manual .var-name {
+  color: var(--vscode-charts-blue, var(--vscode-textLink-foreground, #3794ff));
+  font-weight: 600;
+}
+
+/* 自动捕获的条目名字压暗，视觉上退到后面 */
+.pick-item.is-auto .var-name {
+  color: var(--vscode-descriptionForeground, rgba(160, 160, 160, 0.95));
+}
+
+.pick-item.is-auto label:hover .var-name {
+  color: var(--vscode-foreground);
+}
+
+/* ==========================================================================
  *  变量查看区
  * ========================================================================== */
 

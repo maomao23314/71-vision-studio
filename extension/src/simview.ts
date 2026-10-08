@@ -59,6 +59,8 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
     private lastFrameIndex = 0;
     /** 上一条加载失败的原因（通知去重用）。 */
     private lastLoadError: string | undefined;
+    /** 是否已经因为收到算法日志而自动显示过「运行日志」面板（只做一次）。 */
+    private userLogShown = false;
     /** 上次弹加载失败通知的时间戳（节流用，毫秒）。 */
     private lastLoadErrorAt = 0;
     private disposables: vscode.Disposable[] = [];
@@ -285,14 +287,34 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
         return this.session !== undefined && this.session.running;
     }
 
-    /** 把一行日志推给所有视图的控制台区域。 */
+    /**
+     * 把一行日志分流到正确的地方。
+     *
+     * ★ 两条通道，各有各的用途（用户原话："我程序输出的LOG还是没有单独的窗口啊"）：
+     *
+     *     [LOG] 前缀 = 用户算法 SCUT_Log 的输出
+     *                  → 独立的「输出」面板（可搜索、可复制、可拖高度、不占侧边栏）
+     *     其余       = 环境自身的会话日志（启动命令、翻页、错误提示）
+     *                  → 侧边栏的日志折叠区（轻量，随操作滚动）
+     *
+     * ★ 为什么要分流而不是都放一处：
+     *   用户算法的日志是【他要看的东西】，可能几十行；
+     *   环境日志是【排查用的东西】，平时折叠着就好。
+     *   混在一起的结果是用户每次都要在噪声里找自己的输出。
+     *
+     * ★ 首次收到用户日志时自动把输出面板显示出来：
+     *   否则用户根本不知道日志去了哪 —— 一个看不见的窗口等于没有窗口。
+     *   只在第一次弹（用 userLogShown 记），之后不再抢焦点。
+     */
     public pushLog(line: string): void {
-        // ★ 双通道分流：
-        //   [LOG] 前缀 = 用户算法 SCUT_Log 的输出 → 独立「输出」面板（可搜索复制）
-        //   其余       = 环境自身的会话日志 → 侧边栏日志折叠区（轻量、随帧滚动）
-        //   之所以分流，是用户原话的要求：程序 LOG 要有【单独的窗口】。
         if (line.startsWith('[LOG] ')) {
-            getSimLogChannel().appendLine(line.slice(6));
+            const ch = getSimLogChannel();
+            ch.appendLine(line.slice(6));
+            if (!this.userLogShown) {
+                this.userLogShown = true;
+                ch.show(true);      // true = 不抢焦点，只把面板带出来
+                this.deps.log('[视图] 检测到算法日志，已打开「SCUT-71 运行日志」输出面板。');
+            }
             return;
         }
         this.deps.log(line);

@@ -21,6 +21,7 @@ import * as path from 'path';
 import { spawn, spawnSync } from 'child_process';
 import type {
     BuildDiagnostic, BuildOptions, BuildResult, Toolchain, VariableManifest,
+    WatchedVariable,
 } from './types';
 import { parseDiagnostics } from './protocol';
 import { detectToolchain } from './toolchain';
@@ -394,19 +395,29 @@ function fail(startMs: number, diags: BuildDiagnostic[], ch: vscode.OutputChanne
 }
 
 /**
- * 用运行期注册表（exe --list-vars）补全编译期清单。
+ * 用运行期注册表（exe --list-vars）补全编译期清单，并标出「主动暴露」的变量。
  *
- * ★ 为什么必须走这一步（用户实测抓到的缺口）：
+ * ★ 为什么必须走这一步：
  *   编译期 .vars.json 来自 DWARF 自动发现，只含编译器能看到的全局量。
- *   用户用 SCUT_Watch 手动注册的变量（典型：结构体成员，DWARF 里是
+ *   用户用 SCUT_Watch 主动注册的变量（典型：结构体成员，DWARF 里是
  *   不透明 <104B>）【编译期不可见、运行期才注册】—— 不补全的话，
  *   后端每帧都输出 cam_err 等关键量，面板却勾不了也看不见。
+ *
+ * ★★ 怎么区分「主动暴露」与「自动捕获」★
+ *   这正是用户要的分组依据，而且它有一个天然的客观判据：
+ *
+ *     编译期清单（DWARF）   = 编译器能从源码看到的全局量  → 自动捕获
+ *     运行期注册表（--list-vars）中【不在编译期清单里】的那些
+ *                           = 只能由 SCUT_Watch 主动注册    → 主动暴露
+ *
+ *   不需要用户额外标注，也不会因为改注释而失效 —— 它是两个集合的差集，
+ *   有明确语义。自动捕获的变量排后面并用灰色显示。
  *
  * ★ 为什么放在 finishResult：两条构建路径（官方脚本 / 内置直调）
  *   都汇入这里，一处补全两边生效 —— 之前加在 buildDirect 里，
  *   脚本路径根本不经过它，等于没加（实测就是这样）。
  *
- * 失败不致命：拿不到就退回编译期清单，只是少几个手动变量。
+ * 失败不致命：拿不到就退回编译期清单，只是少几个主动注册的变量。
  */
 function augmentManifestFromRuntime(
     exePath: string | undefined,
@@ -430,16 +441,26 @@ function augmentManifestFromRuntime(
         if (!runtime || runtime.variables.length === 0) {
             return manifest;
         }
-        const before = manifest?.variables.length ?? 0;
-        const merged = manifest ? mergeManifests([manifest, runtime]) : runtime;
-        if (merged) {
-            const added = merged.variables.length - before;
-            if (added > 0) {
-                ch.appendLine(`[变量] 补充了 ${added} 个手动注册的变量（编译期 DWARF 看不到的）。`);
-            }
-            return merged;
+
+        // 编译期已有的名字 → 这些是自动捕获
+        const autoNames = new Set((manifest?.variables ?? []).map((v) => v.name));
+
+        // 运行期独有的 → 主动暴露
+        const manual: WatchedVariable[] = runtime.variables
+            .filter((v) => !autoNames.has(v.name))
+            .map((v) => ({ ...v, manual: true }));
+
+        const auto = (manifest?.variables ?? []).map((v) => ({ ...v, manual: false }));
+
+        if (manual.length > 0) {
+            ch.appendLine(`[变量] 其中 ${manual.length} 个是代码里主动注册的`
+                + `（编译期 DWARF 看不到，通常是结构体成员）：${
+                    manual.map((v) => v.name).join(', ')}`);
         }
-        return manifest;
+
+        // 主动暴露的排前面（用户的诉求：主动在前面，两者用颜色区分）
+        const variables = [...manual, ...auto];
+        return { source: manifest?.source ?? runtime.source, count: variables.length, variables };
     } catch {
         return manifest;
     }
