@@ -259,30 +259,6 @@ function projectDirs(root: string): ProjectDirs {
     };
 }
 
-/** 递归收集 code/ 下的 .c（与 scut_build.py 的 user_sources 一致）。 */
-function collectUserSources(codeDir: string): string[] {
-    const out: string[] = [];
-    const walk = (dir: string): void => {
-        let entries: fs.Dirent[];
-        try {
-            entries = fs.readdirSync(dir, { withFileTypes: true });
-        } catch {
-            return;
-        }
-        entries.sort((a, b) => a.name.localeCompare(b.name));
-        for (const e of entries) {
-            const p = path.join(dir, e.name);
-            if (e.isDirectory()) {
-                walk(p);
-            } else if (e.name.toLowerCase().endsWith('.c')) {
-                out.push(p);
-            }
-        }
-    };
-    walk(codeDir);
-    return out;
-}
-
 function readConfigHeader(root: string): string | undefined {
     for (const name of ['scut_config.h', 'config.h']) {
         const p = path.join(root, name);
@@ -337,7 +313,7 @@ export async function build(options: BuildOptions, ctx: BuildContext): Promise<B
                 return fail(started, [{
                     severity: 'error',
                     message: '没有找到仿真工程目录。\n'
-                        + '    原因：仿真工程是一个含 code/ 与 config.h 的文件夹，'
+                        + '    原因：仿真工程是一个含 code/ 与 scut_project.json 的文件夹，'
                         + '这里既没打开文件夹，也没在设置里指定。\n'
                         + '    下一步：用「文件 → 打开文件夹」打开你的工程，'
                         + '或者先执行「SCUT-71: 新建仿真工程」。',
@@ -348,22 +324,47 @@ export async function build(options: BuildOptions, ctx: BuildContext): Promise<B
             ch.appendLine(`工程目录：${root}`);
             ch.appendLine(`模式：${options.mode}  自动符号发现：${options.autoWatch ? '开' : '关'}`);
 
-            // ---- 2) 选路径：官方脚本优先 ----
+            // ---- 2) 定位构建脚本 ----
+            //
+            // ★★ 这里刻意【只有一条】构建路径 ★★
+            //
+            //   以前另有一条 350 行的"内置直调"实现，作为"找不到脚本时"的兜底。
+            //   它已经删掉了，理由是三条独立的证据：
+            //
+            //     ① 它不可达。tools/scut_build.py 是 sync-sdk.js 的必需文件，
+            //        并且 package.json 的 files 里带了 sdk/**，
+            //        所以正常安装的插件里一定有它。真找不到就说明安装损坏 ——
+            //        那种情况下"换一套实现接着编"只会掩盖问题。
+            //
+            //     ② 它与新架构矛盾。新的架构里，图像尺寸契约头与接线单元
+            //        都是【构建脚本生成的】；内置直调不生成它们，
+            //        于是它编出来的程序必然链接失败（用户没写注册宏了）。
+            //        留着它等于留一条"看起来能跑、实际必然报 undefined reference"
+            //        的路径 —— 比直接报错更糟。
+            //
+            //     ③ 它无法同步维护。同一件事有两份实现，改一处漏一处，
+            //        而这个项目的核心价值恰恰是"环境行为可预期"。
+            //
+            //   所以现在：找不到脚本就明确告诉用户插件安装不完整。
             progress.report({ message: '正在查找构建脚本…' });
             const sdkRoot = locateSdkRoot(root, ctx.extensionUri);
             const buildScript = sdkRoot ? path.join(sdkRoot, 'tools', 'scut_build.py') : undefined;
-            const hasScript = buildScript !== undefined && isFile(buildScript);
 
-            if (hasScript && buildScript) {
-                ch.appendLine(`构建路径：官方脚本 ${buildScript}`);
-                progress.report({ message: '正在调用 tools/scut_build.py…' });
-                const r = await buildWithScript(buildScript, dirs, options, tc, token, ch);
-                return finishResult(r, started, ch);
+            if (!buildScript || !isFile(buildScript)) {
+                ch.appendLine(`找不到构建脚本：${buildScript ?? '(SDK 目录未定位到)'}`);
+                return fail(started, [{
+                    severity: 'error',
+                    message: '插件安装不完整：找不到构建脚本 tools/scut_build.py。\n'
+                        + `    查找位置：${buildScript ?? '(未能定位 SDK 目录)'}\n`
+                        + '    原因：构建脚本随插件一起打包，正常安装时一定存在。\n'
+                        + '    下一步：重新安装插件；'
+                        + '若你是从源码调试，请先在 extension/ 下执行 `npm run sync-sdk`。',
+                }], ch);
             }
 
-            ch.appendLine('构建路径：内置直调（未找到 tools/scut_build.py）');
-            progress.report({ message: '正在用内置路径编译…' });
-            const r = await buildDirect(dirs, sdkRoot, ctx.extensionUri, options, tc, progress, token, ch);
+            ch.appendLine(`构建脚本：${buildScript}`);
+            progress.report({ message: '正在调用 tools/scut_build.py…' });
+            const r = await buildWithScript(buildScript, dirs, options, tc, token, ch);
             return finishResult(r, started, ch);
         },
     );
@@ -427,9 +428,8 @@ function fail(startMs: number, diags: BuildDiagnostic[], ch: vscode.OutputChanne
  *   不需要用户额外标注，也不会因为改注释而失效 —— 它是两个集合的差集，
  *   有明确语义。自动捕获的变量排后面并用灰色显示。
  *
- * ★ 为什么放在 finishResult：两条构建路径（官方脚本 / 内置直调）
- *   都汇入这里，一处补全两边生效 —— 之前加在 buildDirect 里，
- *   脚本路径根本不经过它，等于没加（实测就是这样）。
+ * ★ 为什么放在 finishResult：构建的收尾统一走这里，
+ *   变量面板的补全逻辑只写一份，不会出现"某个入口忘了补"的情况。
  *
  * 失败不致命：拿不到就退回编译期清单，只是少几个主动注册的变量。
  */
@@ -718,512 +718,6 @@ function normalizeManifest(raw: unknown): VariableManifest | undefined {
         count: typeof o.count === 'number' ? o.count : variables.length,
         variables,
     };
-}
-
-/* ==========================================================================
- *  路径 B：内置直调
- *
- *  这是 scut_build.py 缺席时的兜底。流水线与官方脚本一致：
- *      核心库 → bind → (用户 .c: 探针 → 符号 → 包装) → 后端 → 链接
- *  但【不】做并行、不做 DWARF 偏移规范化。
- * ========================================================================== */
-
-/** 从 core/src/*.c 编出 libscut_core.a，或复用工程/仓库里已有的那份。 */
-async function ensureCoreLib(
-    dirs: ProjectDirs,
-    sdkRoot: string | undefined,
-    extensionUri: vscode.Uri,
-    tc: Toolchain,
-    base: string[],
-    token: vscode.CancellationToken,
-    ch: vscode.OutputChannel,
-    progress: vscode.Progress<{ message?: string }>,
-): Promise<{ ok: true; lib: string } | { ok: false; message: string }> {
-    const projectLib = path.join(dirs.libDir, 'libscut_core.a');
-    if (isFile(projectLib)) {
-        ch.appendLine(`核心库：复用工程里已有的 ${projectLib}`);
-        return { ok: true, lib: projectLib };
-    }
-
-    const repoLib = sdkRoot ? path.join(sdkRoot, '.scut-build', 'lib', 'libscut_core.a') : undefined;
-    if (repoLib && isFile(repoLib)) {
-        fs.mkdirSync(dirs.libDir, { recursive: true });
-        fs.copyFileSync(repoLib, projectLib);
-        ch.appendLine(`核心库：从 ${repoLib} 复制到工程 .scut/lib/`);
-        return { ok: true, lib: projectLib };
-    }
-
-    // 都没有 → 现场编译 core/src/*.c
-    if (!sdkRoot) {
-        return {
-            ok: false,
-            message: '插件安装似乎不完整：既找不到随插件分发的 SDK，'
-                + '也没找到核心库 libscut_core.a，无法继续。\n'
-                + '    原因：正常安装的插件里自带一份 SDK 源码（core/、bind/、backends/、tools/），'
-                + '插件就是靠它在你的机器上把 libscut_core.a 编出来的；'
-                + '现在既没在插件目录里找到这份副本，'
-                + '也没在工程 .scut/lib/ 下找到别人编译好的库。\n'
-                + `    查找过的插件 SDK 目录：${path.join(extensionUri.fsPath, 'sdk')}\n`
-                + `    工程核心库应有的位置：${projectLib}\n`
-                + '    下一步：重新安装插件（在 VS Code 里执行「扩展: 从 VSIX 安装…」'
-                + '重装同一个 .vsix，或先卸载再安装），装完执行「SCUT-71: 环境自检」确认；\n'
-                + '    如果你是在源码里 F5 调试插件，先运行 '
-                + '`cd extension && npm run sync-sdk` 生成 extension/sdk/ 再试。',
-        };
-    }
-
-    const coreSrcDir = path.join(sdkRoot, 'core', 'src');
-    const sources = collectUserSources(coreSrcDir);
-    if (sources.length === 0) {
-        return {
-            ok: false,
-            message: `SDK 的 core/src 里没有 .c 文件：${coreSrcDir}\n`
-                + '    下一步：确认 SDK 仓库结构完整（core/src/*.c 应该有一批文件）。',
-        };
-    }
-
-    progress.report({ message: `正在编译核心库（${sources.length} 个文件）…` });
-    const coreInclude = path.join(sdkRoot, 'core', 'include');
-    const objs: string[] = [];
-    for (const src of sources) {
-        const obj = path.join(dirs.objDir, `core_${path.basename(src, '.c')}.o`);
-        const r = await runProcess(tc.cc, [
-            ...base, '-I' + coreInclude, '-c', src, '-o', obj,
-        ], { cwd: dirs.root, token, onLine: (l) => ch.appendLine(l) });
-        if (r.code !== 0) {
-            return { ok: false, message: `核心库编译失败：\n${r.combined.trim()}` };
-        }
-        objs.push(obj);
-    }
-
-    const ar = whichAr(tc);
-    if (!ar) {
-        return {
-            ok: false,
-            message: '找不到 ar（静态库归档工具），无法生成核心库。\n'
-                + '    下一步：它随 LLVM-MinGW 发布（bin\\llvm-ar.exe），'
-                + '确认 scut71.toolchainPath 指向解压根目录。',
-        };
-    }
-    fs.mkdirSync(dirs.libDir, { recursive: true });
-    const r = await runProcess(ar, ['rcs', projectLib, ...objs], {
-        cwd: dirs.root, token, onLine: (l) => ch.appendLine(l),
-    });
-    if (r.code !== 0) {
-        return { ok: false, message: `打包核心库失败：\n${r.combined.trim()}` };
-    }
-    ch.appendLine(`核心库：现场编译生成 ${projectLib}`);
-    return { ok: true, lib: projectLib };
-}
-
-function whichAr(tc: Toolchain): string | undefined {
-    const dir = tc.cc ? path.dirname(tc.cc) : '';
-    const candidates = dir
-        ? ['llvm-ar.exe', 'ar.exe'].map((n) => path.join(dir, n))
-        : [];
-    for (const c of candidates) {
-        if (isFile(c)) {
-            return c;
-        }
-    }
-    const pathDirs = (process.env.PATH ?? '').split(path.delimiter);
-    for (const d of pathDirs) {
-        for (const n of ['llvm-ar.exe', 'ar.exe']) {
-            const p = path.join(d, n);
-            if (isFile(p)) {
-                return p;
-            }
-        }
-    }
-    return undefined;
-}
-
-async function buildDirect(
-    dirs: ProjectDirs,
-    sdkRoot: string | undefined,
-    extensionUri: vscode.Uri,
-    options: BuildOptions,
-    tc: Toolchain,
-    progress: vscode.Progress<{ message?: string }>,
-    token: vscode.CancellationToken,
-    ch: vscode.OutputChannel,
-): Promise<BuildResult> {
-    const logs: string[] = [];
-    const push = (s: string): void => {
-        if (s.trim().length > 0) {
-            logs.push(s);
-            ch.appendLine(s);
-        }
-    };
-
-    if (!tc.cc) {
-        return {
-            ok: false,
-            output: tc.warnings.join('\n'),
-            errors: [{
-                severity: 'error',
-                message: '找不到 clang 编译器，无法构建。\n'
-                    + '    下一步：按「SCUT-71: 环境自检」里的提示安装 LLVM-MinGW，'
-                    + '或在设置里指定 scut71.toolchainPath。',
-            }],
-            elapsedMs: 0,
-        };
-    }
-
-    const header = readConfigHeader(dirs.root);
-    if (!header) {
-        return {
-            ok: false,
-            output: '',
-            errors: [{
-                severity: 'error',
-                message: `工程里没有编译期契约头文件（config.h 或 scut_config.h）：${dirs.root}\n`
-                    + '    原因：C 语言里数组尺寸必须是编译期常量，'
-                    + '用户的 int line[SCUT_IMAGE_H] 这类声明必须能看到尺寸定义。\n'
-                    + '    下一步：把 templates/starter/config.h 复制到工程根目录，'
-                    + '改好 SCUT_IMAGE_W / SCUT_IMAGE_H。',
-            }],
-            elapsedMs: 0,
-        };
-    }
-    if (!isDir(dirs.codeDir)) {
-        return {
-            ok: false,
-            output: '',
-            errors: [{
-                severity: 'error',
-                message: `工程里没有 code/ 目录：${dirs.codeDir}\n`
-                    + '    下一步：把你的算法 .c 文件放进 code/，'
-                    + '或从 templates/starter/code/camera.c 复制一份改。',
-            }],
-            elapsedMs: 0,
-        };
-    }
-    const userSources = collectUserSources(dirs.codeDir);
-    if (userSources.length === 0) {
-        return {
-            ok: false,
-            output: '',
-            errors: [{
-                severity: 'error',
-                message: `code/ 目录里一个 .c 文件都没有：${dirs.codeDir}\n`
-                    + '    原因：仿真宿主需要用户算法注册 PROCESS 回调，没有源文件就没有算法。\n'
-                    + '    下一步：把算法写进 code/*.c。',
-            }],
-            elapsedMs: 0,
-        };
-    }
-
-    fs.mkdirSync(dirs.objDir, { recursive: true });
-    fs.mkdirSync(dirs.libDir, { recursive: true });
-    fs.mkdirSync(dirs.genDir, { recursive: true });
-    fs.mkdirSync(dirs.binDir, { recursive: true });
-
-    const base = ['-std=c11', '-Wall', '-Wextra'];
-    const modeFlags = options.mode === 'debug' ? ['-g', '-O0'] : ['-O2', '-DNDEBUG'];
-    const probeFlags = ['-g', '-O0'];      // 探针必须 -O0 -g，否则 clang 会删掉未引用的 static
-
-    const coreInclude = sdkRoot ? path.join(sdkRoot, 'core', 'include') : undefined;
-    const includeDirs: string[] = [];
-    if (coreInclude) {
-        includeDirs.push('-I' + coreInclude);
-    }
-    includeDirs.push('-I' + dirs.root, '-I' + dirs.codeDir);
-
-    // ---- 1) 核心库 ----
-    progress.report({ message: '正在准备核心库…' });
-    const core = await ensureCoreLib(dirs, sdkRoot, extensionUri, tc, base, token, ch, progress);
-    if (!core.ok) {
-        return {
-            ok: false,
-            output: logs.join('\n'),
-            errors: [{ severity: 'error', message: core.message }],
-            elapsedMs: 0,
-        };
-    }
-
-    // ---- 2) bind 单元（唯一知道编译期尺寸的地方）----
-    progress.report({ message: '正在编译 bind 单元…' });
-    const bindSrc = (sdkRoot ? path.join(dirs.root, 'bind', 'scut_bind.c') : '');
-    const bindSource = (bindSrc && isFile(bindSrc))
-        ? bindSrc
-        : (sdkRoot ? path.join(sdkRoot, 'bind', 'scut_bind.c') : '');
-    if (!bindSource || !isFile(bindSource)) {
-        return {
-            ok: false,
-            output: logs.join('\n'),
-            errors: [{
-                severity: 'error',
-                message: '插件安装似乎不完整：找不到绑定单元源码 bind/scut_bind.c。\n'
-                    + '    原因：它是「唯一知道编译期图像尺寸」的编译单元，'
-                    + '环境核心刻意不知道尺寸，没有它链接必然失败。'
-                    + '它本应随插件一起分发。\n'
-                    + `    查找过的位置：${sdkRoot ? path.join(sdkRoot, 'bind', 'scut_bind.c') : '(没有找到可用的 SDK 目录)'}\n`
-                    + '    下一步：重新安装插件（在 VS Code 里执行「扩展: 从 VSIX 安装…」'
-                    + '重装同一个 .vsix，或先卸载再安装）；'
-                    + '如果你是在源码里 F5 调试插件，先运行 '
-                    + '`cd extension && npm run sync-sdk`。',
-            }],
-            elapsedMs: 0,
-        };
-    }
-    const bindObj = path.join(dirs.objDir, 'scut_bind.o');
-    {
-        const r = await runProcess(tc.cc, [
-            ...base, ...modeFlags, ...includeDirs, '-c', bindSource, '-o', bindObj,
-        ], { cwd: dirs.root, token, onLine: (l) => ch.appendLine(l) });
-        push(r.combined);
-        if (r.code !== 0) {
-            return directFailure(logs, r.combined, 'bind 单元 scut_bind.c 编译失败');
-        }
-    }
-
-    // ---- 3) 用户单元：探针 → 符号 → 包装 ----
-    const symbolsTool = sdkRoot ? path.join(sdkRoot, 'tools', 'scut_symbols.py') : undefined;
-    const canWatch = options.autoWatch
-        && symbolsTool !== undefined && isFile(symbolsTool)
-        && tc.objdump.length > 0 && tc.python !== undefined;
-
-    const wrappedObjs: string[] = [];
-    const manifests: unknown[] = [];
-    let hadWatchFailure = false;
-
-    for (let i = 0; i < userSources.length; i++) {
-        const src = userSources[i];
-        const flat = path.basename(src, '.c');
-        progress.report({ message: `正在编译用户算法 ${i + 1}/${userSources.length}：${flat}.c` });
-
-        if (!canWatch) {
-            // 不做符号发现 → 直接编原始文件。变量面板会是空的，但算法能跑。
-            const obj = path.join(dirs.objDir, `${flat}.o`);
-            const r = await runProcess(tc.cc, [
-                ...base, ...modeFlags, ...includeDirs, '-c', src, '-o', obj,
-            ], { cwd: dirs.root, token, onLine: (l) => ch.appendLine(l) });
-            push(r.combined);
-            if (r.code !== 0) {
-                return directFailure(logs, r.combined, `${flat}.c 编译失败`);
-            }
-            wrappedObjs.push(obj);
-            continue;
-        }
-
-        // 3a) 探针编译（-g -O0，保证 static 全局都在 DWARF 里）
-        const probeObj = path.join(dirs.objDir, `${flat}.probe.o`);
-        const pr = await runProcess(tc.cc, [
-            ...base, ...probeFlags, ...includeDirs, '-c', src, '-o', probeObj,
-        ], { cwd: dirs.root, token, onLine: (l) => ch.appendLine(l) });
-        push(pr.combined);
-        if (pr.code !== 0) {
-            return directFailure(logs, pr.combined, `${flat}.c 探针编译失败`);
-        }
-
-        // 3b) 自动符号发现 → 包装单元 + 清单
-        const wrappedSrc = path.join(dirs.genDir, `${flat}.wrapped.c`);
-        const manifestPath = path.join(dirs.genDir, `${flat}.vars.json`);
-        const sr = await runProcess(tc.python as string, [
-            symbolsTool as string,
-            '--obj', probeObj,
-            '--src', src,
-            '--out-c', wrappedSrc,
-            '--out-json', manifestPath,
-            '--objdump', tc.objdump,
-        ], { cwd: dirs.root, token, onLine: (l) => ch.appendLine(l) });
-        push(sr.combined);
-        if (sr.code !== 0 || !isFile(wrappedSrc)) {
-            hadWatchFailure = true;
-            push(`[提示] ${flat}.c 的自动符号发现失败，已退回直接编译该文件（它里面的变量不会出现在变量面板）。`);
-            const obj = path.join(dirs.objDir, `${flat}.o`);
-            const r = await runProcess(tc.cc, [
-                ...base, ...modeFlags, ...includeDirs, '-c', src, '-o', obj,
-            ], { cwd: dirs.root, token, onLine: (l) => ch.appendLine(l) });
-            push(r.combined);
-            if (r.code !== 0) {
-                return directFailure(logs, r.combined, `${flat}.c 编译失败`);
-            }
-            wrappedObjs.push(obj);
-            continue;
-        }
-
-        // 3c) 编译包装单元（-I 必须先指向 gen/，否则 #include "main.c" 找不到）
-        const obj = path.join(dirs.objDir, `${flat}.o`);
-        const r = await runProcess(tc.cc, [
-            ...base, ...modeFlags, '-I' + dirs.genDir, ...includeDirs,
-            '-c', wrappedSrc, '-o', obj,
-        ], { cwd: dirs.root, token, onLine: (l) => ch.appendLine(l) });
-        push(r.combined);
-        if (r.code !== 0) {
-            return directFailure(logs, r.combined, `${flat}.wrapped.c 编译失败`);
-        }
-        wrappedObjs.push(obj);
-        if (isFile(manifestPath)) {
-            try {
-                manifests.push(JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as unknown);
-            } catch {
-                /* 清单坏了不影响构建本体 */
-            }
-        }
-    }
-
-    // ---- 4) 后端（提供 main 的地方）----
-    progress.report({ message: '正在编译仿真宿主…' });
-    const backendDirs: string[] = [];
-    if (isDir(path.join(dirs.root, 'backend'))) {
-        backendDirs.push(path.join(dirs.root, 'backend'));
-    }
-    if (sdkRoot && isDir(path.join(sdkRoot, 'backends', 'headless'))) {
-        backendDirs.push(path.join(sdkRoot, 'backends', 'headless'));
-    }
-    if (backendDirs.length === 0) {
-        return {
-            ok: false,
-            output: logs.join('\n'),
-            errors: [{
-                severity: 'error',
-                message: '插件安装似乎不完整：找不到仿真宿主后端（提供 main 的地方）。\n'
-                    + '    原因：环境拥有 main()，用户只注册回调；没有后端就没有入口，链接必然失败。'
-                    + '它本应随插件一起分发。\n'
-                    + `    查找过的位置：${sdkRoot ? path.join(sdkRoot, 'backends', 'headless') : '(没有找到可用的 SDK 目录)'}\n`
-                    + '    下一步：重新安装插件（在 VS Code 里执行「扩展: 从 VSIX 安装…」'
-                    + '重装同一个 .vsix，或先卸载再安装）；'
-                    + '如果你是在源码里 F5 调试插件，先运行 '
-                    + '`cd extension && npm run sync-sdk`。\n'
-                    + '    备选：在工程的 backend/ 下放一个带 main 的 .c，插件同样会用它。',
-            }],
-            elapsedMs: 0,
-        };
-    }
-    const backendObjs: string[] = [];
-    for (const bdir of backendDirs) {
-        for (const name of fs.readdirSync(bdir).sort()) {
-            if (!name.toLowerCase().endsWith('.c')) {
-                continue;
-            }
-            const obj = path.join(dirs.objDir, `be_${path.basename(name, '.c')}.o`);
-            const r = await runProcess(tc.cc, [
-                ...base, ...modeFlags, ...includeDirs, '-c', path.join(bdir, name), '-o', obj,
-            ], { cwd: dirs.root, token, onLine: (l) => ch.appendLine(l) });
-            push(r.combined);
-            if (r.code !== 0) {
-                return directFailure(logs, r.combined, `后端 ${name} 编译失败`);
-            }
-            backendObjs.push(obj);
-        }
-    }
-
-    // ---- 5) 链接 ----
-    progress.report({ message: '正在链接…' });
-    const tmpExe = path.join(dirs.binDir, `${EXE_NAME}.tmp`);
-    const linkArgs = [
-        ...backendObjs,
-        bindObj,
-        ...wrappedObjs,
-        '-L' + dirs.libDir,
-        '-lscut_core',
-        '-lm',
-        '-o', tmpExe,
-    ];
-    const lr = await runProcess(tc.cc, linkArgs, {
-        cwd: dirs.root, token, onLine: (l) => ch.appendLine(l),
-    });
-    push(lr.combined);
-    if (lr.code !== 0) {
-        const diags = parseDiagnostics(lr.combined);
-        const missing = [...new Set(
-            [...lr.combined.matchAll(/undefined (?:reference to|symbol:?)\s*[`'"]?([A-Za-z_]\w*)/g)]
-                .map((m) => m[1]),
-        )].slice(0, 8);
-        if (missing.length > 0) {
-            diags.unshift({
-                severity: 'error',
-                message: `链接失败，缺少这些符号：${missing.join('、')}\n`
-                    + '    原因：它们既不在 code/*.c 里，也不在核心库 libscut_core.a 里。'
-                    + '若缺的是 scut_core_init / SCUT_Watch 之类，说明核心库不是本项目的那一份。\n'
-                    + '    下一步：确认 .scut/lib/libscut_core.a 来自本 SDK 的 core/，'
-                    + '或者删掉它让插件重新编译核心库。',
-            });
-        }
-        return {
-            ok: false,
-            output: logs.join('\n'),
-            errors: diags.length > 0 ? diags : [{ severity: 'error', message: '链接失败' }],
-            elapsedMs: 0,
-        };
-    }
-    if (isFile(dirs.exePath)) {
-        try {
-            fs.unlinkSync(dirs.exePath);
-        } catch {
-            /* 被占用也无所谓，rename 会失败并报出来 */
-        }
-    }
-    try {
-        fs.renameSync(tmpExe, dirs.exePath);
-    } catch (e) {
-        return {
-            ok: false,
-            output: logs.join('\n'),
-            errors: [{
-                severity: 'error',
-                message: `无法把临时可执行文件改名到 ${dirs.exePath}：`
-                    + `${e instanceof Error ? e.message : String(e)}\n`
-                    + '    原因：上一次的仿真进程可能还在运行，占着这个 exe。\n'
-                    + '    下一步：在仿真视图里点「停止」，或关掉正在运行的 scut_sim.exe，再重新编译。',
-            }],
-            elapsedMs: 0,
-        };
-    }
-
-    // ---- 6) 变量清单 ----
-    let manifest: VariableManifest | undefined;
-    if (manifests.length > 0) {
-        manifest = mergeManifests(manifests);
-    } else if (canWatch && hadWatchFailure) {
-        ch.appendLine('[提示] 部分文件的自动符号发现失败，变量面板可能不全。');
-    }
-
-    return {
-        ok: true,
-        exePath: dirs.exePath,
-        output: `[构建路径] 内置直调（未找到 tools/scut_build.py）\n\n${logs.join('\n')}`,
-        manifest,
-        errors: parseDiagnostics(logs.join('\n')).filter((d) => d.severity !== 'info'),
-        elapsedMs: 0,
-    };
-}
-
-function directFailure(logs: string[], combined: string, what: string): BuildResult {
-    const diags = parseDiagnostics(combined);
-    return {
-        ok: false,
-        output: logs.join('\n'),
-        errors: diags.length > 0 ? diags : [{ severity: 'error', message: what }],
-        elapsedMs: 0,
-    };
-}
-
-/** 把多个 .vars.json 合并成一份清单（与 scut_build.py 的 merge_manifests 语义一致）。 */
-function mergeManifests(pieces: unknown[]): VariableManifest | undefined {
-    const variables: VariableManifest['variables'] = [];
-    const seen = new Set<string>();
-    let source = '';
-    for (const p of pieces) {
-        const m = normalizeManifest(p);
-        if (!m) {
-            continue;
-        }
-        source = source.length === 0 ? m.source : `${source}+${m.source}`;
-        for (const v of m.variables) {
-            if (seen.has(v.name)) {
-                continue;       // 去重：同名保留第一个
-            }
-            seen.add(v.name);
-            variables.push(v);
-        }
-    }
-    if (variables.length === 0) {
-        return undefined;
-    }
-    return { source, count: variables.length, variables };
 }
 
 /** 供 UI 用的二进制路径（不触发构建）。 */
