@@ -299,6 +299,11 @@ async function downloadToFile(url: string, dest: string, onProgress: (got: numbe
             if (!done) {
                 done = true;
                 out.destroy();
+                // ★ 也要把响应流断掉：只 destroy 文件流的话，浏览器那侧仍会把剩下的
+                //   上百 MB 推完，白占带宽（用户手机上开热点时这很要命）。
+                try {
+                    res.destroy();
+                } catch { /* 已经关掉的流再 destroy 会报错，忽略 */ }
                 reject(e);
             }
         };
@@ -350,6 +355,17 @@ async function extractZip(zipPath: string, destDir: string): Promise<void> {
         return;
     }
 
+    // ★ tar 是被超时杀掉的（而不是报错退出）就别再试 PowerShell 了：
+    //   它做的是同一件事，只会让用户再等一个超时（两个十分钟），没有任何收益。
+    if (tarCode === TIMED_OUT) {
+        throw new Error(
+            `解压超过 ${Math.round(EXTRACT_TIMEOUT_MS / 60000)} 分钟仍未完成，已中止。\n`
+            + `    zip 文件位于：${zipPath}\n`
+            + '    下一步：这台机器的磁盘可能太慢或空间不足；'
+            + '手动把该 zip 解压开，再把里面的目录（有 bin\\clang.exe 的那一层）用设置 scut71.toolchainPath 指过去。',
+        );
+    }
+
     const ps = `Expand-Archive -LiteralPath ${psQuote(zipPath)} -DestinationPath ${psQuote(destDir)} -Force`;
     const psCode = await runQuiet('powershell', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', ps]);
     if (psCode !== 0) {
@@ -360,6 +376,9 @@ async function extractZip(zipPath: string, destDir: string): Promise<void> {
         );
     }
 }
+
+/** runQuiet 的超时哨兵值：和普通非零退出码区分开。 */
+const TIMED_OUT = -2;
 
 /**
  * 跑一个进程，只要退出码。
@@ -376,7 +395,9 @@ function runQuiet(exe: string, args: string[]): Promise<number> {
             resolve(-1);
             return;
         }
+        let timedOut = false;
         const timer = setTimeout(() => {
+            timedOut = true;
             try {
                 child.kill();
             } catch { /* 已退出的进程 kill 会报错，忽略 */ }
@@ -387,7 +408,7 @@ function runQuiet(exe: string, args: string[]): Promise<number> {
         });
         child.on('close', (code) => {
             clearTimeout(timer);
-            resolve(code ?? -1);
+            resolve(timedOut ? TIMED_OUT : (code ?? -1));
         });
     });
 }

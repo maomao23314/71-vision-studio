@@ -1402,9 +1402,28 @@ def build_one_unit(job: UnitJob, cc: str, objdump: str, python: str,
                 logs.append(text)
 
     if not auto_watch:
-        # --no-watch：跳过探针与包装，直接编译原文件（最快路径）
-        cmd = [cc] + base_flags + mode_flags + include_dirs + \
-              ["-c", job.src, "-o", job.wrapped_obj]
+        # --no-watch：跳过探针与符号发现，直接编译原文件（最快路径）。
+        #
+        # ★ 但"结果图搬运"必须照旧生成 —— 它和符号发现是两件事：
+        #   前者是可移植性要求（用户代码不能自己搬图），
+        #   后者只是"顺便看看有哪些变量"。
+        #   旧实现把两者绑在一起，于是关掉 autoWatch 就会得到一个
+        #   链接错误（scut_env_copy_output 未定义）。
+        #
+        # ★ 这里不需要 DWARF：搬运函数只用到【数组名】，
+        #   地址与尺寸的判断都交给编译器（见 scut_symbols._copy_fn_text）。
+        if output_array:
+            with open(job.wrapped, "w", encoding="utf-8") as f:
+                f.write('/* 由 scut_build.py 生成（--no-watch 薄包装）：'
+                        '只放结果图搬运，不做符号发现。 */\n')
+                f.write('#include "scut_sdk.h"\n')
+                f.write('#include "%s"\n' % job.rel)
+                f.write(_thin_copy_fn(output_array))
+            cmd = [cc] + base_flags + mode_flags + include_dirs + \
+                  ["-c", job.wrapped, "-o", job.wrapped_obj]
+        else:
+            cmd = [cc] + base_flags + mode_flags + include_dirs + \
+                  ["-c", job.src, "-o", job.wrapped_obj]
         reporter.detail("  $ " + " ".join('"%s"' % a if " " in a else a for a in cmd))
         r = run_cmd(cmd)
         _append(r.out)
@@ -1505,6 +1524,29 @@ def build_one_unit(job: UnitJob, cc: str, objdump: str, python: str,
 
     job.used_wrapper = True
     return True
+
+
+def _thin_copy_fn(out_array: str) -> str:
+    """
+    生成结果图搬运函数（--no-watch 路径用）。
+
+    ★ 为什么不复用 scut_symbols._copy_fn_text：
+      那条路径会顺手把变量清单也生成出来。--no-watch 的语义就是
+      "不要变量清单"，所以这里只写搬运函数本身，保持职责清晰。
+
+    ★ 与 scut_symbols 版本保持一致的两点（改一处必须改两处，
+      所以两边都写了同样的注释）：
+        · 地址用 `(const unsigned char *)arr` —— 一维/二维都能编译；
+        · 宽高传 0 —— 交给环境按自己的尺寸处理，这里不需要维度信息。
+    """
+    return (
+        "\n/* 把结果图搬进环境的输出图（逐像素深拷贝）。\n"
+        " * 深拷贝而不是换指针：算法里的逆透视指针表指向原图，\n"
+        " * 换掉目标缓冲会让它们集体悬空。 */\n"
+        "void scut_env_copy_output(void)\n"
+        "{\n"
+        "    SCUT_EnvCopyOutput((const unsigned char *)%s, 0, 0);\n"
+        "}\n" % out_array)
 
 
 def _fallback_compile(job: UnitJob, cc: str, base_flags: List[str],
@@ -1950,6 +1992,42 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
         for w in j.warnings:
             reporter.warn("%s：%s" % (os.path.relpath(j.src, proj.root), w))
 
+    # --- 6a) 确认结果图搬运函数确实被生成了 ---------------------------------
+    #
+    # ★ 为什么必须显式检查（而不是等链接器报错）：
+    #   搬运函数由"声明了该数组的那个包装单元"生成。如果数组名写错、
+    #   或者它被声明在头文件里而我们没找到，函数就没人生成 ——
+    #   而接线单元仍在调它，链接期报的是
+    #       undefined reference to `scut_env_copy_output'
+    #   这句话对用户毫无指导意义（他从没写过这个函数）。
+    #   在这里先检查一遍，就能给出"你填的数组名在 code/ 里找不到"这种
+    #   能直接照着改的提示。
+    if out_array and auto_watch:
+        defined = False
+        for j in jobs:
+            if not j.used_wrapper or not os.path.isfile(j.wrapped):
+                continue
+            try:
+                with open(j.wrapped, "r", encoding="utf-8-sig",
+                          errors="replace") as f:
+                    if "void scut_env_copy_output(void)" in f.read():
+                        defined = True
+                        break
+            except OSError:
+                continue
+        if not defined:
+            reporter.error(
+                "设置里指定的「结果图数组名」在 code/ 里找不到：%s\n"
+                "    原因：这个数组必须【定义】在某个 code/*.c 的\n"
+                "    文件作用域里（不能只声明在头文件里，也不能写成局部的）。\n"
+                "    下一步（任选其一）：\n"
+                "      1) 把它改成你代码里真正存放结果图的数组名；\n"
+                "      2) 或者把这个设置留空 —— 画面将显示输入图本身。\n"
+                "    说明：数组名填错只会影响「处理后的图像」显示，"
+                "不影响算法编译与运行。" % out_array)
+            timer.report()
+            return finish(2)
+
     # --- 6b) 编译环境接线单元 ------------------------------------------------
     #
     # ★ 这个单元把用户函数接进环境的三个阶段（初始化/处理/绘制）。
@@ -2279,20 +2357,27 @@ def do_doctor(args: argparse.Namespace, reporter: Reporter,
             "工程里没有 code/ 目录。下一步：创建 code/ 并放入至少一个 .c 文件"
             "（或从 templates/starter/ 复制起步模板）。")
 
-    header, header_base = proj.find_config_header()
-    if header:
-        try:
-            w, h = parse_image_size(header)
-            say("  ✅ %-13s: %s" % (header_base, header))
-            say("     图像尺寸   : %d x %d" % (w, h))
-        except ConfigParseError as exc:
-            say("  ❌ %s: 解析失败" % header_base)
-            errors.append(str(exc))
-    else:
-        say("  ❌ config.h   : 不存在（也没有 scut_config.h）")
-        errors.append(
-            "找不到编译期契约头文件 config.h。"
-            "下一步：从 templates/starter/config.h 复制一份到工程根。")
+    # 工程配置：scut_project.json 是新约定，config.h 只为兼容老工程保留。
+    try:
+        cfg, cfg_source = load_project_config(proj, reporter)
+        w, h = _cfg_image(cfg)
+        say("  ✅ 工程配置   : %s" % cfg_source)
+        say("     图像尺寸   : %d x %d" % (w, h))
+        n_init = len(_cfg_names(cfg, "init"))
+        n_frame = len(_cfg_names(cfg, "frame"))
+        n_post = len(_cfg_names(cfg, "post"))
+        say("     钩子函数   : 初始化 %d / 处理 %d / 后处理 %d"
+            % (n_init, n_frame, n_post))
+        out_array = str(cfg.get("outputArray") or "").strip()
+        say("     结果图数组 : %s" % (out_array or "（未配置，显示输入图）"))
+        if not (n_init or n_frame):
+            errors.append(
+                "工程配置里没有填「图像处理函数」，环境无法运行你的算法。\n"
+                "    下一步：执行「SCUT-71: 配置本工程」，或在设置里搜索 "
+                "\"SCUT-71\" 填上「图像处理函数」。")
+    except ConfigParseError as exc:
+        say("  ❌ 工程配置   : 读不出来")
+        errors.append(str(exc))
 
     core_lib = args.core_lib or os.path.join(proj.root, DEFAULT_CORE_LIB_REL)
     core_lib = os.path.abspath(core_lib)
