@@ -204,21 +204,27 @@ function verify(checkOnly) {
     }
 
     // 逐文件比对内容
-    if (!checkOnly) {
-        for (const item of ITEMS) {
-            const src = path.join(REPO_ROOT, item.from);
-            const dst = path.join(EXTENSION_DIR, item.to);
-            const rels = item.kind === 'file' ? [''] : walkFiles(src);
-            for (const rel of rels) {
-                const s = rel ? path.join(src, rel) : src;
-                const d = rel ? path.join(dst, rel) : dst;
-                if (!fs.existsSync(d)) {
-                    problems.push(`副本缺失：extension/${item.to}${rel ? '/' + rel : ''}`);
-                    continue;
-                }
-                if (!fs.readFileSync(s).equals(fs.readFileSync(d))) {
-                    problems.push(`副本与源不一致：extension/${item.to}${rel ? '/' + rel : ''}`);
-                }
+    // ★★★ 必须【在 --check 模式下也做】★★★
+    //   这正是 2026-10-10 踩的坑：副本 extension/sdk/ 停留在"改 RGB 之前"
+    //   的版本，插件打出来的包构建用户工程时用的是旧核心（单通道输出 + PGM），
+    //   而插件端已按 PPM 解析 —— 魔数对不上，画面全黑，**不报任何错**。
+    //
+    //   原来的写法是 `if (!checkOnly)` 才比对，于是 --check 永远只查"文件在不在"，
+    //   内容漂移查不出来。这个条件必须去掉：两种模式都应该比对内容，
+    //   区别只在于 --check 不写入。
+    for (const item of ITEMS) {
+        const src = path.join(REPO_ROOT, item.from);
+        const dst = path.join(EXTENSION_DIR, item.to);
+        const rels = item.kind === 'file' ? [''] : walkFiles(src);
+        for (const rel of rels) {
+            const s = rel ? path.join(src, rel) : src;
+            const d = rel ? path.join(dst, rel) : dst;
+            if (!fs.existsSync(d)) {
+                problems.push(`副本缺失：extension/${item.to}${rel ? '/' + rel : ''}`);
+                continue;
+            }
+            if (!fs.readFileSync(s).equals(fs.readFileSync(d))) {
+                problems.push(`副本与源不一致：extension/${item.to}${rel ? '/' + rel : ''}`);
             }
         }
     }
@@ -252,6 +258,11 @@ function main() {
         console.error('');
         console.error('    影响：打出来的 .vsix 会缺少 SDK 或模板，学生装上去一点「编译」/「新建工程」就报错。');
         console.error('    下一步：确认仓库根目录的 core/ bind/ backends/ tools/ templates/ 完整，然后重新运行本脚本。');
+        console.error('');
+        console.error('  ★★ 若报的是「副本与源不一致」，那说明改了 core/ bind/ backends/ tools/ 之后');
+        console.error('     忘了同步 —— 插件构建用户工程用的是 extension/sdk/ 这份副本，');
+        console.error('     不是仓库里的源码。打出去的包会带着【旧核心】，症状是静默的（黑屏、');
+        console.error('     画面不对），极难定位。修法：node scripts/sync-sdk.js');
         process.exit(1);
     }
 
