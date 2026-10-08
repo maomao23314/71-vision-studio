@@ -100,9 +100,6 @@
   var selectedInitialised = state.selected !== null;
   var knownNames = {};
 
-  // 变量面板中每个可见项对应的 canvas（用于画曲线）
-  var sparkCanvases = {};
-
   /* ------------------------------------------------------------ 日志 */
 
   var logLines = [];
@@ -420,7 +417,9 @@
     for (var i = 0; i < catalog.length; i++) {
       if (catalog[i].name === name) { return catalog[i]; }
     }
-    return { dims: [], kind: 'SCUT_T_I32', isStatic: false };
+    // 不在清单里的（运行期才注册出来的）：兜底元信息，保证不崩、能显示。
+    // manual 缺省 false —— 没在源码里扫到注册调用，就按自动捕获处理。
+    return { dims: [], kind: 'SCUT_T_I32', isStatic: false, manual: false };
   }
 
   function renderVariables() {
@@ -505,7 +504,6 @@
     /* ---------- 查看区 ---------- */
     if (el.varsList) {
       el.varsList.textContent = '';
-      sparkCanvases = {};
       if (el.varsCount) {
         el.varsCount.textContent = catalog.length
           ? (selected.size + ' / ' + catalog.length) : '';
@@ -517,25 +515,28 @@
       var picked = [];
       for (var k = 0; k < snapshots.length; k++) {
         var s = snapshots[k];
-        if (!selected.has(s.name)) { continue; }
+        var km = kindOf(s.name);
+        // ★ 显示规则：主动暴露的恒显示，自动捕获的看勾选。
+        //   用户在代码里写了 SCUT_Watch 就等于已经表达过"我要看它"，
+        //   不该再要求他去上面的列表里勾一遍。
+        var isManual = km.manual === true || s.manual === true;
+        if (!isManual && !selected.has(s.name)) { continue; }
         // ★ 遍历【快照】而不是 catalog：
         //   catalog 是自动发现的结果，但用户可以手动 SCUT_Watch 额外注册
         //   （例如结构体里的关键成员），这些不在 catalog 里 ——
         //   早期版本遍历 catalog，导致手动注册的变量【永远不显示】，
         //   即使后端每帧都输出了它们的值。
         //   catalog 里没有的用兜底元信息，保证不崩、能显示。
-        var k2 = kindOf(s.name);
         picked.push({
           name: s.name,
-          dims: k2.dims, kind: k2.kind, isStatic: false,
+          dims: km.dims, kind: km.kind, isStatic: false,
           total: s.total,
-          // ★ manual 必须带过来：查看区也要像勾选区那样区分
-          //   「主动暴露」与「自动捕获」（用户要求：主动在前、颜色区分）。
-          manual: k2.manual === true
+          manual: isManual
         });
       }
       if (picked.length === 0) {
-        el.varsHint.textContent = '没有勾选任何变量。展开上面的「选择要观察的变量」勾几个即可（不影响算法运行）。';
+        el.varsHint.textContent = '变量栏是空的：代码里没写 SCUT_Watch 主动注册，'
+          + '也没在上面的「选择要观察的变量」里勾选。勾几个即可（不影响算法运行）。';
         return;
       }
       el.varsHint.textContent = '';
@@ -602,37 +603,23 @@
             };
           })(det, btn, cv));
           body.appendChild(btn);
-        } else {
-          var spark = document.createElement('canvas');
-          spark.className = 'spark';
-          spark.width = 240;
-          spark.height = 40;
-          spark.setAttribute('data-role', 'spark');
-          body.appendChild(spark);
-          sparkCanvases[cv.name] = spark;
         }
 
         li2.appendChild(body);
         el.varsList.appendChild(li2);
-      }
-      // 画曲线（在所有 <li> 都建好之后统一画，避免边建边查）
-      for (var q = 0; q < picked.length; q++) {
-        var cv2 = picked[q];
-        var sk = sparkCanvases[cv2.name];
-        if (!sk) { continue; }
-        var snap = snapshotOf(cv2.name);
-        var is1D = cv2.dims && cv2.dims.length === 1;
-        if (snap && is1D) {
-          sk.style.display = '';
-          drawSpark(sk, parseNumbers(snap.values));
-        }
       }
     }
   }
 
   function varMeta(v) {
     var dims = (v.dims && v.dims.length) ? v.dims.join('×') : '标量';
-    var k = (v.kind || '').replace('SCUT_T_', '');
+    // ★ 必须 String(...) 兜底：kind 在两个来源里类型不同 ——
+    //   编译期清单给的是字符串 "SCUT_T_I32"，而运行期注册表给的是数字。
+    //   一旦某个变量走到运行期那一份（DWARF 解析不出来的结构体成员），
+    //   (数字).replace 就会抛 TypeError，而它是在渲染【整个列表】的循环里
+    //   抛的 —— 于是变量面板整块空白，连带上面已经渲染好的部分也没了。
+    //   显示用的辅助函数不该有能力弄垮整个视图。
+    var k = String(v.kind == null ? '' : v.kind).replace('SCUT_T_', '');
     return k + ' · ' + dims + (v.isStatic ? ' · static' : '');
   }
 
@@ -648,64 +635,6 @@
     var s = snapshotOf(name);
     if (!s) { return '(等待数据…)'; }
     return s.values.join(' ') + (s.truncated ? ' …（共 ' + s.total + ' 个，只显示前 24 个）' : '');
-  }
-
-  function parseNumbers(values) {    var out = [];
-    for (var i = 0; i < values.length; i++) {
-      var n = Number(values[i]);
-      if (isFinite(n)) {
-        out.push(n);
-      }
-    }
-    return out;
-  }
-
-  function drawSpark(canvas, nums) {
-    var c = canvas.getContext('2d');
-    var w = canvas.width;
-    var h = canvas.height;
-    c.clearRect(0, 0, w, h);
-    if (nums.length < 2) {
-      return;
-    }
-    var min = nums[0];
-    var max = nums[0];
-    for (var i = 1; i < nums.length; i++) {
-      if (nums[i] < min) { min = nums[i]; }
-      if (nums[i] > max) { max = nums[i]; }
-    }
-    var span = max - min;
-
-    // 用主题色画：色值从 CSS 变量读，这样跟随浅色/深色主题
-    var stroke = getComputedStyle(document.body).getPropertyValue('--vscode-charts-blue').trim()
-      || getComputedStyle(document.body).getPropertyValue('--vscode-focusBorder').trim()
-      || '#3794ff';
-
-    c.strokeStyle = stroke;
-    c.lineWidth = 1.5;
-    c.beginPath();
-    for (var k = 0; k < nums.length; k++) {
-      var x = (k / (nums.length - 1)) * (w - 2) + 1;
-      var t = span === 0 ? 0.5 : (nums[k] - min) / span;
-      var y = h - 2 - t * (h - 4);
-      if (k === 0) {
-        c.moveTo(x, y);
-      } else {
-        c.lineTo(x, y);
-      }
-    }
-    c.stroke();
-
-    // 基线（0 值位）——只有区间跨越 0 时才画，避免误导
-    if (min < 0 && max > 0) {
-      var zy = h - 2 - ((0 - min) / span) * (h - 4);
-      c.strokeStyle = getComputedStyle(document.body).getPropertyValue('--vscode-panel-border').trim() || '#888';
-      c.lineWidth = 1;
-      c.beginPath();
-      c.moveTo(1, zy);
-      c.lineTo(w - 1, zy);
-      c.stroke();
-    }
   }
 
 

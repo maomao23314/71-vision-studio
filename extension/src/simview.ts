@@ -566,10 +566,27 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
     }
 
     private sendSnapshot(): void {
-        // 宿主侧按勾选过滤：即使仿真进程侧的 --select 还没生效，
-        // 用户看到的也只会是勾选的那些变量。
-        const filtered = this.lastSnapshot.filter((s) => this.selected.has(s.name));
+        // ★ 显示规则（用户诉求）：主动暴露的恒显示，自动捕获的看勾选。
+        //
+        //   主动暴露 = 用户自己在代码里写了 SCUT_Watch/SCUT_WATCH_SCALAR，
+        //   语义上已经等于"我想让你看见它"，不该再要求他去列表里勾一遍。
+        //   自动捕获 = 环境自己发现的一堆全局量，多达几十个，绝大多数用户
+        //   并不关心，所以由「选择变量」按钮控制，显式勾选才进面板。
+        //
+        //   宿主侧过滤（而不是等仿真进程的 --select 生效）：
+        //   否则会出现"刚勾上却要等下一次启动才出现"的割裂感。
         const catalog = this.manifest?.variables ?? [];
+        // ★ 判据用 manualWatches（源码扫描得到的名字表），而不是逐条目的
+        //   manual 标记：手写注册最常见的是结构体成员，它们在 DWARF 里
+        //   没有独立条目，只看条目标记会全部漏掉。
+        const manualNames = new Set(this.manifest?.manualWatches ?? []);
+        for (const v of catalog) {
+            if (v.manual === true) {
+                manualNames.add(v.name);
+            }
+        }
+        const filtered = this.lastSnapshot.filter(
+            (s) => manualNames.has(s.name) || this.selected.has(s.name));
         const kindOf = new Map<string, WatchedVariable>();
         for (const v of catalog) {
             kindOf.set(v.name, v);
@@ -581,6 +598,7 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
                     ...s,
                     dims: kindOf.get(s.name)?.dims ?? [],
                     kind: kindOf.get(s.name)?.kind ?? '',
+                    manual: manualNames.has(s.name),
                 })),
                 frame: this.lastFrameIndex,
                 timing: this.lastTiming ?? null,

@@ -16,7 +16,16 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 
 const framesDir = process.argv[2];
-const outDir = process.argv[3] || require('os').tmpdir();
+// ★ 位置参数要跳过 --real 及其取值：直接把 argv[3] 当输出目录的话，
+//   "node ... --real <工程>" 会让 outDir 变成 "--real"，harness 被写到
+//   一个叫 --real 的相对目录里，页面根本加载不到、DOM 长度 0。
+const posArgs = process.argv.slice(3).filter((a) => !a.startsWith('--'));
+// ★ 没显式给输出目录时用【临时目录】，而不是 CWD。
+//   否则 harness.html / webview_shot.png 会掉进【被测工程目录】里，
+//   把测试产物混进用户的工程（曾经真的掉进过 scut71-project/）。
+const outArgIdx = process.argv.indexOf('--out');
+const outDir = (outArgIdx >= 0 ? process.argv[outArgIdx + 1] : posArgs[0])
+    || require('os').tmpdir();
 
 // ★ 输出目录必须先建出来。
 //   否则 readFileSync(simview.css) 会以 ENOENT 崩掉 —— 报错指向
@@ -82,6 +91,54 @@ const snapshots = [
       dims: [120],
       values: Array.from({ length: 24 }, (_, i) => String(i < 18 ? 60 + i * 4 : -1)) }
 ];
+
+// ★ 如果给了真实工程（--real），就用【真变量】喂进去，覆盖手写注册那组。
+//   假数据只有 4 个自动变量，根本走不到"主动暴露恒显示"那条分支 ——
+//   那条分支一旦坏掉，假数据是测不出来的。
+const realFlag = process.argv.indexOf('--real');
+let realCatalog = null;
+let realSnapshots = null;
+if (realFlag >= 0) {
+    const proj = process.argv[realFlag + 1];
+    const mPath = path.join(proj, '.scut', 'gen', 'variables.json');
+    const exe = path.join(proj, '.scut', 'bin', 'scut_sim.exe');
+    const manifest = JSON.parse(
+        fs.readFileSync(mPath, 'utf8').replace(/^\uFEFF/, ''));
+    const cp = require('child_process');
+    const rr = cp.spawnSync(exe, ['--list-vars', '--json'],
+                            { encoding: 'utf8', cwd: proj });
+    const line = (rr.stdout || '').split('\n').filter((l) => l.includes('"vars"')).pop();
+    const rt = line ? JSON.parse(line.trim()) : {};
+    const rtVars = rt.vars || [];
+    const manualNames = new Set(manifest.manualWatches || []);
+    const known = new Set((manifest.variables || []).map((v) => v.name));
+    const mark = (v) => ({ ...v, manual: manualNames.has(v.name) });
+    const all = (manifest.variables || []).map(mark);
+    const manual = all.filter((v) => v.manual);
+    const auto = all.filter((v) => !v.manual);
+    const extra = rtVars.filter((v) => !known.has(v.name)).map(mark);
+    realCatalog = [...manual, ...extra.filter((v) => v.manual),
+                   ...auto, ...extra.filter((v) => !v.manual)];
+    // 只喂标量与小数组，模拟宿主侧"看勾选"的过滤（自动的只勾 3 个）
+    const autoPicked = auto.filter((v) => v.total <= 512).slice(0, 3).map((v) => v.name);
+    const keep = new Set([...manualNames, ...autoPicked]);
+    realSnapshots = rtVars.filter((v) => keep.has(v.name)).map((v) => ({
+        name: v.name,
+        // ★ values 必须是【数组】。C 侧发的是空格分隔的字符串，
+        //   真实宿主在 simsession.ts 里做 v.values.split(/\s+/) 切成数组
+        //   之后才转发给 webview；webview 端用 s.values.join(' ')。
+        //   这里必须复刻那次切分，否则会撞上"s.values.join is not a
+        //   function" —— 症状是变量面板整个空白。
+        values: String(v.values || '').split(/\s+/).filter((x) => x.length > 0),
+        truncated: v.truncated === true,
+        total: v.total || 1,
+        dims: v.dims || [],
+        kind: v.kind || 'SCUT_T_I32',
+        manual: manualNames.has(v.name),
+    }));
+    console.log('  （使用真实工程变量：' + realCatalog.length + ' 个，其中手写注册 '
+        + manualNames.size + ' 个）');
+}
 const catalog = [
     { name: 'g_threshold', kind: 'SCUT_T_I32', dims: [], total: 1, elemBytes: 4,
       isStruct: false, isPtr: false, isStatic: false, defaultSelected: true },
@@ -173,7 +230,14 @@ const harness = shell.replace(
       };
   };
   window.__errors = [];
-  window.addEventListener('error', function (e) { window.__errors.push(String(e.message)); });
+  // 带上文件名与行号：跨源的 "Script error." 拿不到堆栈，
+  // 只留 message 会让人完全不知道错在哪一行。
+  window.addEventListener('error', function (e) {
+    var where = '';
+    try { if (e.filename) { where = ' @' + String(e.filename).split('/').pop()
+                                 + ':' + e.lineno + ':' + e.colno; } } catch (x) {}
+    window.__errors.push(String(e.message) + where);
+  });
 </script></head>`);
 
 // 在真实脚本之后追加喂数据与自检
@@ -184,14 +248,20 @@ const feed = `
           window.dispatchEvent(new MessageEvent('message', { data: m }));
       };
       // 顺序与真实宿主一致：先给变量目录（含勾选状态），再给帧与快照
-      send({ type: 'catalog', variables: ${JSON.stringify(catalog)},
-             selected: ${JSON.stringify(catalog.map((c) => c.name))} });
+      // ★ selected 传【实际送到的快照里那些自动变量】的名字 ——
+      //   真实宿主也是"勾了的才发"，手写的则恒发。
+      send({ type: 'catalog', variables: ${JSON.stringify(
+              realCatalog || catalog.map((c) => ({ ...c, manual: false })))},
+             selected: ${JSON.stringify((realSnapshots
+                 ? realSnapshots.filter((s) => !s.manual).map((s) => s.name)
+                 : catalog.map((c) => c.name)))} });
       send({ type: 'frame', index: 1,
              width: ${img.width}, height: ${img.height},
              gray: new Uint8Array(${JSON.stringify(img.gray)}),
              timing: { processUs: 258.7, drawUs: 4.2, frameUs: 295.9,
                        processCycles: 825600, cyclesValid: true } });
-      send({ type: 'vars', snapshots: ${JSON.stringify(snapshots)}, frame: 1,
+      send({ type: 'vars', snapshots: ${JSON.stringify(realSnapshots || snapshots)},
+             frame: 1,
              timing: { processUs: 258.7, drawUs: 4.2, frameUs: 295.9,
                        processCycles: 825600, cyclesValid: true } });
   };
@@ -210,6 +280,26 @@ const feed = `
       });
       var vl = document.getElementById('vars-list');
       out.varItems = vl ? vl.children.length : -1;
+      // 顺带把变量区的文本抓出来：断言失败时能直接看出"为什么是空的"
+      out.varsText = vl ? vl.textContent.slice(0, 400) : '(无 #vars-list)';
+      // ★ 折线图已删除：变量区不该再出现任何 canvas。
+      //   画面那张 canvas 在 #screen 里，与变量区无关，所以分开数。
+      var varCanvases = vl ? vl.querySelectorAll('canvas').length : -1;
+      out.varCanvases = varCanvases;
+      // 分组标题的文案（用来验证主动/自动两组都在）
+      var groups = [];
+      if (vl) {
+        Array.prototype.forEach.call(vl.children, function (n) {
+          if (n.className && n.className.indexOf('pick-group') >= 0) {
+            groups.push({ text: n.textContent, manual: n.className.indexOf('manual') >= 0 });
+          }
+        });
+      }
+      out.groups = groups;
+      var manualItems = vl ? vl.querySelectorAll('.var-item.is-manual').length : -1;
+      var autoItems = vl ? vl.querySelectorAll('.var-item.is-auto').length : -1;
+      out.manualItems = manualItems;
+      out.autoItems = autoItems;
       var tp = document.getElementById('t-process');
       out.tProcessText = tp ? tp.textContent : null;
       out.bodyLen = (document.body.innerText || '').length;
@@ -284,13 +374,20 @@ if (!m) {
                         '  非零像素=' + p.nonzero + (p.err ? '  错误=' + p.err : ''));
         });
         console.log('  变量面板条目数   : ' + r.varItems);
+        console.log('  变量区 canvas 数 : ' + r.varCanvases +
+                    '  （折线图已删除，应为 0）');
+        console.log('  手动/自动条目数  : ' + r.manualItems + ' / ' + r.autoItems);
+        console.log('  分组标题         : ' + JSON.stringify(r.groups || []));
+        console.log('  变量区文本       : ' + JSON.stringify((r.varsText || '').slice(0, 200)));
         console.log('  处理时间显示     : ' + JSON.stringify(r.tProcessText));
         console.log('  前端主动发的消息 : ' + JSON.stringify(r.sent).slice(0, 200));
 
-        // 判定
+        // 判定：画面画出来了 + 变量有条目 + 变量区没有残留的折线图 canvas
         const painted = (r.painted || []).some((p) => p.nonzero > 0);
+        const noSpark = r.varCanvases === 0;
+        const pass = r.canvases > 0 && painted && r.varItems > 0 && noSpark;
         console.log('\n  ==> 渲染判定: ' +
-            (r.canvases > 0 && painted && r.varItems > 0 ? '✅ 画面已绘制且变量面板有条目'
-                                                          : '❌ 未通过'));
+            (pass ? '✅ 画面已绘制、变量面板有条目、变量区无折线图'
+                   : '❌ 未通过' + (noSpark ? '' : '（变量区还有 canvas）')));
     }
 }

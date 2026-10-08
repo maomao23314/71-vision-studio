@@ -410,28 +410,26 @@ function fail(startMs: number, diags: BuildDiagnostic[], ch: vscode.OutputChanne
 }
 
 /**
- * 用运行期注册表（exe --list-vars）补全编译期清单，并标出「主动暴露」的变量。
+ * 用运行期注册表（exe --list-vars）补全编译期清单。
  *
- * ★ 为什么必须走这一步：
+ * ★ 补全的是什么：
  *   编译期 .vars.json 来自 DWARF 自动发现，只含编译器能看到的全局量。
- *   用户用 SCUT_Watch 主动注册的变量（典型：结构体成员，DWARF 里是
- *   不透明 <104B>）【编译期不可见、运行期才注册】—— 不补全的话，
- *   后端每帧都输出 cam_err 等关键量，面板却勾不了也看不见。
+ *   用户手写 SCUT_WATCH_SCALAR 注册的【结构体成员】（典型：m7_0_data.lane_status，
+ *   DWARF 里是不透明的 <104B>）编译期拿不到独立条目，但运行期注册表里有。
+ *   不补全的话这些量面板里根本不存在。
  *
- * ★★ 怎么区分「主动暴露」与「自动捕获」★
- *   这正是用户要的分组依据，而且它有一个天然的客观判据：
+ * ★★ 怎么区分「主动暴露」与「自动捕获」★★
+ *   判据来自 scut_symbols.py 的**源码扫描**：用户在 code/ 下亲手写了
+ *   SCUT_Watch / SCUT_WATCH_SCALAR → 主动暴露；没写 → 自动捕获。
+ *   清单里以 `manual` 字段带过来。
  *
- *     编译期清单（DWARF）   = 编译器能从源码看到的全局量  → 自动捕获
- *     运行期注册表（--list-vars）中【不在编译期清单里】的那些
- *                           = 只能由 SCUT_Watch 主动注册    → 主动暴露
+ *   ★ 曾经用"运行期注册表 减 编译期 DWARF"当判据，那【是错的】：
+ *     实测真实工程上两边 42 个变量完全重合，差集恒为空 → 主动暴露永远 0 个。
+ *     因为自动发现生成的包装单元调用的也是 SCUT_Watch，与手写的进同一张
+ *     注册表；注册表只有"名字/地址/类型"，没有"这行代码谁写的"。
+ *     唯一可靠的区分点是源码（手写的在 code/，生成的只在 .scut/gen/）。
  *
- *   不需要用户额外标注，也不会因为改注释而失效 —— 它是两个集合的差集，
- *   有明确语义。自动捕获的变量排后面并用灰色显示。
- *
- * ★ 为什么放在 finishResult：构建的收尾统一走这里，
- *   变量面板的补全逻辑只写一份，不会出现"某个入口忘了补"的情况。
- *
- * 失败不致命：拿不到就退回编译期清单，只是少几个主动注册的变量。
+ * 失败不致命：拿不到就退回编译期清单，只是少几个结构体成员。
  */
 function augmentManifestFromRuntime(
     exePath: string | undefined,
@@ -456,24 +454,40 @@ function augmentManifestFromRuntime(
             return manifest;
         }
 
-        // 编译期已有的名字 → 这些是自动捕获
-        const autoNames = new Set((manifest?.variables ?? []).map((v) => v.name));
+        // 编译期已有的名字（DWARF 能看到的全局量）
+        const known = new Set((manifest?.variables ?? []).map((v) => v.name));
 
-        // 运行期独有的 → 主动暴露
-        const manual: WatchedVariable[] = runtime.variables
-            .filter((v) => !autoNames.has(v.name))
-            .map((v) => ({ ...v, manual: true }));
+        // ★ 用户手写注册的名字（scut_symbols.py 扫源码得出，跨 TU 汇总）。
+        //   注意：手写注册最常见的是【结构体成员】，它在 DWARF 里没有独立条目，
+        //   所以这些名字往往【不在上面那个变量数组里】，而在下面的运行期列表里。
+        const manualNames = new Set(manifest?.manualWatches ?? []);
 
-        const auto = (manifest?.variables ?? []).map((v) => ({ ...v, manual: false }));
+        const mark = (v: WatchedVariable): WatchedVariable =>
+            ({ ...v, manual: manualNames.has(v.name) || v.manual === true });
+
+        // 编译期清单：按是否手写分成两组，手写的排前面
+        const all = (manifest?.variables ?? []).map(mark);
+        const manual = all.filter((v) => v.manual);
+        const auto = all.filter((v) => !v.manual);
+
+        // 运行期有、编译期没有的条目补进来（DWARF 覆盖不到的结构体成员等）
+        const extra = runtime.variables
+            .filter((v) => !known.has(v.name))
+            .map(mark);
 
         if (manual.length > 0) {
-            ch.appendLine(`[变量] 其中 ${manual.length} 个是代码里主动注册的`
-                + `（编译期 DWARF 看不到，通常是结构体成员）：${
+            ch.appendLine(`[变量] ${manual.length} 个是代码里主动注册的`
+                + `（SCUT_Watch/SCUT_WATCH_SCALAR，恒显示）：${
                     manual.map((v) => v.name).join(', ')}`);
         }
 
-        // 主动暴露的排前面（用户的诉求：主动在前面，两者用颜色区分）
-        const variables = [...manual, ...auto];
+        // 主动暴露的排前面（用户的诉求：主动在前面，两者用颜色区分）。
+        // ★ manual 与 extra 必须【各自排一次】而不是先拼起来再排：
+        //   手写注册最常见的是结构体成员，它们不在 DWARF 清单里、
+        //   只存在于 extra 里。若不合并这两组，它们会被排到最后 ——
+        //   而它们恰恰是最该置顶的那几个。
+        const variables = [...manual, ...extra.filter((v) => v.manual),
+            ...auto, ...extra.filter((v) => !v.manual)];
         return { source: manifest?.source ?? runtime.source, count: variables.length, variables };
     } catch {
         return manifest;
@@ -711,10 +725,18 @@ function normalizeManifest(raw: unknown): VariableManifest | undefined {
             isStatic: v.isStatic === true,
             declLine: typeof v.declLine === 'string' ? v.declLine : undefined,
             defaultSelected: v.defaultSelected !== false,
+            // 主动暴露的标记（由 scut_symbols.py 扫源码得出）。
+            // 缺失时按 false 处理：宁可当成自动捕获，也不要凭空显示一堆变量。
+            manual: v.manual === true,
         }));
     return {
         source: typeof o.source === 'string' ? o.source : '',
         count: typeof o.count === 'number' ? o.count : variables.length,
+        // 手写注册的名字（跨 TU 汇总）。缺失时给空表而不是报错：
+        // 老清单没有这个字段，功能退化成"全按自动捕获"，不至于崩。
+        manualWatches: Array.isArray(o.manualWatches)
+            ? o.manualWatches.filter((n): n is string => typeof n === 'string')
+            : [],
         variables,
     };
 }

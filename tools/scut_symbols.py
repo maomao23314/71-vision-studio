@@ -446,13 +446,81 @@ def _emit_wrapper(args, variables):
         f.write(body)
 
 
+def scan_manual_watches(src_path):
+    """找出【用户手写】的变量注册调用，返回一组变量名。
+
+    ================================================================================
+    为什么必须扫源码，而不是靠"运行期注册表 - 编译期 DWARF"
+    ================================================================================
+    曾经用差集判定"主动暴露"：运行期注册表里有、编译期 DWARF 里没有的，就是
+    用户手写的。实测在真实工程上这个判据【恒为空】：
+    运行期注册表 42 个，编译期 DWARF 也 42 个，完全重合。
+
+    原因是自动发现生成的包装单元调用的也是 SCUT_Watch，
+    和用户手写的 SCUT_WATCH_SCALAR 进的是同一个注册表、同一张表。
+    注册表只记录"名字/地址/类型"，没有"这行代码是谁写的"这个信息 ——
+    到了这一步已经分不出来了。
+
+    唯一可靠的区分点是【源码】：用户手写的调用出现在 code/ 下的文件里，
+    自动生成的只出现在 .scut/gen/ 的包装单元里。所以扫源码。
+
+    ================================================================================
+    为什么要把"主动/自动"这个区分做对
+    ================================================================================
+    用户的手工注册是"我想让你看见这几个量"，语义上等同于"勾选"，
+    不该再要求他去变量列表里重新勾一遍。所以面板必须恒定显示它们。
+
+    只认 SCUT_Watch / SCUT_WATCH_SCALAR 两个宏（不带下划线的那个 SCUT_WATCH
+    是它们的实现，不算用户调用）。
+    """
+    names = set()
+    try:
+        with open(src_path, 'r', encoding='utf-8', errors='replace') as f:
+            text = f.read()
+    except OSError:
+        return names
+
+    # 只去注释；【不要】去字符串字面量 ——
+    # 因为要抓的恰恰就是 SCUT_Watch("名字", ...) 里的那个字符串。
+    # （曾经在这里把字符串字面量也剥掉，结果连要匹配的参数一起没了，
+    #   扫出来恒为空：7 个手写变量一个都没认出来。）
+    text = re.sub(r'/\*.*?\*/', ' ', text, flags=re.S)
+    text = re.sub(r'//[^\n]*', ' ', text)
+
+    # 宏名 + 左括号 + 可空白 + 引号 + 名字。名字到收尾引号为止，
+    # 中间不允许出现引号或换行，保证不会跨调用误抓。
+    pat = r'\bSCUT_WATCH_SCALAR\s*\(\s*"([^"\n]+)"'
+    for m in re.finditer(pat, text):
+        names.add(m.group(1))
+    pat = r'\bSCUT_Watch\s*\(\s*"([^"\n]+)"'
+    for m in re.finditer(pat, text):
+        names.add(m.group(1))
+    return names
+
+
 def _emit_manifest(args, variables):
     if not args.out_json:
         return
+    # 扫描用哪个路径：优先 --src-abs（绝对、可靠），退回 --src。
+    # ★ 为什么需要 --src-abs：--src 会被原样写进生成文件里的
+    #   `#include "{src}"`，所以它必须是相对 code/ 的路径。
+    #   而本脚本的工作目录不保证是工程根，按 --src 相对路径去 open()
+    #   可能失败 —— 曾经就是这样：失败被 except 吞掉、静默返回空集，
+    #   症状是"用户主动注册的变量一个都不显示"且没有任何报错。
+    manual = scan_manual_watches(args.src_abs or args.src)
     manifest = {
         'note': MANIFEST_NOTE,
         'source': args.src,
         'count': len(variables),
+        # ★★ 顶层单独列出手写注册的名字，而不是只给每个变量打 manual 标记。
+        #
+        #   原因：手写注册最常见的就是【结构体成员】
+        #   （SCUT_WATCH_SCALAR("cam_err", &m7_0_data.cam_err, ...)），
+        #   而结构体成员在 DWARF 里【没有独立变量条目】——
+        #   实测真实工程里 7 个手写变量一个都不在 DWARF 清单中。
+        #   只把 manual 标在 DWARF 变量上会全部丢失（标了也没对应条目）。
+        #   名字单独存一份，宿主才能拿它去标记【运行期注册表】里的条目。
+        'manualWatches': sorted(manual),
         'variables': [
             {
                 'name': v['name'],
@@ -464,6 +532,7 @@ def _emit_manifest(args, variables):
                 'isPtr': v['ptr'],
                 'isStatic': not v['external'],
                 'declLine': v['decl_line'],
+                'manual': v['name'] in manual,
                 # 默认勾选策略：标量与小数组默认看，巨大缓冲默认不看，
                 # 避免一上来就把 22560 字节的图像缓冲塞进 UI。
                 'defaultSelected': v['total'] <= 512,
@@ -478,7 +547,10 @@ def _emit_manifest(args, variables):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--obj', required=True, help='探针目标文件 (.o)')
-    ap.add_argument('--src', required=True, help='原始源文件名（用于 #include）')
+    ap.add_argument('--src', required=True, help='原始源文件名（用于 #include，必须相对 code/）')
+    ap.add_argument('--src-abs', default='',
+                    help='原始源文件的绝对路径，仅用于扫描用户手写的 '
+                         'SCUT_Watch/SCUT_WATCH_SCALAR 调用；留空则退回 --src')
     ap.add_argument('--out-c', required=True, help='输出的包装 .c 文件')
     ap.add_argument('--out-json', help='输出的变量清单 JSON')
     ap.add_argument('--objdump', default='objdump')

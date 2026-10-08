@@ -89,14 +89,19 @@ export interface WatchedVariable {
     /** 由生成器给出的默认勾选建议（大缓冲默认不勾，避免卡 UI） */
     defaultSelected: boolean;
     /**
-     * 是不是「主动暴露」的变量（代码里显式 SCUT_Watch 注册的）。
+     * 是不是「主动暴露」的变量（用户自己在代码里写了 SCUT_Watch /
+     * SCUT_WATCH_SCALAR 显式注册的）。
      *
-     * ★ 判据：运行期注册表里有、编译期 DWARF 清单里没有 → 主动暴露。
-     *   见 extension/src/build.ts 的 augmentManifestFromRuntime。
+     * ★ 判据：tools/scut_symbols.py **扫源码**，看用户亲手写了哪些注册调用。
+     *   见该文件的 scan_manual_watches。
+     *
+     * ★ 为什么不用"运行期注册表减编译期 DWARF"（曾经的判据）：那个差集实测
+     *   恒为空 —— 自动发现生成的包装单元调用的也是 SCUT_Watch，与手写的
+     *   进同一张注册表，到这一步已经分不出谁写的了。只有源码还分得清。
      *
      * ★ 为什么要区分：主动注册的通常是"作者认为最关键的量"
-     *   （例如结构体里的 cam_err），理应排在前面、并且视觉上更醒目；
-     *   自动捕获的是编译器看到的一切，属于"顺带发现"，排后面即可。
+     *   （例如结构体里的 cam_err），理应排在前面、视觉上更醒目，
+     *   而且【恒显示】——用户写过它就等于已经勾选过了。
      */
     manual?: boolean;
 }
@@ -105,6 +110,18 @@ export interface VariableManifest {
     source: string;
     count: number;
     variables: WatchedVariable[];
+    /**
+     * 用户【亲手】写了 SCUT_Watch / SCUT_WATCH_SCALAR 的变量名（跨文件汇总）。
+     *
+     * ★ 为什么要单独存一份，而不是只看每个变量上的 manual 标记：
+     *   手写注册最常见的形式就是【结构体成员】
+     *   （SCUT_WATCH_SCALAR("cam_err", &m7_0_data.cam_err, ...)），
+     *   而结构体成员在 DWARF 里【没有独立变量条目】——
+     *   实测真实工程里 7 个手写变量一个都不在自动发现的清单中。
+     *   名字必须单独存，宿主才能去【运行期注册表】里把它们认出来。
+     *   否则"用户主动注册的变量看不见"就成了必然。
+     */
+    manualWatches?: string[];
 }
 
 /* ==========================================================================
@@ -198,6 +215,15 @@ export interface VariableSnapshot {
     /** 是否被截断（大数组只传前 N 个） */
     truncated: boolean;
     total: number;
+    /**
+     * 是不是「主动暴露」的（用户自己在源码里写了 SCUT_Watch）。
+     *
+     * ★ 为什么要把它随快照一起传，而不让前端去查清单：
+     *   变量可能【不在清单里】（DWARF 解析不出独立条目的结构体成员），
+     *   但它确实注册过。清单是"编译期能看到什么"，注册表是"实际注册了什么"，
+     *   两者本就不等价。以注册结果为准更贴近"用户到底能不能看见它"。
+     */
+    manual?: boolean;
 }
 
 /* ==========================================================================

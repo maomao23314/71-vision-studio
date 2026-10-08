@@ -346,18 +346,6 @@ button.ghost:hover {
   overflow-y: auto;
 }
 
-canvas.spark {
-  display: block;
-  width: 100%;
-  height: 34px;
-  margin-top: 3px;
-  /* canvas 的 CSS 尺寸和位图尺寸不一致时，曲线会被平滑放大。
-     对曲线来说这没问题（我们就是要平滑），所以这里【不】用 pixelated。 */
-  background: var(--vscode-editor-background, rgba(0, 0, 0, 0.2));
-  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
-  border-radius: 2px;
-}
-
 /* --------------------------------------------------------------- 日志 */
 
 #log-section {

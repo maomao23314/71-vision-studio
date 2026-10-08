@@ -1508,7 +1508,14 @@ def build_one_unit(job: UnitJob, cc: str, objdump: str, python: str,
         gen_cmd = [
             python, symbols_tool,
             "--obj", job.obj,
+            # --src 会原样写进生成文件的 #include，所以必须是【相对 code/】的
+            # 路径（--src 只能给相对路径，给绝对路径会编不过）。
             "--src", job.rel,
+            # 扫描"用户手写注册"要另给一个绝对路径：本脚本可能在任意工作目录
+            # 下运行，若生成器按相对路径 open()，会失败、被 except 吞掉、
+            # 静默返回空集 —— 症状是"用户主动注册的变量一个都不显示"，
+            # 而且没有任何报错。（曾经就这么坏着，靠手动调生成器才暴露。）
+            "--src-abs", job.src,
             "--out-c", tmp_c,
             "--out-json", tmp_j,
             "--objdump", objdump,
@@ -2431,8 +2438,14 @@ def merge_manifests(jobs: List[UnitJob]) -> Optional[Dict[str, Any]]:
     把每个文件的 vars.json 合成一份清单。
 
     单文件时原样透传（保持与 scut_symbols.py 完全一致的形状）；
-    多文件时拼接并注明来源。形状固定为 {source, count, variables}，
+    多文件时拼接并注明来源。形状固定为
+    {source, count, variables, manualWatches}，
     与 extension/src/types.ts 的 VariableManifest 对应。
+
+    ★ manualWatches 要【跨所有 TU 汇总】，不能只取单个文件的：
+      用户把注册调用写在 camera.c 里，而另一个文件 common_var.c 可能一个
+      手写变量都没有。只看第一份的话，注册写在哪个文件决定了这个功能
+      有没有效 —— 这属于"结果取决于无关因素"，是最难查的一类缺陷。
     """
     pieces: List[Dict[str, Any]] = []
     for j in jobs:
@@ -2447,11 +2460,20 @@ def merge_manifests(jobs: List[UnitJob]) -> Optional[Dict[str, Any]]:
             pieces.append(data)
     if not pieces:
         return None
+
+    # 手写注册的名字：并集 + 去重 + 稳定排序
+    manual: Set[str] = set()
+    for p in pieces:
+        for n in p.get("manualWatches", []) or []:
+            if isinstance(n, str) and n:
+                manual.add(n)
+
     if len(pieces) == 1:
         only = pieces[0]
         return {
             "source": only.get("source", ""),
             "count": int(only.get("count", len(only.get("variables", [])))),
+            "manualWatches": sorted(manual),
             "variables": only.get("variables", []),
         }
     variables: List[Dict[str, Any]] = []
@@ -2460,6 +2482,7 @@ def merge_manifests(jobs: List[UnitJob]) -> Optional[Dict[str, Any]]:
     return {
         "source": ", ".join(str(p.get("source", "?")) for p in pieces),
         "count": len(variables),
+        "manualWatches": sorted(manual),
         "variables": variables,
     }
 
