@@ -228,6 +228,31 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
         void vscode.window.showInformationMessage('SCUT-71 ' + msg);
     }
 
+    /**
+     * 连续运行 N 帧（「运行」按钮）。
+     *
+     * ★ 与「测速」的区别（两个按钮各管一件事，不重复）：
+     *     测速 =【同一张图】重复跑算法 N 次，取平均周期数（看性能）
+     *     运行 = 按图集顺序连着跑 N 帧（看效果）
+     *
+     * ★ 同样【不重启进程】：算法内部状态（环形缓冲、状态机、丢线计数）保留，
+     *   这与车上的行为一致 —— 翻页/连跑都不该把状态清零。
+     */
+    public async run(): Promise<void> {
+        const cfg = vscode.workspace.getConfiguration('scut71');
+        const n = Math.max(1, cfg.get<number>('runFrames', 60) || 60);
+
+        const s = await this.ensureSession();
+        if (!s) {
+            void vscode.window.showWarningMessage(
+                'SCUT-71：还没有可运行的仿真程序。请先点「编译」。');
+            return;
+        }
+        this.updateProduction();
+        this.sendStatus();
+        await s.runFrames(n);
+    }
+
     /** 上一张图。 */
     public async prevPic(): Promise<void> {
         await this.nudgePic(-1);

@@ -37,6 +37,8 @@ ROOT = os.path.dirname(HERE)
 PY = sys.executable
 CLANG = r"D:\TOOLS\llvm-mingw\bin\clang.exe"
 OBJDUMP_TOOLCHAIN = r"D:\TOOLS\llvm-mingw"
+# 工具链【根目录】（构建脚本要的是根，不是 bin 下的 clang.exe）
+CLANG_ROOT = r"D:\TOOLS\llvm-mingw"
 LLDB_DAP = r"D:\TOOLS\llvm-mingw\bin\lldb-dap.exe"
 
 results = []
@@ -72,41 +74,103 @@ def run(name, cmd, cwd=None, env=None):
     return ok, tail
 
 
+def bootstrap_project(root):
+    """从模板建一个干净工程并构建，返回它的路径。
+
+    ★ 为什么每次都重建，而不是复用 %TEMP% 里那个固定目录：
+      那个目录是历史遗留（scut ascii demo），里面是没有 scut_project.json
+      的老工程 —— 现在的构建会直接判它"没配置钩子"而失败，
+      而它 .scut/ 里的 exe 又还是旧构建产物。复用它等于让整套回归
+      测一个用户根本跑不起来的东西，失败原因还完全看不懂。
+      每次从模板重建，后面的每一条测试都作用在"刚构建、确定可用"的产物上。
+    """
+    src_pics = os.path.join(os.path.dirname(root), "集成仿真环境测试",
+                            "scut71-project", "pic", "1")
+    proj = tempfile.mkdtemp(prefix="scut_demo_")
+    shutil.copytree(os.path.join(root, "templates", "starter"), proj,
+                    dirs_exist_ok=True)
+    pic_dir = os.path.join(proj, "pic", "1")
+    os.makedirs(pic_dir, exist_ok=True)
+    n = 0
+    if os.path.isdir(src_pics):
+        # 按数字排序取前 12 张，保证图集编号连续（探测按 1,2,3… 递增找）。
+        pics = sorted(
+            (f for f in os.listdir(src_pics)
+             if os.path.splitext(f)[1].lower() in (".bmp", ".png")),
+            key=lambda f: int(os.path.splitext(f)[0]) if os.path.splitext(f)[0].isdigit() else 0)
+        for f in pics[:12]:
+            shutil.copyfile(os.path.join(src_pics, f), os.path.join(pic_dir, f))
+            n += 1
+    r = subprocess.run(
+        [sys.executable, os.path.join(root, "tools", "scut_build.py"),
+         "--project", proj, "--toolchain", CLANG_ROOT],
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if r.returncode != 0:
+        print("  ⚠️  模板工程构建失败，后续组件测试可能失真：")
+        print("     " + ((r.stderr or r.stdout or "")[-800:].replace("\n", "\n     ")))
+        return proj
+
+    # ★ 必须真的跑一次，把帧图产出来：
+    #   dap / webview / json 这几条测试都读 .scut/frames 下的真实帧。
+    #   只构建不运行的话那个目录是空的，它们会各自报"没画出内容"。
+    exe = os.path.join(proj, ".scut", "bin", "scut_sim.exe")
+    frames_dir = os.path.join(proj, ".scut", "frames")
+    if os.path.isfile(exe):
+        rr = subprocess.run(
+            [exe, "--frames", "4", "--json", "--out", frames_dir],
+            cwd=proj, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=180)
+        got = len([l for l in (rr.stdout or "").splitlines() if '"frame"' in l])
+        print("  已就绪的测试工程：%s（测试图 %d 张，跑出 %d 帧）" % (proj, n, got))
+    else:
+        print("  已就绪的测试工程：%s（未找到仿真程序）" % proj)
+    return proj
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--project", default=os.path.join(
-        tempfile.gettempdir(), "scut ascii demo"))
+    ap.add_argument("--project", default="",
+                    help="被测工程目录；留空 = 自动从模板新建一个干净的（推荐）")
     ap.add_argument("--also-cn", action="store_true",
                     help="在含中文与空格的工程路径上再跑一遍端到端")
     args = ap.parse_args()
-    proj = args.project
 
-    banner("1/8  端到端：模板工程 → 零注册用户代码 → 构建 → 运行")
+    banner("0/9  准备被测工程（从模板新建并构建）")
+    proj = args.project or bootstrap_project(ROOT)
+
+    banner("1/9  端到端：模板工程 → 零注册用户代码 → 构建 → 运行")
     # ★ 这条排在第一位：它验证的是【设计理念本身】（用户代码零注册、
     #   环境接管图像管道、配置真的生效）。后面的测试都是组件级的，
     #   组件都对但主线断了，这个环境依然是不可用的。
     run("e2e", [PY, os.path.join(HERE, "test_e2e_pipeline.py")])
 
-    banner("2/8  接线单元边界（三条「静默算错」缺陷的回归）")
+    banner("2/9  接线单元边界（三条「静默算错」缺陷的回归）")
     # ★ 这三条都是"构建成功、运行正常、结果悄悄是错的"：
     #   同函数填两阶段（性能数字少一半）、--no-watch 重复定义、
     #   结果图数组名指向标量（越界读）。它们不会让任何东西看起来坏掉，
     #   所以必须有专门的测试盯着。
     run("glue-edges", [PY, os.path.join(HERE, "test_glue_edges.py")])
 
-    banner("3/8  自动符号发现（35 变量 × gcc + clang）")
+    banner("3/9  自动符号发现（35 变量 × gcc + clang）")
     run("symbols", [PY, os.path.join(HERE, "test_symbols.py"),
                     "--cc", "gcc", "--also", CLANG])
 
-    banner("4/8  JSON 协议合法性（插件依赖它）")
+    banner("4/9  JSON 协议合法性（插件依赖它）")
     run("json", [PY, os.path.join(HERE, "check_json_protocol.py")])
 
-    banner("5/8  插件纯逻辑（协议解析 / PGM / 诊断）")
+    banner("5/9  插件纯逻辑（协议解析 / PGM / 诊断）")
     run("extension", ["node", os.path.join(HERE, "extension_smoke.js"),
                       os.path.join(proj, ".scut", "frames"),
                       os.path.join(proj, ".scut", "bin", "scut_sim.exe")])
 
-    banner("6/8  调试器真实 DAP 会话（lldb-dap）")
+    banner("6/9  会话：运行 / 测速 / 翻页 / 停止（ACK 背压链路）")
+    # ★ 这条盯的是"按钮点了到底有没有反应"：运行/测速/翻页全都靠 ACK 背压
+    #   驱动仿真进程前进，背压断在哪一环的表现都是"画面停在第 1 帧"、不报错。
+    #   它已经抓到过一个真实缺陷：runFrames(N) 会多跑一帧。
+    run("session", ["node", os.path.join(HERE, "run_frames.js"),
+                    os.path.join(proj, ".scut", "bin", "scut_sim.exe"), proj])
+
+    banner("7/9  调试器真实 DAP 会话（lldb-dap）")
     # ★ 用户源文件名不再是固定的 main.c（模板默认给的是 camera.c，
     #   而且用户可以任意命名）。所以这里动态挑一个真实存在的 .c，
     #   避免测试因为"模板换了默认文件名"而误报失败。
@@ -126,7 +190,7 @@ def main():
                 os.path.join(proj, ".scut", "bin", "scut_sim.exe"),
                 user_c_src])
 
-    banner("7/8  Webview 渲染（真实 Chromium + 真实帧数据）")
+    banner("8/9  Webview 渲染（真实 Chromium + 真实帧数据）")
     wv_out = os.path.join(tempfile.gettempdir(), "scut_wv_test")
     ok, out = run("webview", ["node", os.path.join(HERE, "webview_render.js"),
                               os.path.join(proj, ".scut", "frames"), wv_out])
@@ -136,7 +200,7 @@ def main():
         print("  --> ❌ 脚本成功退出，但渲染判定未通过")
 
     if args.also_cn:
-        banner("8/8  端到端（含空格 + 中文的工程路径）")
+        banner("9/9  端到端（含空格 + 中文的工程路径）")
         cn = os.path.join(tempfile.gettempdir(), "scut proj 中文", "demo")
         if os.path.isdir(cn):
             run("cn-e2e", ["node", os.path.join(HERE, "extension_smoke.js"),
@@ -145,7 +209,7 @@ def main():
         else:
             print("  SKIP  中文路径工程不存在：%s" % cn)
     else:
-        banner("8/8  跳过（用 --also-cn 启用中文路径端到端）")
+        banner("9/9  跳过（用 --also-cn 启用中文路径端到端）")
 
     banner("汇总")
     npass = sum(1 for _, ok, _ in results if ok)

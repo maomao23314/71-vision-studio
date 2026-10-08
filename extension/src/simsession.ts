@@ -334,8 +334,17 @@ export class SimSessionImpl implements SimSession {
         if (n <= 0) {
             return Promise.resolve();
         }
-        this.pendingSteps = n;
-        this.writeLine('');
+        // 累计而不是覆盖：连点两次「运行」应当是"再跑 n 帧"，而不是把上一次
+        // 还没跑完的次数抹掉（覆盖会让第二次点击把第一次悄悄截断）。
+        this.pendingSteps += n;
+        // ★ 只有在【没有帧在途】时才立刻写第一行。
+        //   有帧在途时，那一帧的 ACK 会替我们放行下一帧（见 completeAck）；
+        //   此时再立刻写一行，就会多跑一帧 —— 实测 runFrames(5) 产出 6 帧。
+        //   这类偏差不报错、只是"跑多了几帧"，非常难被察觉，所以在这里钉死。
+        if (!this.frameInFlight && !this.productionPaused && this.child) {
+            this.pendingSteps--;
+            this.writeLine('');
+        }
         return Promise.resolve();
     }
 

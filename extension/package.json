@@ -71,6 +71,12 @@
         "icon": "$(dashboard)"
       },
       {
+        "command": "scut71.run",
+        "title": "运行（连续跑 N 帧）",
+        "category": "SCUT-71",
+        "icon": "$(play)"
+      },
+      {
         "command": "scut71.stop",
         "title": "停止",
         "category": "SCUT-71",
@@ -125,6 +131,12 @@
         "key": "right",
         "mac": "right",
         "when": "view == scut71.simview"
+      },
+      {
+        "command": "scut71.run",
+        "key": "f5",
+        "mac": "f5",
+        "when": "view == scut71.simview"
       }
     ],
     "menus": {
@@ -133,6 +145,11 @@
           "command": "scut71.build",
           "when": "view == scut71.simview",
           "group": "navigation@1"
+        },
+        {
+          "command": "scut71.run",
+          "when": "view == scut71.simview",
+          "group": "navigation@2"
         },
         {
           "command": "scut71.bench",
@@ -337,6 +354,12 @@
           "default": 1000,
           "minimum": 1,
           "description": "【运行期】「测速」按钮在同一张图上重复调用图像处理的次数。次数越大读数越稳，但等待越久。"
+        },
+        "scut71.runFrames": {
+          "type": "number",
+          "default": 60,
+          "minimum": 1,
+          "description": "【运行期】「运行」按钮连续跑多少帧。它按图集顺序推进（与「测速」不同：测速是同一张图重复跑算法 N 次取平均耗时）。"
         },
         "scut71.buildMode": {
           "type": "string",

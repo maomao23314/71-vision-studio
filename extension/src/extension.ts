@@ -294,6 +294,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('scut71.newProject', () => commandNewProject(context)),
         vscode.commands.registerCommand('scut71.openSimView', () => commandOpenSimView()),
         vscode.commands.registerCommand('scut71.bench', () => simView.bench()),
+        vscode.commands.registerCommand('scut71.run', () => simView.run()),
         vscode.commands.registerCommand('scut71.stop', () => commandStop(simView, log)),
         vscode.commands.registerCommand('scut71.prevPic', () => simView.prevPic()),
         vscode.commands.registerCommand('scut71.nextPic', () => simView.nextPic()),
