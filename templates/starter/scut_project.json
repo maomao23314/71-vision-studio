@@ -1,0 +1,25 @@
+{
+  "image": {
+    "width": 188,
+    "height": 120
+  },
+  "inputArray": "mt9v03x_image",
+  "outputArray": "g_binary",
+  "hooks": {
+    "init": [
+      "camera_init"
+    ],
+    "frame": [
+      "camera_process"
+    ],
+    "post": [
+      "camera_draw",
+      "camera_report"
+    ]
+  },
+  "pic": {
+    "dir": "",
+    "ext": "",
+    "start": 1
+  }
+}

@@ -115,8 +115,9 @@ const ITEMS = [
  *   少任何一个，locateSdkRoot() 就会返回 undefined，
  *   内置构建路径随即报"插件安装似乎不完整"。所以这里是硬性门槛。
  *
- * ★ 模板两项同样必须检查：少了 config.h，locateTemplateDir() 返回 undefined，
- *   「新建工程」直接报错；少了 README-pic.txt，新建出的工程里就没有放图说明。
+ * ★ 模板两项同样必须检查：少了 scut_project.json，locateTemplateDir() 返回
+ *   undefined，「新建工程」直接报错；少了 README-pic.txt，新建出的工程里
+ *   就没有放图说明。
  */
 const REQUIRED = [
     'sdk/core/include/scut_sdk.h',
@@ -124,7 +125,7 @@ const REQUIRED = [
     'sdk/backends/headless/scut_headless_main.c',
     'sdk/tools/scut_build.py',
     'sdk/tools/scut_symbols.py',
-    'templates/starter/config.h',
+    'templates/starter/scut_project.json',
     'templates/starter/code/camera.c',
     'templates/README-pic.txt',
 ];

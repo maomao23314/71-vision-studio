@@ -16,6 +16,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import type { ScutProject } from './types';
+import { CONFIG_FILENAME, readConfig } from './projectconfig';
 
 /** 编译期契约头文件的候选名（与 tools/scut_build.py 的 find_config_header 一致）。 */
 const CONFIG_HEADER_NAMES = ['scut_config.h', 'config.h'];
@@ -46,7 +47,28 @@ function isFile(p: string): boolean {
     }
 }
 
-/** 在一个目录下找契约头文件，返回绝对路径或 undefined。 */
+/**
+ * 在一个目录下找工程配置，返回配置文件的绝对路径或 undefined。
+ *
+ * ★ 两种约定都认：
+ *     scut_project.json —— 新约定（设置界面维护的真值来源）
+ *     config.h          —— 老约定（迁移期不该让老工程突然认不出来）
+ */
+function findProjectConfig(root: string): string | undefined {
+    const json = path.join(root, CONFIG_FILENAME);
+    if (isFile(json)) {
+        return json;
+    }
+    for (const name of CONFIG_HEADER_NAMES) {
+        const p = path.join(root, name);
+        if (isFile(p)) {
+            return p;
+        }
+    }
+    return undefined;
+}
+
+/** 老的契约头文件查找（保留：几条与"尺寸从哪来"相关的路径仍要用它）。 */
 function findConfigHeader(root: string): string | undefined {
     for (const name of CONFIG_HEADER_NAMES) {
         const p = path.join(root, name);
@@ -60,12 +82,12 @@ function findConfigHeader(root: string): string | undefined {
 /**
  * 判断一个目录「像不像」仿真工程根目录。
  *
- * 判定不用太严：有契约头文件，或者有 code/ 目录，就算。
- * ★ 为什么刻意放宽：学生可能只拷了 code/ 过来（还没建 config.h），
- *   这时候直接报「不是工程」比「自动帮你补一份 config.h」体验差得多。
+ * 判定不用太严：有配置文件，或者有 code/ 目录，就算。
+ * ★ 为什么刻意放宽：学生可能只拷了 code/ 过来（还没建配置文件），
+ *   这时候直接报「不是工程」比「自动帮你补一份」体验差得多。
  */
 function looksLikeProject(root: string): boolean {
-    return findConfigHeader(root) !== undefined || isDir(path.join(root, 'code'));
+    return findProjectConfig(root) !== undefined || isDir(path.join(root, 'code'));
 }
 
 /** 从 start 目录向上找工程根，最多上溯 maxUp 层。 */
@@ -191,8 +213,9 @@ export function detectProject(explicitDir?: string): ScutProject | undefined {
 
     // ★ 图集目录的取值顺序（这里曾经是个大坑）：
     //   1) 设置项 scut71.picDir —— 用户在设置界面指定的，最优先
-    //   2) config.h 里的 SCUT_PIC_DIR —— 工程自己声明的（默认 "pic/1"）
-    //   3) 兜底 "pic"
+    //   2) scut_project.json 的 pic.dir —— 工程自己声明的
+    //   3) config.h 里的 SCUT_PIC_DIR —— 老工程的约定（兼容）
+    //   4) 兜底 "pic"
     //
     //   ★★ 早期版本【写死了 path.join(root, 'pic')】，把 2) 完全忽略 ——
     //      这就是用户报的「pic/1 里的 BMP 也无法加载」的根因：
@@ -200,8 +223,6 @@ export function detectProject(explicitDir?: string): ScutProject | undefined {
     //      而插件却把 pic\ 这个【父目录】传给了仿真程序；
     //      仿真程序在 pic\ 下找 1.bmp 当然找不到（它在 pic\1\ 下），
     //      于是静默跑黑图，一个字都不提示。
-    //      更糟的是：用户在 config.h 里把 SCUT_PIC_DIR 改成别的也没用，
-    //      因为插件根本不读它 —— 这正是"改了配置没生效"的来源。
     const fromSettings = (() => {
         try {
             const v = vscode.workspace.getConfiguration('scut71')
@@ -211,8 +232,11 @@ export function detectProject(explicitDir?: string): ScutProject | undefined {
             return undefined;
         }
     })();
-    const fromConfig = parsePicDirFromFile(configHeader) ?? 'pic';
-    const picDir = path.join(root, fromSettings ?? fromConfig);
+    // 工程配置（scut_project.json）优先于老 config.h：它是新约定的真值来源。
+    const fromProjectConfig = readConfig(root).config?.pic.dir || undefined;
+    const fromLegacyConfig = parsePicDirFromFile(configHeader) ?? undefined;
+    const rel = fromSettings ?? fromProjectConfig ?? fromLegacyConfig ?? 'pic';
+    const picDir = path.isAbsolute(rel) ? rel : path.join(root, rel);
 
     return {
         root,
@@ -225,8 +249,14 @@ export function detectProject(explicitDir?: string): ScutProject | undefined {
 
 /** 工程描述的一行摘要（用于状态栏/提示）。 */
 export function describeProject(p: ScutProject): string {
-    const size = parseImageSizeFromFile(p.configHeader);
-    const sizeText = size ? `${size.width}x${size.height}` : '尺寸未知（' + path.basename(p.configHeader) + ' 里没读到）';
+    // 尺寸优先从 scut_project.json 读（新约定），回落到 config.h（老工程）。
+    const cfg = readConfig(p.root).config;
+    const size = cfg
+        ? { width: cfg.image.width, height: cfg.image.height }
+        : parseImageSizeFromFile(p.configHeader);
+    const sizeText = size
+        ? `${size.width}x${size.height}`
+        : '尺寸未知（工程里没有 scut_project.json，config.h 里也没读到）';
     return `${path.basename(p.root)} · 图像 ${sizeText} · ${p.root}`;
 }
 
@@ -249,7 +279,11 @@ export function locateTemplateDir(extensionUri: vscode.Uri): string | undefined 
         vscode.Uri.joinPath(extensionUri, '..', 'templates', 'starter').fsPath,
     ];
     for (const c of candidates) {
-        if (isDir(c) && isFile(path.join(c, 'config.h'))) {
+        // ★ 判据跟着模板的实际内容走：新模板带 scut_project.json，
+        //   老模板带 config.h。两个都认，这样升级插件时不会因为
+        //   "模板改了名"就让「新建工程」整个失效。
+        if (isDir(c) && (isFile(path.join(c, 'scut_project.json'))
+                         || isFile(path.join(c, 'config.h')))) {
             return path.resolve(c);
         }
     }

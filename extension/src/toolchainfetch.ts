@@ -497,8 +497,21 @@ function describeError(e: unknown): string {
             return '没有写权限，工具链写不进插件目录。';
         case 'ENOSPC':
             return '磁盘空间不足，装不下这个工具链（解压后约 1 GB）。';
-        default:
-            return e.message || '未知错误。';
+        case 'EBUSY':
+            return '工具链目录被别的程序占用（杀毒软件实时扫描也会这样），关掉它再重试。';
+        case 'EEXIST':
+            // 走到这里说明「存储目录」这个路径上已经有一个同名文件了，怎么说都指不到工具链上。
+            return '插件存储目录的位置被一个同名文件占了，建不出目录来。';
+        default: {
+            // ★ 我们自己抛的（网络、解压结构、下载不完整）已经是中文说明，必须原样透传。
+            //   否则会把「GitHub 返回了 HTTP 403」改写成「写目录出错」，把用户带到完全错误的方向。
+            if (/[\u4e00-\u9fa5]/.test(e.message)) {
+                return e.message;
+            }
+            // 剩下的才是 Node 的系统错误：剥掉 "CODE: " 前缀，且不能把英文原文直接甩给用户。
+            const stripped = e.message.replace(/^([A-Z]+):\s*/, '');
+            return `读写插件目录时出错：${stripped || '未知原因'}（多半是权限或磁盘问题，不是网络问题）。`;
+        }
     }
 }
 
