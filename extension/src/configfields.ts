@@ -30,7 +30,7 @@ export type SectionKey =
     | 'run'
     | 'toolchain';
 
-export type FieldKind = 'text' | 'number' | 'lines' | 'bool' | 'folder';
+export type FieldKind = 'text' | 'number' | 'lines' | 'bool' | 'folder' | 'file';
 
 export interface FieldDef {
     /** 在 scut_project.json 里的路径 */
@@ -145,6 +145,15 @@ export const FIELDS: FieldDef[] = [
         path: ['toolchain', 'path'], label: '工具链根目录', kind: 'folder',
         hint: '内含 bin\\clang.exe 的那一层。留空 = 自动探测：'
             + '环境变量 → 已下载的目录 → PATH',
+    },
+    {
+        path: ['toolchain', 'pythonPath'], label: 'Python 解释器路径', kind: 'file',
+        hint: '跑构建脚本用，只要求 3.7+，不需要装任何第三方库。'
+            + 'conda / 官方安装包 / python.org 的都行，选到 python.exe 那一层。'
+            + '★ 留空 = 自动探测：SCUT71_PYTHON 环境变量 → 工具链自带的 → '
+            + 'py 启动器 → PATH。自动探测在机器上装了多个 Python 时可能挑中 '
+            + '旧的那个（本机实测就发生过：py -3 反查到 3.6），'
+            + '所以装了多个的话建议在这里写死一个',
     },
     {
         path: ['toolchain', 'autoDownload'], label: '允许自动下载工具链', kind: 'bool',

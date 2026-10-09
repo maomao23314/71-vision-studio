@@ -108,8 +108,61 @@ else:
     note.append('源码零处读取 VS Code 的 scut71.* 设置')
 
 # ==================================================================
-#  C. UI 上每个字段都必须真的有人读（防死界面）
+#  B2.（见下方）工程配置 toolchain 段是否真的参与探测
 # ==================================================================
+pcSrc = read(os.path.join(SRC, 'projectconfig.ts'))
+
+
+def pc_src_read():
+    return pcSrc
+#
+#      ★ 这条是用户 Python 报错误的直接产物 ★
+#      0.9.4 的自动探测在"装了多个 Python"时会挑中旧的 3.6，
+#      修法是在配置里加 pythonPath 让用户自己指定。
+#      但如果加了字段却没人读，等于没修 —— 这正是本轮删掉的
+#      view.* 那批死界面的同款错误。
+#      所以这里要验：每一项都在探测链里被真的取出来用了。
+# ==================================================================
+tc_src = read(os.path.join(SRC, 'toolchain.ts'))
+for key, reader in [('path', 'configuredToolchainRoot'),
+                    ('pythonPath', 'configuredPythonPath')]:
+    # ① 字段要在 ProjectConfig 里定义
+    if not re.search(r"%s:\s*string;" % key, pc_src_read()):
+        fail('★ ProjectConfig 里没有 toolchain.%s' % key)
+        continue
+    # ② 要有一个函数去读它
+    m = re.search(r'function\s+%s\s*\(\s*\)\s*(?::\s*\w+\s*)?\{(.*?)\n\}'
+                  % reader, tc_src, re.S)
+    if not m:
+        fail('★ toolchain.ts 里找不到 %s() —— toolchain.%s 是没人读的死字段'
+             % (reader, key))
+        continue
+    if 'toolchain.%s' % key not in m.group(1):
+        fail('★ %s() 没有读 toolchain.%s' % (reader, key))
+        continue
+    # ③ 而且这个函数必须被 findPython / detectImpl 真正调用过
+    callers = ('findPython(' if key == 'pythonPath' else 'configuredToolchainRoot')
+    used = re.search(r'%s\(' % re.escape(reader), tc_src)
+    if not used or tc_src.count(reader) < 2:
+        fail('★ %s() 定义了但没被任何地方调用' % reader)
+        continue
+    note.append('toolchain.%s 有真实读取点（%s）' % (key, reader))
+
+# build.ts 里也要真的把 tc.python 用起来（探测出来却不用等于白探测）
+# ★ 为什么是【数出现在可执行语句里的次数】而不是「字符串在不在」★
+#   负对照试过把 `if (tc.python)` 改成 `if (false)`：
+#   build.ts 里还剩 attempts.push({ exe: tc.python }) 等两处，
+#   字符串判断依然为真 —— 断言成了摆设。
+#   真正的破损是【完全不再引用 tc.python】，所以按出现次数判：
+#   至少要出现在 2 个不同的语句里（放进 attempts + 兜底缺 Python 分支）。
+build_src = read(os.path.join(SRC, 'build.ts'))
+n_py = len(re.findall(r'\btc\.python\b', build_src))
+if n_py < 2:
+    fail('★ build.ts 几乎没有使用 tc.python（仅出现 %d 处）—— '
+         '探测到解释器也没真正用上' % n_py)
+else:
+    note.append('build.ts 使用了 tc.python（%d 处引用，探测结果真的被启用）'
+                % n_py)
 cf = read(os.path.join(SRC, 'configfields.ts'))
 field_re = re.compile(r"path:\s*\[([^\]]*)\]")
 declared = []

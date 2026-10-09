@@ -837,7 +837,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     #   反过来怀疑是自己用错了。宁缺毋滥。
     # 本机工具链。path 空 = 依次探测：SCUT71_TOOLCHAIN 环境变量
     # → 插件自动下载过的目录 → PATH；都找不到时弹窗问用户。
-    "toolchain": {"path": "", "autoDownload": True, "autoWatch": True},
+    # pythonPath：跑本脚本用的解释器，只要求 3.7+，不依赖任何第三方库
+    # （import 全是标准库），conda / python.org 的都可以。
+    # 留空 = 插件自动探测；机器上装了多个 Python 时建议写死一个，
+    # 因为自动探测可能挑中旧版本（实测：py -3 反查到 3.6）。
+    "toolchain": {"path": "", "pythonPath": "",
+                  "autoDownload": True, "autoWatch": True},
 }
 
 

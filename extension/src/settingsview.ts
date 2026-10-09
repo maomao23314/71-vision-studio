@@ -168,24 +168,47 @@ async function pickFolder(
     //   而这正是本项目反复栽过的跟头（详见 toolchain.ts 的
     //   ROOT_CANDIDATES 注释：猜目录被证伪过两次）。
     //   不指定起点，让浏览器自己做默认比猜一个盘符安全。
-    const picked = outside
-        ? await vscode.window.showOpenDialog({
+    if (outside) {
+        if (fieldPath[1] === 'pythonPath') {
+            // 选的是【文件】不是目录 —— 解释器要选到 python.exe 那一层。
+            const picked = await vscode.window.showOpenDialog({
+                canSelectFiles: true, canSelectFolders: false, canSelectMany: false,
+                filters: { 'Python 解释器': ['exe', 'py'] },
+                openLabel: '选择 python.exe',
+                title: '选择 Python 解释器（3.7+，无需第三方库）',
+            });
+            if (!picked || picked.length === 0) {
+                return;
+            }
+            await panel.webview.postMessage({
+                type: 'folderPicked', path: fieldPath, value: picked[0].fsPath,
+            });
+            return;
+        }
+        const picked = await vscode.window.showOpenDialog({
             canSelectFiles: false, canSelectFolders: true, canSelectMany: false,
             openLabel: '选择工具链根目录（内含 bin\\clang.exe）',
             title: '选择工具链根目录',
-        })
-        : await vscode.window.showOpenDialog({
-            canSelectFiles: false, canSelectFolders: true, canSelectMany: false,
-            defaultUri: vscode.Uri.file(path.join(projectRoot, 'pic')),
-            openLabel: '选择图集目录',
-            title: '选择图集目录（工程内的 pic\\组号\\图）',
         });
-    if (!picked || picked.length === 0) {
+        if (!picked || picked.length === 0) {
+            return;
+        }
+        await panel.webview.postMessage({
+            type: 'folderPicked', path: fieldPath, value: picked[0].fsPath,
+        });
         return;
     }
-    const value = outside
-        ? picked[0].fsPath
-        : path.relative(projectRoot, picked[0].fsPath).replace(/\\/g, '/');
+    const inner = await vscode.window.showOpenDialog({
+        canSelectFiles: false, canSelectFolders: true, canSelectMany: false,
+        defaultUri: vscode.Uri.file(path.join(projectRoot, 'pic')),
+        openLabel: '选择图集目录',
+        title: '选择图集目录（工程内的 pic\\组号\\图）',
+    });
+    if (!inner || inner.length === 0) {
+        return;
+    }
+    // 图集是工程内的【相对路径】：跟着工程走、能进 git、换机器不用改。
+    const value = path.relative(projectRoot, inner[0].fsPath).replace(/\\/g, '/');
     await panel.webview.postMessage({ type: 'folderPicked', path: fieldPath, value });
 }
 

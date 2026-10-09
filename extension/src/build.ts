@@ -646,12 +646,19 @@ async function runBuildScript(
         output: lastHuman,
         errors: [{
             severity: 'error',
-            message: '无法运行构建脚本 tools/scut_build.py：没有找到可用的 Python 3.7+ 解释器。\n'
+            message: '无法运行构建脚本 tools/scut_build.py：尝试过的解释器都跑不动它。\n'
                 + `    脚本位置：${script}\n`
-                + '    原因：本机 PATH 上的 python 可能是 3.6，而脚本用了 3.7+ 的语法'
-                + '（from __future__ import annotations）。\n'
-                + '    下一步：安装 Python 3.12（安装时勾选 Add to PATH），'
-                + '然后重新执行「SCUT-71: 环境自检」确认 Python 一项是 ✓。',
+                + '    原因：脚本用了 Python 3.7+ 的语法'
+                + '（from __future__ import annotations），'
+                + '3.6 及更早的版本会在第 70 行直接 SyntaxError。\n'
+                + '    脚本只依赖标准库（argparse/json/re/subprocess/typing…），'
+                + '不需要装任何第三方库 —— 任何一个 3.7+ 的解释器都能跑。\n'
+                + '    下一步（二选一）：\n'
+                + '    ① 机器上已有 3.7+（conda / python.org 都行）→ '
+                + '打开配置面板（面板按钮 ⚙）「工具链 › Python 解释器路径」，'
+                + '选到它的 python.exe；\n'
+                + '    ② 真的没有 → 从 python.org 装 Python 3.12'
+                + '（勾选 Add to PATH），再执行「SCUT-71: 环境自检」。',
         }],
     };
 }

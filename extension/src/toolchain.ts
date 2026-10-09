@@ -314,6 +314,26 @@ async function findBinutilsObjdump(): Promise<{ path?: string; version?: string;
 }
 
 /**
+ * 读工程配置里的 pythonPath。
+ *
+ * ★ 为什么要这个配置（用户实测踩到的坑）★
+ *   机器上装了多个 Python 时，自动探测可能挑中【旧的那个】：
+ *     `py -3` 反查到的是 Python36-32 注册的 3.6.2，
+ *     而 PATH 上的 python 也是 3.6，唯独真正能用的 3.12（conda）
+ *     既不在 PATH 上、py 启动器也不知道 —— 探测链全断。
+ *   所以给用户一个明确的入口：在配置面板里写死解释器路径。
+ *   构建脚本只要求 3.7+、零第三方库，选哪个都行。
+ */
+function configuredPythonPath(): string {
+    const project = detectProject();
+    if (!project) {
+        return '';
+    }
+    const { config } = readConfig(project.root);
+    return (config ?? defaultConfig()).toolchain.pythonPath.trim();
+}
+
+/**
  * 解析出可用的 Python 解释器。
  *
  * ★ 为什么必须校验版本（实测教训）：
@@ -323,11 +343,16 @@ async function findBinutilsObjdump(): Promise<{ path?: string; version?: string;
  *   不能拿到第一个叫 python 的东西就用。
  *
  * 顺序：
- *   1) SCUT71_PYTHON 环境变量（显式指定，最高优先级）
+ *   0) 工程配置 toolchain.pythonPath（用户在面板里指定的，最高优先级）
+ *   1) SCUT71_PYTHON 环境变量（显式指定）
  *   2) 工具链 bin 下自带的 python（llvm-mingw 没有，但别的发行版可能有）
  *   3) Windows 启动器 `py -3`：它本身不是解释器，需要用
  *      `py -3 -c "import sys;print(sys.executable)"` 反查出真实 exe
  *   4) PATH 上的 python3.exe / python.exe
+ *
+ *   ★ 0) 和 1) 若指向了 3.6【不换候选】，直接带着警告返回 ——
+ *     用户明确指定了路径，插件替他换掉等于自作主张；
+ *     但必须把"这个解释器跑不动脚本"讲清楚。
  */
 async function findPython(binDir: string | undefined): Promise<{ path?: string; warning?: string }> {
     const parseVer = (s: string | undefined): [number, number] | undefined => {
@@ -338,20 +363,38 @@ async function findPython(binDir: string | undefined): Promise<{ path?: string; 
     const usable = (v: [number, number] | undefined): boolean =>
         v !== undefined && (v[0] > 3 || (v[0] === 3 && v[1] >= 7));
 
+    const tooOld = (where: string, p: string, v: [number, number] | undefined): string =>
+        `${where}指向的 Python 版本过低（${v ? v.join('.') : '无法识别'}）：${p}\n`
+        + '    原因：构建脚本 tools/scut_build.py 用了 Python 3.7+ 的语法'
+        + '（from __future__ import annotations），3.6 会在第 70 行直接 SyntaxError。\n'
+        + '    下一步：在配置面板「工具链 › Python 解释器路径」里改成 3.7+ 的 '
+        + 'python.exe（只要求 3.7+，不需要装任何第三方库；conda / python.org 的都行）。';
+
+    // ---- 0) 工程配置：用户在面板里选的，最优先 ----
+    const cfgPath = configuredPythonPath();
+    if (cfgPath) {
+        if (!exists(cfgPath)) {
+            return {
+                warning: `工程配置里指定的 Python 解释器不存在：${cfgPath}\n`
+                    + '    下一步：在配置面板「工具链 › Python 解释器路径」里重新选择，'
+                    + '或清空该项改用自动探测。',
+            };
+        }
+        const v = parseVer(await probeVersion(cfgPath));
+        if (usable(v)) {
+            return { path: cfgPath };
+        }
+        return { path: cfgPath, warning: tooOld('工程配置', cfgPath, v) };
+    }
+
+    // ---- 1) 环境变量 ----
     const envc = (process.env.SCUT71_PYTHON ?? '').replace(/^"|"$/g, '').trim();
     if (envc && exists(envc)) {
         const v = parseVer(await probeVersion(envc));
         if (usable(v)) {
             return { path: envc };
         }
-        return {
-            path: envc,
-            warning: `SCUT71_PYTHON 指向的 Python 版本过低（${v ? v.join('.') : '无法识别'}）：${envc}\n`
-                + '    原因：构建脚本 tools/scut_build.py 用了 Python 3.7+ 的语法'
-                + '（from __future__ import annotations），3.6 会在第 70 行直接 SyntaxError。\n'
-                + '    下一步：改指到 3.7 以上的解释器，例如 '
-                + 'set SCUT71_PYTHON=C:\\Python312\\python.exe ，或删掉这个变量让我们自动探测。',
-        };
+        return { path: envc, warning: tooOld('SCUT71_PYTHON', envc, v) };
     }
 
     if (binDir) {
@@ -388,19 +431,20 @@ async function findPython(binDir: string | undefined): Promise<{ path?: string; 
         }
     }
 
-    // 一个都没有 → 明确告诉用户装什么、装完怎么办
+    // 一个都没有 → 说清影响，并给出两条路（自动探测失败≠只能再装一个）
     return {
         warning: '没有找到可用的 Python 3.7+ 解释器。\n'
             + '    影响：编译能跑，但【自动符号发现】用不了，变量面板会是空的。\n'
-            + '    原因：自动发现脚本 tools/scut_symbols.py 由构建脚本调用，'
-            + '而 tools/scut_build.py 用到 Python 3.7+ 的语法'
+            + '    原因：构建脚本 tools/scut_build.py 用到 Python 3.7+ 的语法'
             + '（from __future__ import annotations）；'
             + '若让 3.6 去跑它，会在第 70 行直接 SyntaxError 退出，'
             + '表现为「编译莫名其妙没反应」。\n'
-            + '    下一步：从 python.org 装 Python 3.12（安装时勾选 Add to PATH），'
-            + '然后重新执行「SCUT-71: 环境自检」；'
-            + '若你已经有 3.7+ 但不在 PATH 上，'
-            + '也可以设 SCUT71_PYTHON 指向它的 python.exe。',
+            + '    下一步（二选一）：\n'
+            + '    ① 机器上已经有 3.7+（conda / python.org 都行）——'
+            + '在配置面板「工具链 › Python 解释器路径」里选到它的 python.exe。'
+            + '只要求 3.7+，不需要装任何第三方库；\n'
+            + '    ② 真的没有 → 从 python.org 装 Python 3.12'
+            + '（安装时勾选 Add to PATH），然后重新执行「SCUT-71: 环境自检」。',
     };
 }
 

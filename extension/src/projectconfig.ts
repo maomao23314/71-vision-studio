@@ -114,6 +114,19 @@ export interface ProjectConfig {
     toolchain: {
         /** 工具链根目录（里面应有 bin/clang.exe）。 */
         path: string;
+        /**
+         * 跑构建脚本的 Python 解释器。
+         *
+         * ★ 只要求 3.7+，【不依赖任何第三方库】——
+         *   scut_build.py / scut_symbols.py 的 import 全部是标准库
+         *   （argparse/json/re/subprocess/typing…，逐个核对过），
+         *   所以 conda、python.org、Windows 商店版都能用。
+         *
+         * 留空 = 自动探测。机器上装了多个 Python 时探测可能挑中
+         * 旧的那个（实测发生过：`py -3` 反查到 3.6.2），所以装了
+         * 多个的话建议在这里写死。
+         */
+        pythonPath: string;
         /** 找不到工具链时，是否允许下载一份（下载前一定会先问）。 */
         autoDownload: boolean;
         /** 编译时自动发现全局变量（关闭可加快构建，但变量面板会是空的）。 */
@@ -130,7 +143,7 @@ export function defaultConfig(): ProjectConfig {
         hooks: { init: [], frame: [], post: [] },
         pic: { dir: '', ext: '', start: 1 },
         run: { processRepeat: 1, runFrames: 60, benchRepeat: 1000 },
-        toolchain: { path: '', autoDownload: true, autoWatch: true },
+        toolchain: { path: '', pythonPath: '', autoDownload: true, autoWatch: true },
     };
 }
 
@@ -211,6 +224,7 @@ export function normalizeConfig(raw: unknown): ProjectConfig {
         // view 段见接口处的说明：故意不存在，空实现避免读写 ghost 字段。
         toolchain: {
             path: str(tc.path, ''),
+            pythonPath: str(tc.pythonPath, ''),
             autoDownload: bool(tc.autoDownload, true),
             autoWatch: bool(tc.autoWatch, true),
         },

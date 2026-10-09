@@ -159,7 +159,9 @@
             const inp = document.createElement('input');
             inp.type = 'text';
             inp.spellcheck = false;
-            inp.placeholder = '留空 = 自动探测';
+            inp.placeholder = (f.kind === 'file')
+                ? '留空 = 自动探测（装了多个 Python 时建议手动指定）'
+                : '留空 = 自动探测';
             inp.value = String(v == null ? '' : v);
             inp.addEventListener('input', () => {
                 setValue(cfg, f.path, inp.value.trim());
@@ -168,7 +170,9 @@
             const btn = document.createElement('button');
             btn.className = 'ghost';
             btn.textContent = '浏览…';
-            btn.title = '打开系统目录选择器';
+            btn.title = (f.kind === 'file')
+                ? '选择解释器文件（python.exe）'
+                : '打开系统目录选择器';
             btn.addEventListener('click', () => {
                 vscode.postMessage({ type: 'pickFolder', path: f.path });
             });
