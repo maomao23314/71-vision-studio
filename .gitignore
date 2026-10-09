@@ -10,3 +10,7 @@ frames/
 .scut-build/
 *.sha256
 
+
+# Python 字节码：由 import 自动生成，且绑定解释器版本（312/313 各一份），不入库
+__pycache__/
+*.pyc
