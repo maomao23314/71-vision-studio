@@ -117,6 +117,7 @@ int scut_watch_read(int index, char *buf, int buf_size,
 
     for (i = 0; i < limit; i++) {
         char  tmp[64];
+        int   n;
         int   wrote;
         const char *cursor = (const char *)w->p + (size_t)i * (size_t)w->es;
 
@@ -155,12 +156,21 @@ int scut_watch_read(int index, char *buf, int buf_size,
             break;
         }
 
+        /* ★★★ n 与 wrote 必须【同时】按截断值收窄（2026-10-10 修复）★★★ */
         if (wrote < 0) {
             break;
         }
+        /* snprintf 的返回值是"本该写入的长度"，被截断时它【大于】实际写入量。
+         *   旧代码只拿它当长度用（memcpy(dst, tmp, wrote)），
+         *   于是从 64 字节的 tmp 里读了上百字节 —— 栈越界读，
+         *   把相邻栈上的数据抄进了变量面板。
+         *   实测：一个 66 字符的路径就多读 2 字节；
+         *   本工程路径普遍含中文，超过 64 字符是常态。
+         *   所以这里把"实际写入量"显式算出来，后面只用它。 */
+        n = (wrote >= (int)sizeof(tmp)) ? (int)sizeof(tmp) - 1 : wrote;
 
         /* 空间不足就停在这里，并标记截断（而不是写出半截数字）。 */
-        if (used + wrote + 2 > buf_size) {
+        if (used + (size_t)n + 2 > buf_size) {
             if (truncated != 0) { *truncated = 1; }
             break;
         }
@@ -168,8 +178,9 @@ int scut_watch_read(int index, char *buf, int buf_size,
         if (i > 0) {
             buf[used++] = ' ';
         }
-        memcpy(buf + used, tmp, (size_t)wrote);
-        used += wrote;
+        /* 用 n 而不是 wrote —— 这是修复的关键一行。 */
+        memcpy(buf + used, tmp, (size_t)n);
+        used += (size_t)n;
         buf[used] = '\0';
         shown++;
     }

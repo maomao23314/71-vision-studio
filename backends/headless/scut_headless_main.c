@@ -1724,23 +1724,62 @@ static int var_selected(const char *name, const char *select_csv)
  * ★ 变量名来自 C 标识符，理论上不需要转义；但 --select 的内容
  *   可能来自用户输入，且未来变量名可能含用户自定义标签。
  *   宁可多写 20 行，也不要生成非法 JSON 让插件解析失败。
+ *
+ * ★★★ 本函数曾经有栈越界写，机理值得写下来（2026-10-10 修复）★★★
+ *
+ *   旧写法：
+ *       for (; ...; o + 2 < cap; s++) {
+ *           if (c < 0x20) { o += snprintf(dst + o, cap - o, "\\u%04x", c); }
+ *           ...
+ *       }
+ *       dst[o] = '\0';
+ *
+ *   两个错叠在一起：
+ *     (1) 循环守卫只预留 2 字节，但 \uXXXX 分支一次要推进 6 字节；
+ *     (2) snprintf 返回的是【本该写入的长度】，不是实际写入的字节数。
+ *         被截断时它仍返回完整长度，于是 o 直接跳过 cap，
+ *         随后的 dst[o]='\0' 就写在【缓冲之外】。
+ *   目标全是栈数组（name_esc[256] / img_esc[1024] / pic_esc[...]），
+ *   所以这是栈越界【写】。实测：cap=5/6/7/8/11/12… 均越界。
+ *
+ * ★ 修法（两处一起改，缺一不可）：
+ *     (1) 守卫按【最坏单字符开销 6 字节】预留，而不是 2；
+ *     (2) 循环里完全不用 snprintf，改成手写 6 个字节 ——
+ *         这样就没有"返回值语义"可踩，也没有中间的截断状态。
+ *   再加一道 o >= cap 的兜底，保证最后的 '\0' 一定落在缓冲内。
  * -------------------------------------------------------------------------- */
 static void json_escape(const char *s, char *dst, size_t cap)
 {
     size_t o = 0;
+    static const char hex[] = "0123456789abcdef";
 
     if (cap == 0) { return; }
-    for (; s != 0 && *s != '\0' && o + 2 < cap; s++) {
+    if (s == 0) { dst[0] = '\0'; return; }
+
+    for (; *s != '\0'; s++) {
         unsigned char c = (unsigned char)*s;
+
+        /* ★ 守卫按最坏情况（\uXXXX = 6 字节）预留，
+         *   且必须留出结尾 '\0' 的位置，所以判据是 o + 6 < cap。 */
+        if (o + 6 >= cap) { break; }
+
         if (c == '"' || c == '\\') {
             dst[o++] = '\\';
             dst[o++] = (char)c;
         } else if (c < 0x20) {
-            o += (size_t)snprintf(dst + o, cap - o, "\\u%04x", c);
+            /* 手写 \uXXXX —— 不用 snprintf，理由见文件头说明 */
+            dst[o++] = '\\';
+            dst[o++] = 'u';
+            dst[o++] = '0';
+            dst[o++] = '0';
+            dst[o++] = hex[(c >> 4) & 0x0F];
+            dst[o++] = hex[c & 0x0F];
         } else {
             dst[o++] = (char)c;
         }
     }
+    /* ★ 兜底：即使上面因守卫跳出，o 也必然 < cap（每轮都做了 o+6<cap 检查），
+     *   所以这一句是安全的。保留它是为了让"终止符一定写进缓冲"成为不变量。 */
     dst[o] = '\0';
 }
 
@@ -1966,6 +2005,19 @@ static const char *scut_pic_path_display(void)
     return disp;
 }
 
+/* --------------------------------------------------------------------------
+ *  变量快照分配失败时的回退值。
+ *
+ * ★ 必须是【字符串字面量】而不能是别处 malloc 出来的内存：
+ *   它在整帧的生命周期里只被读取，用完不释放。
+ *   对应地，收尾处只能按 malloc_ok 判断能不能 free，
+ *   不能按 "指针非空" 判断（那会把字面量 free 掉 —— 未定义行为）。
+ * ★ 内容必须是合法 JSON：外层格式串把它原样嵌进 "vars":%s 里，
+ *   塞个空字符串会让插件 JSON 解析失败，面板直接不更新。
+ *   空数组 [] 表示"这次没取到变量"，是最诚实也最省事的降级。
+ * -------------------------------------------------------------------------- */
+#define FALLBACK_VARS_JSON "[]"
+
 /* 帧钩子：核心每跑完一帧就把结果交给这里。
  * 这是「核心不拥有窗口」的落地 —— 换成 Webview 后端时只需换掉这个函数。 */
 static void on_frame(void *user)
@@ -1978,6 +2030,7 @@ static void on_frame(void *user)
     char         pic_esc[SCUT_PATH_MAX * 2];
     char         err_esc[256];      /* loadError 转义缓冲（短语，够用） */
     char        *vars_json;         /* 每帧变量快照（堆分配，见下） */
+    int          malloc_ok;         /* vars_json 是否真的由 malloc 取得（决定能否 free） */
     int          load_error;
     int          is_bench;
     const scut_u8 *out;
@@ -2000,9 +2053,18 @@ static void on_frame(void *user)
      *   部分平台接近默认栈上限的警戒线；这里每帧一次 malloc/free
      *   的开销（微秒级）与算法本体（几十微秒起）相比可以忽略，
      *   却换来了"面板数值与画面同帧更新"。 */
-    vars_json = (char *)malloc(81920);
-    if (vars_json) {
+    vars_json  = (char *)malloc(81920);
+    malloc_ok  = (vars_json != NULL);
+    if (malloc_ok) {
         build_vars_json(o, vars_json, 81920);
+    } else {
+        /* ★ 失败时必须给一个【合法 JSON 空数组】而不是留 NULL。
+         *   下面 printf 的格式里有 "%s" 传 vars_json，
+         *   而 printf("%s", NULL) 在 glibc 上会打印 "(null)"、
+         *   在 MSVCRT 上直接【崩溃】—— 跨平台行为不一致，
+         *   也就是"老师机器上好好的、学生机器上一运行就闪退"。
+         *   变量面板此时少数据是次要的，JSON 合法才是硬要求。 */
+        vars_json = (char *)FALLBACK_VARS_JSON;
     }
 
     /* 合成：输出图像 + 覆盖层 → 最终 RGB 图
@@ -2133,7 +2195,14 @@ static void on_frame(void *user)
         }
     }
 
-    free(vars_json);   /* 与上面的 malloc 配对；JSON 路径只在打印时引用它 */
+    /* ★ 只在堆分配成功时才 free —— vars_json 可能是上面的
+     *   FALLBACK_VARS_JSON（字符串字面量），
+     *   对字面量调 free() 是未定义行为（MSVCRT 上会直接崩）。
+     *   所以这里用 malloc_ok 而不是 "vars_json != NULL" 来判断：
+     *   fallback 非空，用指针判空分辨不出来。 */
+    if (malloc_ok) {
+        free(vars_json);
+    }
 
     /* ----------------------------------------------------------------------
      *  ★★ 推进图片：必须放在【帧钩子的最后】，顺序本身是契约 ★★
@@ -2332,8 +2401,8 @@ int main(int argc, char **argv)
      * ★ 这一步把「绘制」从「图形库」解耦：绘制写进覆盖层，
      *   呈现由后端负责。旧环境把绘制直接写进 EasyX 的 DIB，
      *   换后端时会静默失效 —— 这里刻意不再犯。 */
-    if (scut_frame_alloc(scut_bind_width(), scut_bind_height()) != 0) {
-        fprintf(stderr, "错误: 无法分配 %dx%d 帧缓冲\n",
+    if (scut_frame_set_size(scut_bind_width(), scut_bind_height()) != 0) {
+        fprintf(stderr, "错误: 帧尺寸非法 %dx%d\n",
                 scut_bind_width(), scut_bind_height());
         return 3;
     }

@@ -1607,29 +1607,6 @@ def _thin_copy_fn(out_array: str) -> str:
       那条路径会顺手把变量清单也生成出来。--no-watch 的语义就是
       "不要变量清单"，所以这里只写搬运函数本身，保持职责清晰。
 
-    ★ 与 scut_symbols 版本保持一致的两点（改一处必须改两处，
-      所以两边都写了同样的注释）：
-        · 地址用 `(const unsigned char *)arr` —— 一维/二维都能编译；
-        · 宽高传 0 —— 交给环境按自己的尺寸处理，这里不需要维度信息。
-    """
-    return (
-        "\n/* 把结果图搬进环境的输出图（逐像素深拷贝）。\n"
-        " * 深拷贝而不是换指针：算法里的逆透视指针表指向原图，\n"
-        " * 换掉目标缓冲会让它们集体悬空。 */\n"
-        "void scut_env_copy_output(void)\n"
-        "{\n"
-        "    SCUT_EnvCopyOutput((const unsigned char *)%s, 0, 0);\n"
-        "}\n" % out_array)
-
-
-def _thin_copy_fn(out_array: str) -> str:
-    """
-    生成结果图搬运函数（--no-watch 路径用）。
-
-    ★ 为什么不复用 scut_symbols._copy_fn_text：
-      那条路径会顺手把变量清单也生成出来。--no-watch 的语义就是
-      "不要变量清单"，所以这里只写搬运函数本身，保持职责清晰。
-
     ★ 宽高为什么传 0（= 用环境的宽高）：
       这条路径刻意不做 DWARF 分析，拿不到数组维度。
       形状安全性由 find_output_owner 的探针保证 ——

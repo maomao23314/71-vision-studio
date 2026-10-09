@@ -25,14 +25,31 @@
 /* ==========================================================================
  *  内部状态
  *  --------------------------------------------------------------------------
- *  全部零初始化 = 「未分配」。所有公开函数都必须在这个状态下安全返回，
+ *  全部零初始化 = 「未设置」。所有公开函数都必须在这个状态下安全返回，
  *  因为呈现后端有可能在 core_init 之前就被调用（顺序不保证）。
+ *
+ *  ★★ 这里【只】保留尺寸，不保留任何像素缓冲（2026-10-10 代码评审后删除）★★
+ *
+ *  原来这里有 s_gray / s_overlay 两个堆缓冲（188×120 时约 90 KB），
+ *  配套 alloc/free/gray()/overlay()/composite() 一整套接口。
+ *  逐个查了引用之后发现：它们【从来没有被写入过任何一个字节】，也没有人调用：
+ *      · 绘制模块 scut_draw_bind() 绑的是 bind 单元那块静态数组，
+ *        不是这里 —— headless 宿主明确绑 scut_bind_output/overlay；
+ *      · 图片解码 scut_frame_load_image() 写的是调用方给的 dst，
+ *        实际传入的是 scut_bind_input()，同样与这里无关；
+ *      · 调度器的合成走 scut_composite_overlay() + bind 的输出图。
+ *
+ *  更危险的是 scut_frame_composite() 这个零调用接口：
+ *  它合成的是【本模块那块永远为空的覆盖层】，一旦有人误用，
+ *  就会得到一张"合成成功但全无标注"的图 —— 不报错、不崩溃，
+ *  正是本项目要消灭的那类静默缺陷。
+ *
+ *  所以删掉缓冲而不是留着"将来也许有用"：
+ *  留着的代价是 90 KB 内存 + 一套会误导人的 API，
+ *  收益是零（真要用，bind 那一块才是数据的真实归属）。
  * ========================================================================== */
-static scut_u8  *s_gray    = NULL;
-static scut_u32 *s_overlay = NULL;
 static int       s_w       = 0;
 static int       s_h       = 0;
-static int       s_stride  = 0;   /* 行步长（字节 / u32 元素），当前恒等于 w */
 
 /* ==========================================================================
  *  生命周期
@@ -40,105 +57,37 @@ static int       s_stride  = 0;   /* 行步长（字节 / u32 元素），当前
 
 void scut_frame_free(void)
 {
-    /* ★★ 必须先撤销绘制模块的绑定，再 free ★★
-     *
-     * 这是本模块最重要的一处防御。绘制模块（scut_draw.c）是【静态变量】
-     * 持有 gray/overlay 裸指针的，它没有、也不该有「帧缓冲生命周期」的概念。
-     * 如果这里直接 free 而不解绑：
-     *     用户调用顺序  alloc -> bind -> free -> SCUT_DrawPoint(...)
-     *     就变成一次 use-after-free 堆写。它【不一定立刻崩】——
-     *     取决于分配器是否已经把该块还给了别的代码，
-     *     所以症状可能是「莫名其妙的数据被改坏」，而不是稳定崩溃，
-     *     属于排查成本最高的一类缺陷。
-     * 显式解绑把这个问题在源头消灭：free 之后所有绘制自动变成空操作。
-     *
-     * 注意这里【不需要】清理 frame 自己的指针 —— 紧接着的 free(NULL)
-     * 是合法空操作，尺寸复位也在下面统一做。 */
+    /* ★ 仍需撤销绘制模块的绑定 —— headless 宿主绑的是 bind 单元，
+     *   而本函数是"结束一帧/退出"的统一收口。解绑让之后的绘制变成空操作，
+     *   不会有人误以为绑定还在。（scut_draw_bind 自身允许传 NULL 解除绑定。） */
     scut_draw_bind(NULL, NULL, 0, 0, 0, 0);
 
-    /* free(NULL) 是合法的空操作，所以这里不需要判断。
-     * 复位尺寸同样重要：只释放指针却留着旧 w/h，
-     * 会让「已释放」看起来像「还可用」，后续 composite 就会读野指针。 */
-    free(s_gray);
-    free(s_overlay);
-    s_gray    = NULL;
-    s_overlay = NULL;
-    s_w       = 0;
-    s_h       = 0;
-    s_stride  = 0;
+    /* 只复位尺寸：已经没有缓冲需要释放。 */
+    s_w = 0;
+    s_h = 0;
 }
 
-int scut_frame_alloc(int w, int h)
+int scut_frame_set_size(int w, int h)
 {
-    scut_u8  *gray    = NULL;
-    scut_u32 *overlay = NULL;
-    size_t    pixels;
-
-    /* ★ 先释放旧的，再分配新的。
-     *   两个理由：
-     *     (1) 反复 alloc 不泄漏 —— 用户改 config 里的尺寸后会重新 alloc；
-     *     (2) 峰值内存更低 —— 不会同时持有新旧两块。 */
-    scut_frame_free();
-
+    /* ★ 以前这里 malloc 了 w*h*3 的灰度图和 w*h 的覆盖层，
+     *   但从来没有人写它们、也没有人从它们读 —— 全是死内存。
+     *   （详见本文件"内部状态"一节的说明。）
+     *   像素缓冲的归属是 bind 单元：scut_bind_input() / scut_bind_output()
+     *   / scut_bind_overlay()，因为只有那里知道【编译期】尺寸。
+     *   所以本函数现在只登记尺寸，供 scut_frame_width/height 报告给后端。 */
     if (w <= 0 || h <= 0) {
+        s_w = 0;
+        s_h = 0;
         return SCUT_FRAME_ERR_BADARG;
     }
 
-    /* ★ 溢出防护（必须显式做，不能靠运气）：
-     *   w * h 若在 size_t 上溢出，malloc 会拿到一个【很小】的尺寸并成功，
-     *   随后按真实 w/h 写入就会越界堆写 —— 不崩溃、直接踩坏别的数据。
-     *   这里用除法反向验证乘法，避免「先乘后查」（那个顺序已经错了）。
-     *   ★ 输出图是 RGB 三通道，所以字节数是 w*h*3；
-     *     先按 u32 元素校验一遍（覆盖层要 4 字节/像素，是更紧的那个约束），
-     *     再按 3 字节校验一遍，两边都过才分配。 */
-    if ((size_t)w > SIZE_MAX / sizeof(scut_u32)) {
-        return SCUT_FRAME_ERR_BADARG;
-    }
-    pixels = (size_t)w * (size_t)h;
-    if (pixels > SIZE_MAX / sizeof(scut_u32)) {
-        return SCUT_FRAME_ERR_BADARG;
-    }
-    if (pixels > SIZE_MAX / 3u) {
-        return SCUT_FRAME_ERR_BADARG;
-    }
-
-    gray    = (scut_u8 *)malloc(pixels * 3u * sizeof(scut_u8));
-    overlay = (scut_u32 *)malloc(pixels * sizeof(scut_u32));
-
-    /* 任一失败都要把另一个也释放掉，并保持全局状态干净（不半分配）。 */
-    if (gray == NULL || overlay == NULL) {
-        free(gray);
-        free(overlay);
-        return SCUT_FRAME_ERR_BADARG;
-    }
-
-    /* 输出图清零：它是「输出结果图」，全 0 = 纯黑底，是符合直觉的初值，
-     * 也让「源图比目标小」时未覆盖区域自然留黑。 */
-    memset(gray, 0, pixels * 3u * sizeof(scut_u8));
-
-    /* ★ 覆盖层【必须】初始化为透明哨兵，不能留 malloc 的垃圾值。
-     *   哨兵高 8 位为 1，而合法颜色高 8 位恒为 0 —— 若这一层是未初始化内存，
-     *   只要某个 u32 恰好不是 0xFFFFFFFF，合成时就会被当成「用户画的颜色」，
-     *   在画面上撒出随机彩色噪点，而且随运行环境变化，极难复现。
-     *   哨兵恰好全 1 字节，所以 memset 0xFF 既最快又语义正确。 */
-    memset(overlay, 0xFF, pixels * sizeof(scut_u32));
-
-    s_gray    = gray;
-    s_overlay = overlay;
-    s_w       = w;
-    s_h       = h;
-    /* 本模块的缓冲是紧凑排布的（二维数组语义），所以步长就是宽度。
-     * 保留这个字段而不是到处写 s_w，是为了将来支持带 padding 的
-     * 外部缓冲（对齐、DMA 友好）时只改一处。 */
-    s_stride  = w;
-
+    s_w = w;
+    s_h = h;
     return SCUT_FRAME_OK;
 }
 
-scut_u8  *scut_frame_gray(void)    { return s_gray; }
-scut_u32 *scut_frame_overlay(void) { return s_overlay; }
-int       scut_frame_width(void)   { return s_w; }
-int       scut_frame_height(void)  { return s_h; }
+int scut_frame_width(void)  { return s_w; }
+int scut_frame_height(void) { return s_h; }
 
 /* ==========================================================================
  *  亮度换算
@@ -168,16 +117,21 @@ static scut_u8 scut_luma(scut_u32 r, scut_u32 g, scut_u32 b)
 /* --------------------------------------------------------------------------
  *  通用合成：把【调用方指定的】覆盖层合成到 dst 上
  *
- *  ★★ 为什么这个函数必须显式接收 overlay，而不能去读本模块的 s_overlay ★★
+ *  ★★ 为什么这个函数必须显式接收 overlay，而不能去读模块内部状态 ★★
  *
- *  本工程里覆盖层缓冲曾经（且当前仍然）在两处各自存在一份：
- *      · 本模块的 s_overlay（堆分配，由 scut_frame_overlay() 暴露）
+ *  本工程里覆盖层缓冲【曾经】在两处各自存在一份：
+ *      · frame 模块的 s_overlay（堆分配）—— 已于 2026-10-10 删除
  *      · bind 单元的 s_overlay（静态二维数组，由 scut_bind_overlay() 暴露）
  *  而 SCUT_DrawPoint 写的是【绘制模块当前绑定的那一块】，
  *  headless 宿主绑定的是 bind 那一块。于是「合成 s_overlay」这件事
  *  看起来天经地义，实际合成的却是一块【永远没人写过】的覆盖层 ——
  *  结果是所有标注静默消失：不报错、不崩溃、图像看着"正常"，
  *  只是空无一物。这正是本工程存在的意义所要消灭的那类缺陷。
+ *
+ *  ★ 这次没有只加注释提醒，而是把多余的那一份缓冲和封装它的
+ *    scut_frame_composite() 一起删掉了 —— 陷阱不该留在 API 里等人踩。
+ *    现在覆盖层全场只剩 bind 那一块，"合成错缓冲"这个错误在形状上
+ *    就无从发生。
  *
  *  所以这里刻意【不】读任何模块内部状态：
  *  两个缓冲都从参数进来，调用方必须明确说出"我要合成的是哪一对"。
@@ -244,48 +198,16 @@ void scut_composite_overlay(scut_u8 *dst, int dst_stride,
     }
 }
 
-/* --------------------------------------------------------------------------
- *  兼容入口：把【本模块自己的】frame_overlay 合成到 dst
+/* ★ scut_frame_composite() 已于 2026-10-10 删除 ★
  *
- *  实现已在 scut_composite_overlay 之上重建，行为与历史版本逐像素一致：
- *      · 透明像素 → dst 取【本模块灰度图 src】的值（即先整体拷贝灰度）
- *      · 有色像素 → dst 取该颜色的亮度
- *  即语义 = 「把 s_gray 连同覆盖层一起输出到 dst」。
- *  因此这里的步骤刻意是「先搬灰度、再合成覆盖层」：
- *  通用合成函数本身【不搬移灰度】（它只保留 dst 原值），
- *  少了这一步，dst != s_gray 的调用方会拿到一张没被灰度填充的图。
+ *   它是"把【本模块自己的】灰度图 + 覆盖层搬去 dst"的一站式封装，
+ *   但零调用者，而且它读的 s_gray / s_overlay 本来就永远不会被写入
+ *   （绘制绑的是 bind 那一块）。留着它等于留一个陷阱：
+ *   谁调用它，谁就会拿到一张"合成成功、但标注全无"的图，
+ *   不报错、不崩溃、图像看起来正常 —— 这正是本工程要消灭的缺陷类型。
  *
- *  ★ 再次强调本函数的局限：它只认本模块的 s_overlay。
- *    绘制若写在别处（bind 单元那份），必须直接用 scut_composite_overlay。
- * -------------------------------------------------------------------------- */
-void scut_frame_composite(scut_u8 *dst, int dst_stride)
-{
-    int y;
-
-    /* 未分配 / 参数非法：直接返回，不做任何事。
-     * 这是「所有函数在 alloc 之前调用都安全」这条契约的体现。 */
-    if (s_gray == NULL || s_overlay == NULL || dst == NULL) {
-        return;
-    }
-    if (s_w <= 0 || s_h <= 0 || dst_stride < s_w * 3) {
-        return;
-    }
-
-    /* 第一步：把源图搬到目标缓冲。
-     * 源与目标的步长【分开算】：目标可能是带 padding 的显示缓冲，
-     * 其 stride != 帧的 stride。若图省事只用一个步长，
-     * 画面会从第二行起整体斜移。
-     * ★ 源图是 RGB 三通道，一行 s_w 个像素 = s_w * 3 字节。 */
-    for (y = 0; y < s_h; y++) {
-        const scut_u8 *src_row = s_gray + (size_t)y * (size_t)s_stride;
-        scut_u8       *dst_row = dst    + (size_t)y * (size_t)dst_stride;
-
-        memcpy(dst_row, src_row, (size_t)s_w * 3u);
-    }
-
-    /* 第二步：把覆盖层合成上去（透明像素保留刚搬过来的灰度）。 */
-    scut_composite_overlay(dst, dst_stride, s_overlay, s_w, s_h);
-}
+ *   要合成就调 scut_composite_overlay()，把两个缓冲显式传进来。
+ */
 
 /* ==========================================================================
  *  BMP 解码
@@ -1184,8 +1106,8 @@ static int scut_png_decode(const scut_u8 *data, size_t size,
     row_bytes = (size_t)ihdr_w * (size_t)channels;
 
     /* 溢出防护：row_bytes*ihdr_h 若在 size_t 上回绕，后面的 malloc 会
-     * 拿到一个小尺寸成功、随后按真实尺寸越界写 —— 与 scut_frame_alloc
-     * 是同一条纪律：先除法反向验证，再看边界。 */
+     * 拿到一个小尺寸成功、随后按真实尺寸越界写 —— 这是本模块的一条通用
+     * 纪律：先除法反向验证乘法，再看边界。（凡是 w*h 参与分配的地方都适用。） */
     if (row_bytes > (SIZE_MAX / 2u - 1u) / (size_t)ihdr_h) {
         return SCUT_FRAME_ERR_PNG_FORMAT;
     }
