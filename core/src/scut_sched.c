@@ -592,8 +592,11 @@ void scut_core_init(const scut_image_desc_t *desc, const scut_run_config_t *cfg)
      *   scut_core_shutdown 会复位该标志，于是"init→shutdown→init"
      *   构成两个独立会话，各自跑一次 INIT。
      * ★ 描述符非法时【不执行】INIT 回调：用户初始化代码极可能去读
-     *   图像宽高（SCUT_GetImageWidth 等）。在描述符已知不可用的前提下
-     *   还把它放进去跑，等于故意制造越界——正是上面要防的那件事。 */
+     *   图像宽高（SCUT_GetInputImage 或直接访问输入数组）。
+     *   在描述符已知不可用的前提下还把它放进去跑，
+     *   等于故意制造越界——正是上面要防的那件事。
+     *   ★ 这里原先举的例子是 SCUT_GetImageWidth，那个函数已删除
+     *     （它返回的其实是输出图宽高，名字会骗人；见 scut_draw.h）。 */
     if ((s_error == NULL) && !s_init_ran) {
         scut_registry_invoke(SCUT_ROLE_INIT);
         s_init_ran = 1;
