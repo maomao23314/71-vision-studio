@@ -19,6 +19,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import { LineSplitter, parseFrameLine, parsePpm, parseVariablesLine, repairLooseJson } from './protocol';
 import type { FramePacket, SimSession, TimingInfo, VariableSnapshot } from './types';
 import { defaultConfig, readConfig } from './projectconfig';
+import { picArgsFromConfig, picArgsToArgv } from './simargs';
 
 export interface SimSessionOptions {
     exePath: string;
@@ -168,6 +169,10 @@ export class SimSessionImpl implements SimSession {
         // ------------------------------------------------------------------
         // ★ 0.9.4 起这些值都来自工程配置 scut_project.json，不再读 VS Code 设置。
         //   读不到工程配置时用默认值，让"没有 scut_project.json"也能跑起来。
+        //
+        // ★★ 图集参数的拼装已抽到 simargs.ts —— 因为「调试」入口需要同一组参数。
+        //    这里只负责"会话侧独有的"运行模式参数（--json/--step/--frames/--out），
+        //    图集与重复次数交给共享函数，两处不可能再拼出不同的值。
         const cfg = (() => {
             const root = this.opts.projectRoot;
             if (!root) {
@@ -176,32 +181,13 @@ export class SimSessionImpl implements SimSession {
             const { config } = readConfig(root);
             return config ?? defaultConfig();
         })();
-        const repeat = Math.max(1, cfg.run.processRepeat || 1);
-        // ★ 图集编号允许 0：后端会自动探测 0 起图集（pic/0.png、pic/1.png…），
-        //   早期版本在这里钳到 >=1，导致 0 起的图集【永远看不到第 0 张】。
-        //   后端对 1 起图集传 0 也会自己夹回 1，所以放宽到这里是安全的。
-        const startFrame = Math.max(0, Math.floor(cfg.pic.start || 0));
-        const picExt = cfg.pic.ext.trim();
 
         const args = ['--json', '--step', '--frames', '0', '--out', outDir];
         // ★★ 不加 --advance（0.7.1 起）：图集推进完全走运行期协议。
         //   早期版本把"每帧换图"绑死在启动参数上，导致「运行」「下一张」
         //   「上一张」全是同一个动作，翻页还得重启进程。现在进程启动后
         //   永远停在当前图上，换图只通过 stdin 的 n/p/g 命令（见 writeLine）。
-        // 0 或 1 都是合法起点；只有当用户明确设了非默认值才传，
-        // 让后端按图集自己的约定取第一张。
-        if (startFrame !== 1) {
-            args.push('--frame', String(startFrame));
-        }
-        if (repeat > 1) {
-            args.push('--repeat', String(repeat));
-        }
-        if (picExt) {
-            args.push('--ext', picExt);
-        }
-        if (this.opts.picDir) {
-            args.push('--pic', this.opts.picDir);
-        }
+        args.push(...picArgsToArgv(picArgsFromConfig(cfg, this.opts.picDir)));
 
         this.splitter.push('');     // 复位缓冲（其实无需，但保证语义清晰）
         this.stopping = false;

@@ -26,8 +26,46 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { ScutProject } from './types';
 import { detectToolchain } from './toolchain';
+import { defaultConfig, readConfig } from './projectconfig';
+import { picArgsFromConfig, picArgsToArgv } from './simargs';
 
 export const DEBUG_TYPE = 'scut71';
+
+/**
+ * 调试用的仿真程序参数。
+ *
+ * ★★ 为什么要抽成函数、且复用 simargs（一条真实缺陷的修复）★★
+ *
+ *   以前这里写死 `['--frames', '1']`，而 `simsession.ts` 启动会话时会
+ *   自行补上 `--pic` / `--ext` / `--frame`。两个入口对图集的处理不一致，
+ *   后果是：用户在配置里把图集指到 `pic/3`，**「运行」用 pic/3，
+ *   按 F5 调试却用编译期默认值**（或全黑图）。而两个入口"看起来"是
+ *   同一件事，这种不一致不报错、不崩溃，极难归因。
+ *
+ *   现在图集部分由 simargs.ts 统一产出，本函数只负责"调试独有的运行模式"：
+ *   跑 1 帧就停，方便下断点、单步。
+ *
+ * ★ 为什么 `--frames 1` 是刻意保留的：
+ *   调试的语义是"停下来看"，一口气跑 60 帧会让断点还没下就过去了。
+ *   这也是它与会话路径（`--frames 0 --step`，常驻逐帧喂）**唯一**的区别。
+ *
+ * @param projectRoot 工程根；为空则不读配置（用默认值），也读不到图集目录
+ * @param picDir 已解析的图集目录绝对路径（来自 ScutProject.picDir）
+ */
+export function debugArgs(projectRoot: string | undefined, picDir: string | undefined): string[] {
+    const cfg = (() => {
+        if (!projectRoot) {
+            return defaultConfig();
+        }
+        const { config } = readConfig(projectRoot);
+        return config ?? defaultConfig();
+    })();
+
+    // 调试模式：跑一帧就停（与会话路径的 --json/--step/--frames 0 相对）。
+    const args = ['--frames', '1'];
+    args.push(...picArgsToArgv(picArgsFromConfig(cfg, picDir)));
+    return args;
+}
 
 /** 从配置里取程序路径：优先用户显式写的 program，其次构建产物。 */
 function resolveProgram(
@@ -77,6 +115,13 @@ export class ScutDebugConfigurationProvider implements vscode.DebugConfiguration
      * 提供初始模板（用户主动执行「创建 launch.json」时才会用到）。
      * ★ 刻意返回一个【不含绝对路径】的模板：路径由
      *   resolveDebugConfiguration 在运行时补齐，这样模板可以进版本库共享。
+     *
+     * ★ 模板里【不写 args】：
+     *   写了就会被 resolveDebugConfiguration 的"用户优先"分支当成用户选择，
+     *   于是图集参数（--pic/--ext/--frame）反而不会被自动补上 ——
+     *   而"调试与运行看图集看到的是同一组图"正是本轮要修的东西。
+     *   留空 → 走 debugArgs() 自动补齐。
+     *   （用户若确实想自定义，自己填 args 即可，那时以他为准。）
      */
     provideDebugConfigurations(): vscode.DebugConfiguration[] {
         return [
@@ -85,10 +130,9 @@ export class ScutDebugConfigurationProvider implements vscode.DebugConfiguration
                 request: 'launch',
                 name: 'SCUT-71 仿真调试',
                 program: '${workspaceFolder}/.scut/bin/scut_sim.exe',
-                // ★ 调试用参数：跑 1 帧就停，方便下断点、单步。
-                //   刻意【不加 --json】—— 调试控制台里显示人话（"[帧 1] 处理 …"）
+                // ★ 刻意【不加 --json】—— 调试控制台里显示人话（"[帧 1] 处理 …"）
                 //   比一行 JSON 有用得多；SCUT_Log 走 stderr，照样能看到。
-                args: ['--frames', '1'],
+                //   运行模式（--frames 1：跑一帧就停）由图集参数一起在运行时补齐。
             },
         ];
     }
@@ -148,7 +192,7 @@ export class ScutDebugConfigurationProvider implements vscode.DebugConfiguration
 
         const args = Array.isArray(config.args) && config.args.length > 0
             ? config.args
-            : ['--frames', '1'];
+            : debugArgs(project?.root, project?.picDir);
 
         // 合并出最终配置：补齐 program / args / cwd / env
         const resolved: vscode.DebugConfiguration = {

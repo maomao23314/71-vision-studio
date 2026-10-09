@@ -172,7 +172,83 @@ console.log('\n=== 6. 诊断解析（编译错误 -> Problems 面板）===');
     ok('带空格路径也能解析', d[2] && d[2].line === 7);
 }
 
-console.log('\n=== 7. 真实进程输出端到端（协议一致性）===');
+console.log('\n=== 7. 图集参数共享（simargs.ts）—— 防"调试与运行看图不一致"回归 ===');
+{
+    // ★ 这组断言守的是一条真实缺陷：debug.ts 曾经写死 args:['--frames','1']，
+    //   完全不补 --pic/--ext/--frame，于是"运行"用配置的图集、
+    //   "调试"用编译期默认值（或全黑图），而两个入口看起来是同一件事。
+    //   simargs.ts 是两边唯一的产出点，所以这里测它 = 同时测两条路径。
+    const simargs = require(path.join(__dirname, '..', 'extension', 'out', 'simargs.js'));
+
+    const mk = (over) => Object.assign({
+        image: { width: 188, height: 120 },
+        inputArray: 'mt9v03x_image',
+        outputArray: '',
+        hooks: { init: [], frame: [], post: [] },
+        pic: { dir: '', ext: '', start: 1 },
+        run: { processRepeat: 1, runFrames: 60, benchRepeat: 1000 },
+        toolchain: { path: '', pythonPath: '', autoDownload: true, autoWatch: true },
+    }, over);
+
+    // --- 默认配置：除 --pic 外什么都不该传 ---
+    {
+        const a = simargs.picArgsFromConfig(mk({}), '/proj/pic/1');
+        ok('默认 start=1 不传 --frame（让后端探测）', a.frame === undefined, String(a.frame));
+        ok('默认 ext 空不传 --ext', a.ext === undefined, String(a.ext));
+        ok('默认 repeat=1 不传 --repeat', a.repeat === undefined, String(a.repeat));
+        ok('picDir 透传', a.picDir === '/proj/pic/1', a.picDir);
+
+        const v = simargs.picArgsToArgv(a);
+        ok('argv 只含 --pic', v.length === 2 && v[0] === '--pic', JSON.stringify(v));
+    }
+
+    // --- start=0（0 起图集）必须传出去，否则第 0 张永远看不到 ---
+    {
+        const a = simargs.picArgsFromConfig(mk({ pic: { dir: '', ext: '', start: 0 } }), '/p');
+        ok('start=0 必须传 --frame 0', a.frame === 0, String(a.frame));
+        const v = simargs.picArgsToArgv(a);
+        ok('argv 含 --frame 0', v.indexOf('--frame') === 0 && v[1] === '0', JSON.stringify(v));
+    }
+
+    // --- start=7 + 多后缀 + repeat（正是集成测试工程的真实配置形状）---
+    {
+        const a = simargs.picArgsFromConfig(mk({
+            pic: { dir: 'pic', ext: '.png,.bmp', start: 7 },
+            run: { processRepeat: 3, runFrames: 60, benchRepeat: 1000 },
+        }), '/proj/pic');
+        const v = simargs.picArgsToArgv(a);
+        const s = v.join(' ');
+        ok('start=7 -> --frame 7', a.frame === 7, String(a.frame));
+        ok('多后缀原样透传（含逗号）', a.ext === '.png,.bmp', a.ext);
+        ok('repeat>1 -> --repeat 3', a.repeat === 3, String(a.repeat));
+        ok('argv 顺序稳定', s === '--frame 7 --repeat 3 --ext .png,.bmp --pic /proj/pic', s);
+    }
+
+    // --- 空图集目录：不传 --pic，让后端自己找 ---
+    {
+        const a = simargs.picArgsFromConfig(mk({}), undefined);
+        ok('无 picDir 时不传 --pic', a.picDir === undefined, String(a.picDir));
+        ok('argv 为空数组', simargs.picArgsToArgv(a).length === 0);
+    }
+
+    // --- 纯函数：同样输入必须得到同样输出（两条路径共用的前提）---
+    {
+        const cfg = mk({ pic: { dir: '', ext: '.png', start: 3 } });
+        const a1 = simargs.picArgsToArgv(simargs.picArgsFromConfig(cfg, '/x')).join(' ');
+        const a2 = simargs.picArgsToArgv(simargs.picArgsFromConfig(cfg, '/x')).join(' ');
+        ok('纯函数：两次调用结果一致', a1 === a2, a1 + ' vs ' + a2);
+        ok('参数顺序跨调用稳定', a1 === '--frame 3 --ext .png --pic /x', a1);
+    }
+
+    // --- 绝对路径的图集目录必须原样透传（不拼接、不规范化）---
+    {
+        const abs = 'D:/shared/pics';
+        const a = simargs.picArgsFromConfig(mk({}), abs);
+        ok('绝对路径原样透传', a.picDir === abs, String(a.picDir));
+    }
+}
+
+console.log('\n=== 8. 真实进程输出端到端（协议一致性）===');
 {
     const dir = process.argv[2];
     const sim = process.argv[3];

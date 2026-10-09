@@ -752,10 +752,13 @@ def parse_image_size(header: str) -> Tuple[int, int]:
         raise ConfigParseError(
             "在 %s 里找不到 %s 的定义。这两个宏是编译期契约（用户算法里到处是"
             " int left_line[SCUT_IMAGE_H]; 这类声明，C 要求数组大小是编译期常量），"
-            "不能缺失。请照 templates/starter/config.h 的样子补上，例如：\n"
+            "不能缺失。请在 %s 里补上，例如：\n"
             "    #define SCUT_IMAGE_W  (188)\n"
-            "    #define SCUT_IMAGE_H  (120)"
-            % (header, " 和 ".join(missing))
+            "    #define SCUT_IMAGE_H  (120)\n"
+            "    （新工程不需要手写这个文件：在插件配置面板里填「图像尺寸」即可，\n"
+            "      构建时会自动生成 .scut/gen/scut_config.h。这里读的是【老工程】\n"
+            "      自己带的 config.h —— 把它补全，或改用 scut_project.json。）"
+            % (header, " 和 ".join(missing), header)
         )
     w = _strip_int_literal(w_raw.group(1))
     h = _strip_int_literal(h_raw.group(1))
@@ -898,6 +901,54 @@ def load_project_config(proj: "Project", reporter: "Reporter"
     return dict(DEFAULT_CONFIG), "内置默认值"
 
 
+def apply_pic_dir(proj: "Project", cfg: Dict[str, Any]) -> None:
+    """把配置里的 pic.dir 落到 proj.pic_dir 上。
+
+    ★★ 为什么需要这个函数（一条真实缺陷的修复）★★
+
+      Project.__init__ 在构造时就把 pic_dir 写死成 <root>/pic；
+      而配置是【之后】才由 load_project_config() 读出来的 ——
+      构造顺序在前，所以配置里的 pic.dir 从来没有生效过。
+
+      后果不只是"没起作用"，而是【主动误导】：
+      用户在插件面板里把图集目录设成 pic/3，仿真会正确地用 pic/3
+      （后端读得到），但构建时会打印
+          "工程里没有 pic/ 目录，仿真将没有测试图可读……画面会全黑"
+      而画面根本不会黑。用户于是去建一个并不需要的 pic/ 目录。
+
+      这正是 0.9.4「配置只有一个真值」那次重构要消灭的缺陷
+      （见本文件 DEFAULT_CONFIG 上方的说明），却在同一文件里
+      以"构建脚本另有一份硬编码真值"的形式重新出现。
+
+    ★ 为什么做成独立函数、而不是在 Project.__init__ 里读配置：
+      构造 Project 时还没有任何配置（配置要先知道 proj.root 才能定位），
+      在里面读会变成"配置的读取依赖配置的位置"这种循环。
+      所以顺序只能是「先构造 → 再读配置 → 再回写」，
+      回写这一步单独成函数，两个调用点各自调一次，语义明确。
+
+    ★ pic.dir 为空串时【保持原值】（<root>/pic）：
+      默认工程没有 pic/ 配置项，必须维持当前行为，否则
+      所有老工程会突然报"没有图集"。
+
+    ★ 支持绝对路径：与 extension/src/project.ts:237 的口径一致
+      （那里写的是 path.isAbsolute(rel) ? rel : path.join(root, rel)）。
+      两边都支持绝对路径，用户把图集放在工程外也能用。
+    """
+    raw = str((cfg.get("pic") or {}).get("dir") or "").strip()
+    if not raw:
+        return                      # 留空 = 用默认的 <root>/pic
+
+    # 反斜杠统一成正斜杠：配置里用户可能写 "pic\\1"（Windows 习惯），
+    # 而 os.path.join / os.path.isabs 在 Windows 上两种都认，
+    # 但在别的平台只认 '/'。归一化之后跨平台行为一致。
+    raw = raw.replace("\\", "/")
+
+    if os.path.isabs(raw):
+        proj.pic_dir = os.path.normpath(raw)
+    else:
+        proj.pic_dir = os.path.normpath(os.path.join(proj.root, raw))
+
+
 _STR_MACRO_CACHE: Dict[str, Dict[str, str]] = {}
 
 
@@ -976,7 +1027,8 @@ def write_generated_config(gen_dir: str, cfg: Dict[str, Any]) -> str:
         " *  scut_config.h —— 编译期契约（★ 自动生成，不要手改）\n"
         " *  --------------------------------------------------------------------------\n"
         " *  由 tools/scut_build.py 依据 scut_project.json 生成。\n"
-        " *  要改这些值，请用 VS Code 设置界面（搜索 \"SCUT-71\"）——\n"
+        " *  要改这些值，请用插件里的配置面板（仿真视图工具栏的设置按钮）；\n"
+        " *  那些值本身存在工程根的 scut_project.json 里，\n"
         " *  手改本文件会在下次构建时被覆盖。\n"
         " *\n"
         " *  ★ 为什么尺寸必须留在编译期：\n"
@@ -1094,8 +1146,9 @@ def write_glue(gen_dir: str, cfg: Dict[str, Any]) -> str:
             "没有配置任何钩子函数。\n"
             "    原因：环境需要一个「图像处理函数」才能跑起来 —— "
             "它就是你算法的主入口。\n"
-            "    下一步：打开 VS Code 设置，搜索 \"SCUT-71\"，在\n"
-            "    「图像处理函数」里填你代码里的函数名（每行一个），\n"
+            "    下一步：打开插件的配置面板（侧边栏 ⚙ 按钮，\n"
+            "    或命令面板执行「SCUT-71: 配置本工程」），在\n"
+            "    「每帧处理函数」里填你代码里的函数名（每行一个），\n"
             "    例如 image_process。\n"
             "    说明：用户代码里【不需要】写任何注册宏 —— "
             "那样代码才能保持与车载工程一致、直接可移植。")
@@ -2026,6 +2079,11 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
         try:
             cfg, cfg_source = load_project_config(proj, reporter)
             img_w, img_h = _cfg_image(cfg)
+            # ★ 配置读出来之后必须【立刻】把 pic.dir 落到 proj 上：
+            #   下面第 5) 步的"没有测试图"警告读的就是 proj.pic_dir。
+            #   放在这里而不是等用到时现算，是为了让两处消费者
+            #   （那条警告 + do_clean 的图集统计）天然看到同一个值。
+            apply_pic_dir(proj, cfg)
         except ConfigParseError as exc:
             reporter.error(str(exc) + "\n    下一步：修好后重跑构建。")
             return finish(2)
@@ -2055,20 +2113,32 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
     # 尺寸宏由生成的头文件提供，绝不再传 -D（会报 macro redefined）
     cfg_flags: List[str] = []
 
+    # ★ 文案里必须出现【实际用的目录】，不能写死 "pic/"：
+    #   目录来自配置（apply_pic_dir 刚落的 pic.dir），
+    #   用户配的是 pic/3 时提示"创建 pic/"会把人指到错的地方。
+    #   相对工程根显示，避免把绝对路径铺满终端（与后端
+    #   scut_pic_path_display 的口径一致）。
+    #
+    # ★ 必须在分支【之前】算好：两个分支都要用它。
+    #   （第一版把它写在 if 分支里、else 分支引用，直接 UnboundLocalError，
+    #     被 tests/test_glue_edges.py 当场抓住 —— 这正是那套测试存在的意义。）
+    _shown = os.path.relpath(proj.pic_dir, proj.root).replace("\\", "/")
+
     if not os.path.isdir(proj.pic_dir):
         reporter.warn(
-            "工程里没有 pic/ 目录，仿真将没有测试图可读。\n"
+            "工程里没有 %s 目录，仿真将没有测试图可读。\n"
             "    影响：仿真能启动，但画面会全黑，容易误判成算法有问题。\n"
-            "    下一步：创建 pic/ 并放入测试图。")
+            "    下一步：把测试图放进 %s，或在配置面板里改「图集目录」。"
+            % (_shown, _shown))
     else:
         pics = [n for n in os.listdir(proj.pic_dir)
                 if os.path.splitext(n)[1].lower()
                 in (".bmp", ".png", ".jpg", ".jpeg", ".pgm")]
         if not pics:
             reporter.warn(
-                "pic/ 目录里没有任何图片，仿真将没有测试图可读。\n"
+                "目录 %s 里没有任何图片，仿真将没有测试图可读。\n"
                 "    影响：画面会全黑，容易误判成算法有问题。\n"
-                "    下一步：往 %s 里放测试图。" % proj.pic_dir)
+                "    下一步：往这个目录里放测试图。" % _shown)
 
     # --- 4) 核心静态库存在性 ------------------------------------------------
     # 放在契约解析【之后】：先让用户把「工程自身的配置问题」修完，
@@ -2642,6 +2712,10 @@ def do_doctor(args: argparse.Namespace, reporter: Reporter,
     try:
         cfg, cfg_source = load_project_config(proj, reporter)
         w, h = _cfg_image(cfg)
+        # ★ 与 do_build 同一处理：doctor 也要按配置里的图集目录去看。
+        #   不加这一句，doctor 会对着硬编码的 <root>/pic 报告图集状态，
+        #   与构建、与仿真实际用的目录都不是同一个。
+        apply_pic_dir(proj, cfg)
         say("  ✅ 工程配置   : %s" % cfg_source)
         say("     图像尺寸   : %d x %d" % (w, h))
         n_init = len(_cfg_names(cfg, "init"))

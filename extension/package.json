@@ -207,8 +207,7 @@
           "when": "resourceLangId == c || resourceLangId == cpp",
           "group": "scut71@1"
         }
-      ],
-      "commandPalette": []
+      ]
     },
     "viewsContainers": {
       "activitybar": [
