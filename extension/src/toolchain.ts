@@ -51,31 +51,73 @@ function globalStorageDir(): string {
 const PROBE_TIMEOUT_MS = 6000;
 
 /**
- * 工具链根目录兜底候选（与 tools/scut_build.py 的 TOOLCHAIN_ROOT_CANDIDATES 保持一致）。
+ * 找不到工具链时问用户怎么办 —— 而不是替他决定。
  *
- * ★★★ 这里曾经只有一条开发机的绝对路径 ★★★
- *   插件分发给学生之后，大多数人机器上根本没有那个盘符 —— 探测必然落空。
- *   注释里曾经写"文档里是写死的，照着文档做的人不该被卡住"，
- *   但恰恰因为那是【别人的】机器路径，照做的人只会更困惑。
- *   所以改为只列【跨机器真实可能存在】的通用安装位置，
- *   并且不再假装"某处一定有一个"。
- *   （被删掉的那条具体路径记在 docs/改动流水账.md 里 ——
- *     代码注释不该留本机路径：注释是会被照抄的，而照抄必然失败。
- *     tests/test_mem_safety.py 里有一条断言专门守这件事。）
+ * ★ 为什么必须问 ★
+ *   每个人把工具链装在哪都不一样，插件猜不出来。
+ *   而且"下载 182MB"是一个【有代价的决定】：
+ *   占用磁盘、耗流量、可能要等几分钟，还会让已有的那份闲置。
+ *   插件擅自做这个决定，就是把用户的机器当成自己的。
+ *
+ * ★ 为什么弹窗而不是发通知 ★
+ *   通知可以被忽略，而忽略之后用户会一直卡在"编译不了"却不知道为什么。
+ *   这里正好是"第一次真的要编译"的时刻，用户一定在看窗口。
  */
-const ROOT_CANDIDATES: string[] = [
-    // Scoop（Windows 上常见的无管理员安装方式）
-    path.join(process.env.USERPROFILE || 'C:\\Users', 'scoop', 'apps', 'llvm-mingw', 'current'),
-    // MSYS2 自带的环境
-    'C:\\msys64\\mingw64',
-    'C:\\msys64\\clang64',
-    // LLVM 官方安装器默认位置
-    'C:\\Program Files\\LLVM',
-    // Chocolatey
-    'C:\\ProgramData\\chocolatey\\lib\\llvm-mingw\\tools\\install',
-    // 传统 MinGW-w64
-    'C:\\mingw64',
-];
+async function promptToolchainMissing(): Promise<'pick' | 'download' | undefined> {
+    const pick = '指定已有的工具链';
+    const dl = '帮我下载一份（约 165MB，只需一次）';
+    const choice = await vscode.window.showWarningMessage(
+        '没有找到编译工具链（需要 LLVM-MinGW 的 clang）。',
+        { modal: true, detail:
+            '已经装过了？直接指定它的目录即可，不用重新下载。\n\n'
+            + '指定时选【里面含有 bin 子目录的那一层】，'
+            + '也就是能直接看到 bin\\clang.exe 的上一级目录。\n\n'
+            + '还没有？那可以帮你下载一份到插件目录，'
+            + '解压开就能用，全程只需要一次。' },
+        pick,
+        dl,
+    );
+    if (choice === pick) { return 'pick'; }
+    if (choice === dl) { return 'download'; }
+    return undefined;
+}
+
+/** 让用户挑一个工具链根目录。返回 '' 表示取消。 */
+async function pickToolchainFolder(): Promise<string> {
+    const picked = await vscode.window.showOpenDialog({
+        canSelectFiles: false,
+        canSelectFolders: true,
+        canSelectMany: false,
+        openLabel: '选择工具链根目录',
+        title: '选择 LLVM-MinGW 目录（里面应有 bin\\clang.exe）',
+    });
+    return picked && picked.length > 0 ? picked[0].fsPath : '';
+}
+
+/**
+ * 工具链根目录兜底候选。
+ *
+ * ★★★ 这里曾经是一条开发机的绝对路径，2026-10-11 被我删掉，2026-10-11 又被要求加回来 ★★★
+ *   两次都是错的。反复的真实情况是：
+ *
+ *     ① 只留开发机路径   → 换个机器就必然落空，开始下载 182MB（用户实测）
+ *     ② 只留"通用位置"  → 开发机自己反而开始下载（用户实测）
+ *
+ *   两种写法都在赌"我知道别人把工具链装在哪"。而这个信息【本来就不该猜】——
+ *   每个人的安装位置都不一样，装在哪是用户自己的决定。
+ *
+ * ★ 所以这里【不猜任何盘符目录】 ★
+ *   探测链条只保留三种可信来源：
+ *     ① 用户在设置里显式指定（scut71.toolchainPath）
+ *     ② SCUT71_TOOLCHAIN 环境变量
+ *     ③ PATH 上真的有 clang —— 用户自己装好并确认能用的证据
+ *   三者都没有 → 弹窗让用户【手动指定 or 下载】，而不是替他决定。
+ *
+ *   下面这个数组保留为空不是"忘了填"，是刻意的：
+ *   它标出"探测链的最后一环在这里收口"，将来若要加通用位置
+ *   （如 Scoop / MSYS2）也只在这一处加，不会散落到别处。
+ */
+const ROOT_CANDIDATES: string[] = [];
 
 /**
  * binutils 版 objdump 的显式候选路径。
@@ -369,10 +411,14 @@ function detectImpl(allowDownload: boolean): Promise<Toolchain> {
 
         // ---- 1) 工具链根目录：配置 > 环境变量 > 插件自下载 > 已知位置 ----
         //
-        // ★ 顺序即优先级，而「插件自下载」排在已知位置之前是有意的：
-        //   用户装了插件却什么编译器都没有时，我们下载的那份是【确定可用】的；
-        //   而任何硬编码的开发机路径只在开发机上存在，
-        //   换个同学就变成"看起来配了其实没有"。先用自己的，再碰运气。
+        // ★ 顺序即优先级：
+        //   显式配置 > 环境变量 > 上次下载的 > PATH > （已刻意留空的候选）
+        //
+        // ★ 「插件自下载」排在 PATH 之前是有意的：
+        //   它是我们自己放的、确定可用的一份；但既然已经有 PATH 上的
+        //   clang 也在候选里，先用用户自己的那份更符合直觉。
+        //   —— 这一条是 2026-10-11 修的：原来下载排在 PATH 前面，
+        //   导致 PATH 兜底那段代码【永远执行不到】。
         const roots: Array<{ root: string; from: string }> = [];
         if (configured) {
             roots.push({ root: configured, from: 'scut71.toolchainPath 设置' });
@@ -415,38 +461,21 @@ function detectImpl(allowDownload: boolean): Promise<Toolchain> {
             ld = firstExisting(binDir, ['ld.lld.exe', 'ld.lld']);
         }
 
-        if (!cc && allowDownload) {
-            // ---- 1b) 本机什么都没有：自动下载一份（"到手即用"的兜底）----
-            //
-            // ★ 为什么放在这里而不是 activate：
-            //   activate 必须快且不能失败。下载要几十秒到几分钟，
-            //   放在激活路径上会让"装完插件第一次开 VS Code"变成一次漫长等待，
-            //   而且用户此时可能根本不想编译。
-            //   放在这里则是「第一次真的要编译时」才触发，意图明确。
-            //
-            // ★ 为什么只有 allowDownload 为真才走这条路：
-            //   本函数也会被只读探测（activate / 状态查询）调用，
-            //   那些调用点不该产生几百 MB 的网络流量。
-            const dl = await ensureToolchain(globalStorageDir(), () => { /* 进度已经在 withProgress 里显示 */ });
-            if (dl.ok && dl.root) {
-                root = dl.root;
-                rootFrom = '插件自动下载';
-                binDir = binOf(dl.root);
-                if (binDir) {
-                    cc = firstExisting(binDir, ['clang.exe', 'clang']);
-                    cxx = firstExisting(binDir, ['clang++.exe', 'clang++']);
-                    lldbDap = firstExisting(binDir, ['lldb-dap.exe', 'lldb-dap']);
-                    clangd = firstExisting(binDir, ['clangd.exe', 'clangd']);
-                    ld = firstExisting(binDir, ['ld.lld.exe', 'ld.lld']);
-                }
-                warnings.push(dl.message);
-            } else {
-                warnings.push(dl.message);
-            }
-        }
-
         if (!cc) {
-            // PATH 兜底
+            // ---- 2) PATH 兜底。【必须在下载之前】----
+            //
+            // ★★★ 2026-10-11 修掉的真 bug：下载抢在 PATH 前面 ★★★
+            //   原来的顺序是「配置 → 环境变量 → 自下载 → 已知位置 → 下载 → PATH」。
+            //   也就是说：只要前面全落空，【不管 PATH 上有没有 clang】，
+            //   都会先去下载 182MB，PATH 那一行永远轮不到。
+            //   而 PATH 是"用户自己已经装好并确认能用"的证据 ——
+            //   它的可信度【高于】我们猜的一堆候选目录。
+            //
+            //   后果实测：明明 PATH 上有 clang（或装在候选目录里，
+            //   但因为某个候选判定细节没命中），用户却在下载。
+            //
+            //   正确的优先级：显式配置 > 环境变量 > 自下载 > PATH > 候选 > 下载。
+            //   也就是【下载永远是最后手段】。
             cc = whichInPath(['clang.exe', 'clang']);
             if (cc) {
                 binDir = path.dirname(cc);
@@ -458,6 +487,74 @@ function detectImpl(allowDownload: boolean): Promise<Toolchain> {
                 ld = ld ?? firstExisting(binDir, ['ld.lld.exe', 'ld.lld']);
             }
         }
+
+        if (!cc && allowDownload) {
+            // ---- 3) 本机确实没有 → 【问用户】，不替他决定 ----
+            //
+            // ★★★ 2026-10-11 用户报告的回归：明明有工具链却在下载 182MB ★★★
+            //   根因是"探测失败 = 自动下载"这个设计本身：
+            //   它把一个【用户的决定】（用我现成的 / 下载一份新的）
+            //   偷偷替他做了。用户看到进度条时才知道，已经晚了。
+            //
+            // ★ 正确做法：停下来，给两个选项，让他自己选 ★
+            //   ① 我已经装了 → 弹目录选择器，指定它
+            //      （每个人的安装位置都不一样，插件没有资格替他猜）
+            //   ② 帮我下载一份 → 确认后才下，并且说清大小
+            //   ③ 取消 → 什么都不做，只在输出里说明怎么手动配置
+            //
+            //   ★ 为什么这次不能在 activate 之外"更聪明地猜"：
+            //     猜目录这件事已经被证伪过两次（见 ROOT_CANDIDATES 注释）。
+            //     与其继续猜，不如问一句 —— 一次点击比十次猜测便宜。
+            const choice = await promptToolchainMissing();
+
+            if (choice === 'pick') {
+                const picked = await pickToolchainFolder();
+                if (picked) {
+                    const b = binOf(picked);
+                    if (b && firstExisting(b, ['clang.exe', 'clang'])) {
+                        root = picked;
+                        rootFrom = '手动选择';
+                        binDir = b;
+                        cc = firstExisting(binDir, ['clang.exe', 'clang']);
+                        cxx = firstExisting(binDir, ['clang++.exe', 'clang++']);
+                        lldbDap = firstExisting(binDir, ['lldb-dap.exe', 'lldb-dap']);
+                        clangd = firstExisting(binDir, ['clangd.exe', 'clangd']);
+                        ld = firstExisting(binDir, ['ld.lld.exe', 'ld.lld']);
+                        // 写回设置，下次不用再选
+                        await cfg.update('toolchainPath', picked, vscode.ConfigurationTarget.Global);
+                    } else {
+                        warnings.push(
+                            `你选择的目录里没找到 bin\\clang.exe：${picked}\n`
+                            + '    提示：应该选【包含 bin 子目录的那一层】，'
+                            + '也就是里面能直接看到 clang.exe 的上一级目录。');
+                    }
+                }
+            } else if (choice === 'download') {
+                const dl = await ensureToolchain(globalStorageDir(), () => { /* 进度已经在 withProgress 里显示 */ });
+                if (dl.ok && dl.root) {
+                    root = dl.root;
+                    rootFrom = '插件自动下载';
+                    binDir = binOf(dl.root);
+                    if (binDir) {
+                        cc = firstExisting(binDir, ['clang.exe', 'clang']);
+                        cxx = firstExisting(binDir, ['clang++.exe', 'clang++']);
+                        lldbDap = firstExisting(binDir, ['lldb-dap.exe', 'lldb-dap']);
+                        clangd = firstExisting(binDir, ['clangd.exe', 'clangd']);
+                        ld = firstExisting(binDir, ['ld.lld.exe', 'ld.lld']);
+                    }
+                    warnings.push(dl.message);
+                } else {
+                    warnings.push(dl.message);
+                }
+            }
+        }
+
+        /* ★ 原来这里的 "PATH 兜底" 块已删除。
+         *   它位于下载之后，而下载只在前几步全落空时才发生，
+         *   所以那段 PATH 兜底【永远不可能执行到】—— 是一段死代码。
+         *   留着它会让人误以为 PATH 已经被考虑过了。
+         *   PATH 兜底已挪到下载【之前】，见上面第 2 步。
+         */
         cxx = cxx ?? cc;
 
         if (!cc) {

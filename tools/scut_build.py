@@ -128,33 +128,26 @@ EXE_NAME = "scut_sim.exe"
 # 核心静态库在工程内的默认位置
 DEFAULT_CORE_LIB_REL = os.path.join(SCUT_DIR, "lib", "libscut_core.a")
 
-# 工具链候选根目录：--toolchain > SCUT71_TOOLCHAIN > 下面这些 > PATH
+# 工具链候选根目录：--toolchain > SCUT71_TOOLCHAIN > PATH
 #
-# ★★★ 这里曾经只有一条开发机的绝对路径 ★★★
-#   插件分发给学生之后，绝大多数人的机器上根本没有那个盘符 ——
-#   探测必然落空，白白多走一遍。
-#   更糟的是报错文案里也印着它，学生照着敲只会得到
-#   "系统找不到指定的路径"，而真正该做的事（装一个 LLVM-MinGW）被藏起来了。
+# ★★★ 这个列表【刻意为空】 ★★★
+#   它先后被填过两轮，两轮都是错的：
+#     ① 只填开发机绝对路径 → 换个机器必然落空（用户实测：明明有工具链
+#        却在下载 182MB）
+#     ② 改填"通用安装位置" → 开发机自己反而开始下载（用户再次实测）
+#   两种写法都在赌"我知道别人把工具链装在哪"。
 #
-#   所以现在：① 留空默认，靠 PATH / --toolchain / 环境变量；
-#        ② 补上【跨机器真实存在】的通用安装位置；
-#        ③ 探测失败时给的是"去哪儿装"，不是"我机器上在哪"。
-#   （被删掉的那条具体路径记在 docs/改动流水账.md 里 ——
-#     注释不该留本机路径，它是会被照抄的，而照抄必然失败。
-#     tests/test_mem_safety.py 里有一条断言专门守这件事。）
-TOOLCHAIN_ROOT_CANDIDATES = [
-    # Scoop（Windows 上常见的无管理员安装方式）
-    os.path.join(os.environ.get("USERPROFILE", ""), "scoop", "apps", "llvm-mingw", "current"),
-    # MSYS2 随带的 mingw-w64 环境
-    r"C:\msys64\mingw64",
-    r"C:\msys64\clang64",
-    # LLVM 官方安装器默认位置
-    r"C:\Program Files\LLVM",
-    # Chocolatey
-    r"C:\ProgramData\chocolatey\lib\llvm-mingw\tools\install",
-    # 传统 MinGW-w64（clang 也能用它做宿主编译；sysroot 另说）
-    r"C:\mingw64",
-]
+#   而这个信息【本来就不该猜】：每个人的安装位置都不一样，
+#   装在哪是用户自己的决定。
+#
+#   所以插件侧的策略是【问】：找不到就弹窗，
+#   让用户选「指定已有的」还是「帮我下载」（见 src/toolchain.ts
+#   的 promptToolchainMissing）。
+#   本脚本是插件的下游，拿到的永远是用户【明确指定过】的路径
+#   —— 猜测这件事已经在上游做完了，不该在这里重演一遍。
+#
+#   保留这个空列表而不是删掉，是为了标出"探测链的最后一环在此收口"。
+TOOLCHAIN_ROOT_CANDIDATES: list = []
 
 # binutils 的 objdump 候选（相对「工具链根」之外的本机常见位置）。
 # ★ 为什么必须找 binutils：见文件头【四】。
@@ -484,7 +477,7 @@ def detect_toolchain(explicit_root: str, verbose_reporter: Optional[Reporter] = 
                      ) -> Toolchain:
     """
     按优先级探测工具链：
-        --toolchain  >  SCUT71_TOOLCHAIN 环境变量  >  常见安装位置  >  PATH
+        --toolchain  >  SCUT71_TOOLCHAIN 环境变量  >  PATH
     """
     tc = Toolchain()
 
@@ -2769,8 +2762,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--project", required=True,
                    help="工程目录（含 code/ 与 config.h）")
     p.add_argument("--toolchain", default="",
-                   help="工具链根目录。省略时按 SCUT71_TOOLCHAIN 环境变量、"
-                        "常见安装位置、PATH 的顺序自动探测")
+                   help="工具链根目录。省略时按 SCUT71_TOOLCHAIN 环境变量、PATH 探测；"
+                         "都找不到时插件会问你要（每个人的安装位置不同，不靠猜）")
     p.add_argument("--no-watch", action="store_true",
                    help="关闭自动符号发现（构建更快，但 IDE 变量面板会是空的）")
     p.add_argument("--core-lib", default="",

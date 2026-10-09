@@ -37,6 +37,7 @@ test_mem_safety.py —— 内存安全回归：snprintf 返回值语义 + 截断
 退出码 0 = 通过。
 """
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -429,6 +430,69 @@ def check_no_hardcoded_paths():
     return bad
 
 
+def check_toolchain_asks_user():
+    """断言"探测失败 → 问用户"，而不是"探测失败 → 替他下载"。
+
+    ★★★ 这条是踩过两次坑之后才立起来的 ★★★
+      2026-10-11 我先删掉开发机路径 → 用户实测：明明已有工具链，
+      却在下载 182MB。我的第一反应是"把路径加回去"，
+      用户当场指出："你专门适配我的环境也没有意义啊"。
+
+      两次错在同一个地方：我把"装在哪"当成了【我该猜的问题】。
+      其实它是【用户自己的决定】。所以正确做法是问。
+
+    这里锁四件事：
+      ① 探测链里【没有】任何硬编码的盘符目录
+      ② PATH 兜底排在自动下载【之前】
+         （原代码里 PATH 那段位于下载之后 = 永远执行不到的死代码）
+      ③ 存在"提示用户选择"的分支，而不是无条件下载
+      ④ Python 侧的候选列表同样为空
+    """
+    bad = []
+
+    ts = os.path.join(ROOT, "extension", "src", "toolchain.ts")
+    with open(ts, "r", encoding="utf-8") as f:
+        tsrc = f.read()
+
+    # ① ROOT_CANDIDATES 必须为空数组
+    m = re.search(r"ROOT_CANDIDATES[^=]*=\s*\[([^\]]*)\]", tsrc)
+    if m is None:
+        bad.append("toolchain.ts 里找不到 ROOT_CANDIDATES 的定义")
+    elif m.group(1).strip().strip(",").strip():
+        bad.append("ROOT_CANDIDATES 里又有硬编码目录了 —— "
+                   "探测不该猜用户的安装位置：\n        " + m.group(1)[:120])
+
+    # ② PATH 兜底必须排在 ensureToolchain(下载) 之前
+    i_path = tsrc.find("whichInPath(['clang.exe', 'clang'])")
+    i_dl = tsrc.find("await ensureToolchain(")
+    if i_path < 0 or i_dl < 0:
+        bad.append("toolchain.ts 里找不到 PATH 兜底或下载调用的位置")
+    elif i_path > i_dl:
+        bad.append("下载又排在 PATH 兜底前面了 —— "
+                   "只要 PATH 上有 clang 就绝不该触发下载")
+
+    # ③ 必须有"问用户"的分支
+    if "promptToolchainMissing" not in tsrc:
+        bad.append("toolchain.ts 里没有 promptToolchainMissing —— "
+                   "找不到工具链时应当问用户，而不是自动下载")
+    if "pickToolchainFolder" not in tsrc:
+        bad.append("toolchain.ts 里没有 pickToolchainFolder —— "
+                   "应当提供手动指定目录的入口")
+
+    # ④ Python 侧的候选列表同样必须为空
+    py = os.path.join(ROOT, "tools", "scut_build.py")
+    with open(py, "r", encoding="utf-8") as f:
+        psrc = f.read()
+    m2 = re.search(r"TOOLCHAIN_ROOT_CANDIDATES[^=]*=\s*\[([^\]]*)\]", psrc)
+    if m2 is None:
+        bad.append("scut_build.py 里找不到 TOOLCHAIN_ROOT_CANDIDATES 的定义")
+    elif m2.group(1).strip().strip(",").strip():
+        bad.append("scut_build.py 的候选列表里又有硬编码目录了：\n        "
+                   + m2.group(1)[:120])
+
+    return bad
+
+
 def main():
     if find_clang() is None:
         print("⚠️  找不到 clang，跳过（需要 C 工具链）")
@@ -512,8 +576,14 @@ def main():
     if not badpaths:
         print("  ✅ 面向学生的产物里没有开发机绝对路径")
 
+    badask = check_toolchain_asks_user()
+    for b in badask:
+        print("  ❌ " + b)
+    if not badask:
+        print("  ✅ 找不到工具链时会问用户（不猜目录、不擅自下载）")
+
     allok = ok_canary and (ok_asan is not False) and ok3 and ok4 \
-        and not bad and not badpaths
+        and not bad and not badpaths and not badask
     print()
     print("=" * 68)
     print("  %s  内存安全回归" % ("✅ 通过" if allok else "❌ 失败"))
