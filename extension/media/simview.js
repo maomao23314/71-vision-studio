@@ -671,6 +671,8 @@ bind('btn-debug', function () { vscode.postMessage({ type: 'cmd', cmd: 'debug' }
   bind('btn-next', function () { vscode.postMessage({ type: 'cmd', cmd: 'nextPic' }); });
   // 测速：同一张图重复 N 次取平均（旧环境 R 键的做法）
   bind('btn-bench', function () { vscode.postMessage({ type: 'cmd', cmd: 'bench' }); });
+  // 设置入口：直接跳到本插件的设置页（扩展侧会展开最常用的「工具链」子栏目）
+  bind('btn-settings', function () { vscode.postMessage({ type: 'cmd', cmd: 'settings' }); });
   bind('btn-clear', function () {
     logLines = [];
     if (el.log) { el.log.textContent = ''; }

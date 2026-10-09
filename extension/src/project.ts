@@ -212,7 +212,7 @@ export function detectProject(explicitDir?: string): ScutProject | undefined {
     const configHeader = findConfigHeader(root) ?? path.join(root, 'config.h');
 
     // ★ 图集目录的取值顺序（这里曾经是个大坑）：
-    //   1) 设置项 scut71.picDir —— 用户在设置界面指定的，最优先
+    //   1) 设置项「运行期 › 测试图集目录」—— 用户在设置界面指定的，最优先
     //   2) scut_project.json 的 pic.dir —— 工程自己声明的
     //   3) config.h 里的 SCUT_PIC_DIR —— 老工程的约定（兼容）
     //   4) 兜底 "pic"
@@ -225,7 +225,8 @@ export function detectProject(explicitDir?: string): ScutProject | undefined {
     //      于是静默跑黑图，一个字都不提示。
     const fromSettings = (() => {
         try {
-            const v = vscode.workspace.getConfiguration('scut71')
+            // ★ 0.9.3 起归在「运行期」子栏目下（见 package.json）。
+            const v = vscode.workspace.getConfiguration('scut71.runtime')
                 .get<string>('picDir', '');
             return (v && v.trim()) ? v.trim() : undefined;
         } catch {

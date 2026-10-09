@@ -219,6 +219,26 @@ button.ghost:hover {
   background: var(--vscode-button-secondaryHoverBackground, rgba(128, 128, 128, 0.18));
 }
 
+/* ---- 设置按钮：靠右 + 更轻的视觉重量 ----
+ * ★ 为什么用 margin-left:auto 把它推到最右 ★
+ *   它是"偶尔才用"的操作，却必须"随时可达"。
+ *   排在「停止」旁边会被当成又一个仿真动作；
+ *   推到最右并留出一段空白，它就成了"面板角落的一个入口"——
+ *   看得见但不抢眼，正是用户要的位置。
+ * ★ 为什么字号再小一档 ★
+ *   工具栏里的其它按钮都带文字且是高频操作。
+ *   一个 ⚙ 要在两者之间不显突兀，就得比它们更轻。 */
+#btn-settings {
+  margin-left: auto;
+  font-size: 13px;
+  padding: 2px 8px;
+  border-color: transparent;
+}
+
+#btn-settings:hover {
+  border-color: var(--vscode-panel-border, rgba(128, 128, 128, 0.4));
+}
+
 .runN {
   display: inline-flex;
   align-items: center;

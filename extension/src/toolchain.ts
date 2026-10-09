@@ -108,7 +108,7 @@ async function pickToolchainFolder(): Promise<string> {
  *
  * ★ 所以这里【不猜任何盘符目录】 ★
  *   探测链条只保留三种可信来源：
- *     ① 用户在设置里显式指定（scut71.toolchainPath）
+ *     ① 用户在设置里显式指定（scut71 › 工具链 › 工具链根目录）
  *     ② SCUT71_TOOLCHAIN 环境变量
  *     ③ PATH 上真的有 clang —— 用户自己装好并确认能用的证据
  *   三者都没有 → 弹窗让用户【手动指定 or 下载】，而不是替他决定。
@@ -405,8 +405,9 @@ async function findPython(binDir: string | undefined): Promise<{ path?: string; 
 function detectImpl(allowDownload: boolean): Promise<Toolchain> {
     return (async () => {
         const warnings: string[] = [];
-        const cfg = vscode.workspace.getConfiguration('scut71');
-        const configured = (cfg.get<string>('toolchainPath', '') ?? '').trim();
+        // ★ 0.9.3 起归在「工具链」子栏目下（见 package.json）。
+        const cfg = vscode.workspace.getConfiguration('scut71.toolchain');
+        const configured = (cfg.get<string>('path', '') ?? '').trim();
         const envRoot = (process.env.SCUT71_TOOLCHAIN ?? '').trim();
 
         // ---- 1) 工具链根目录：配置 > 环境变量 > 插件自下载 > 已知位置 ----
@@ -421,7 +422,7 @@ function detectImpl(allowDownload: boolean): Promise<Toolchain> {
         //   导致 PATH 兜底那段代码【永远执行不到】。
         const roots: Array<{ root: string; from: string }> = [];
         if (configured) {
-            roots.push({ root: configured, from: 'scut71.toolchainPath 设置' });
+            roots.push({ root: configured, from: '工具链根目录（设置）' });
         }
         if (envRoot) {
             roots.push({ root: envRoot, from: 'SCUT71_TOOLCHAIN 环境变量' });
@@ -521,7 +522,7 @@ function detectImpl(allowDownload: boolean): Promise<Toolchain> {
                         clangd = firstExisting(binDir, ['clangd.exe', 'clangd']);
                         ld = firstExisting(binDir, ['ld.lld.exe', 'ld.lld']);
                         // 写回设置，下次不用再选
-                        await cfg.update('toolchainPath', picked, vscode.ConfigurationTarget.Global);
+                        await cfg.update('path', picked, vscode.ConfigurationTarget.Global);
                     } else {
                         warnings.push(
                             `你选择的目录里没找到 bin\\clang.exe：${picked}\n`
@@ -575,7 +576,7 @@ function detectImpl(allowDownload: boolean): Promise<Toolchain> {
                 warnings.push(
                     `配置到的 C 编译器看起来不是 clang：${cc}\n`
                     + `    它自报的版本是：${ver}\n`
-                    + '    下一步：确认 scut71.toolchainPath 指向的是 LLVM-MinGW 解压根目录'
+                    + '    下一步：确认「工具链根目录」指向的是 LLVM-MinGW 解压根目录'
                     + '（里面有 bin\\clang.exe）。');
             }
         }
@@ -701,7 +702,7 @@ function fallbackToolchain(e: unknown): Toolchain {
         root: '', cc: '', cxx: '', ld: '', objdump: '',
         warnings: [`工具链探测过程中出现意外错误：${msg}\n`
             + '    下一步：执行「SCUT-71: 环境自检」查看详细信息，'
-            + '或在设置里手动指定 scut71.toolchainPath。'],
+            + '或在设置里手动指定「工具链根目录」。'],
     };
 }
 

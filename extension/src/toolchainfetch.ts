@@ -96,7 +96,7 @@ export async function ensureToolchain(
         return {
             ok: false,
             downloaded: false,
-            message: failureMessage('没有找到编译工具链，而且自动下载已被设置关掉（scut71.autoDownloadToolchain = false）。'),
+            message: failureMessage('没有找到编译工具链，而且自动下载已被设置关掉（设置 › SCUT-71 › 工具链 › 允许自动下载）。'),
         };
     }
 
@@ -362,7 +362,7 @@ async function extractZip(zipPath: string, destDir: string): Promise<void> {
             `解压超过 ${Math.round(EXTRACT_TIMEOUT_MS / 60000)} 分钟仍未完成，已中止。\n`
             + `    zip 文件位于：${zipPath}\n`
             + '    下一步：这台机器的磁盘可能太慢或空间不足；'
-            + '手动把该 zip 解压开，再把里面的目录（有 bin\\clang.exe 的那一层）用设置 scut71.toolchainPath 指过去。',
+            + '手动把该 zip 解压开，再把里面的目录（有 bin\\clang.exe 的那一层）在设置「工具链根目录」里指过去。',
         );
     }
 
@@ -372,7 +372,7 @@ async function extractZip(zipPath: string, destDir: string): Promise<void> {
         throw new Error(
             `系统自带的解压工具没能解开这个包（tar 退出码 ${tarCode}，PowerShell 退出码 ${psCode}）。\n`
             + `    zip 文件位于：${zipPath}\n`
-            + '    下一步：手动把该 zip 解压开，再把解压出来的目录（里面有 bin\\clang.exe）用设置 scut71.toolchainPath 指过去。',
+            + '    下一步：手动把该 zip 解压开，再把解压出来的目录（里面有 bin\\clang.exe）在设置「工具链根目录」里指过去。',
         );
     }
 }
@@ -476,7 +476,8 @@ function removeQuietly(target: string): void {
 /** 用户是否允许自动下载。★ 读设置失败时按「允许」处理，不能因此把「到手即用」卡住。 */
 function autoDownloadEnabled(): boolean {
     try {
-        return vscode.workspace.getConfiguration('scut71').get<boolean>('autoDownloadToolchain', true) !== false;
+        // ★ 0.9.3 起归在「工具链」子栏目下（见 package.json）。
+        return vscode.workspace.getConfiguration('scut71.toolchain').get<boolean>('autoDownload', true) !== false;
     } catch {
         return true;
     }
@@ -541,6 +542,6 @@ function failureMessage(reason: string): string {
     return `${reason}\n`
         + `    下一步：也可以从 ${RELEASES_PAGE} 手动下载 `
         + 'llvm-mingw-*-ucrt-x86_64.zip，解压到任意目录，'
-        + '再把设置 scut71.toolchainPath 指向那个目录（里面有 bin\\clang.exe 的那一层），'
+        + '再把设置里的「工具链根目录」指向那个目录（里面有 bin\\clang.exe 的那一层），'
         + '然后重新执行「SCUT-71: 环境自检」。';
 }

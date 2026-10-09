@@ -201,7 +201,8 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
      *   算法状态、图集位置、进程全部保持不变。
      */
     public async bench(): Promise<void> {
-        const cfg = vscode.workspace.getConfiguration('scut71');
+        // ★ 0.9.3 起归在「运行期」子栏目下（见 package.json）。
+        const cfg = vscode.workspace.getConfiguration('scut71.runtime');
         const n = Math.max(1, cfg.get<number>('benchRepeat', 1000) || 1000);
 
         const s = await this.ensureSession();
@@ -237,7 +238,7 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
      *   这与车上的行为一致 —— 翻页/连跑都不该把状态清零。
      */
     public async run(): Promise<void> {
-        const cfg = vscode.workspace.getConfiguration('scut71');
+        const cfg = vscode.workspace.getConfiguration('scut71.runtime');
         const n = Math.max(1, cfg.get<number>('runFrames', 60) || 60);
 
         const s = await this.ensureSession();
@@ -532,6 +533,10 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
                     void this.prevPic();
                 } else if (cmd === 'nextPic') {
                     void this.nextPic();
+                } else if (cmd === 'settings') {
+                    /* 设置入口。与「编译」一样走命令 —— 这样 webview 按钮、
+                     * 命令面板、快捷键三条路共用同一份实现，不会各自漂移。 */
+                    void vscode.commands.executeCommand('scut71.openSettings');
                 }
                 break;
             }
@@ -665,6 +670,18 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
       <span class="toolbar-sep"></span>
       <button id="btn-bench" title="测速：同一张图重复 N 次取平均 cycles (F9)">测速</button>
       <button id="btn-stop" class="danger" title="停止仿真进程 (Shift+F5)">■ 停止</button>
+      <!--
+        ★ 设置入口：刻意放在工具栏【最右端】，且用 ghost 样式（低对比、无边框）★★
+        理由：
+          · 设置是【偶尔才用】的操作，不该和「编译/调试/停止」抢注意力；
+          · 但它必须【随时可达】—— 用户改工具链、改图像尺寸时找不到入口，
+            就会去改 settings.json 手改，既慢又容易写错键名。
+        所以：不放视图标题栏（那里是高频动作区），也不塞进日志区，
+        而是工具行末尾的一个不显眼的按钮，鼠标移上去才看得清。
+        点它直接跳到本插件的设置页并展开「工具链」子栏目 ——
+        最常被找的就是这一组。
+      -->
+      <button id="btn-settings" class="ghost" title="打开设置（工具链 / 工程配置 / 运行期 / 面板与显示）">⚙</button>
     </section>
 
     <section id="status-section">

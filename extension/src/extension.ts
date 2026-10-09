@@ -74,6 +74,12 @@ const CONFIG_SETTING_KEYS = [
     'imageWidth', 'imageHeight', 'inputArray', 'outputArray',
     'initFunctions', 'frameFunctions', 'postFunctions',
 ];
+/* ★ 0.9.3 起这批设置归在「工程配置」子栏目下。
+ *   CONFIG_SECTION 必须与 package.json 里子栏目的 id 一致，
+ *   否则监听不到变化 —— 而"监听不到变化"的后果是
+ *   用户改了设置却不触发重新编译，表现为"改了没生效"。
+ *   tests/test_extension_settings.py 里有一条断言守着这层对应关系。 */
+const CONFIG_SECTION = 'scut71.project';
 
 /**
  * 启动时把工程配置同步进设置界面。
@@ -302,6 +308,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('scut71.stop', () => commandStop(simView, log)),
         vscode.commands.registerCommand('scut71.prevPic', () => simView.prevPic()),
         vscode.commands.registerCommand('scut71.nextPic', () => simView.nextPic()),
+        vscode.commands.registerCommand('scut71.openSettings', () => commandOpenSettings()),
         vscode.commands.registerCommand('scut71.selectVariables', () => commandSelectVariables(simView)),
         vscode.commands.registerCommand('scut71.setupProject', () => commandSetupProject(log)),
         vscode.commands.registerCommand('scut71.showLog', () => getSimLogChannel().show(true)),
@@ -313,8 +320,8 @@ export function activate(context: vscode.ExtensionContext): void {
     // ---- 配置变化：工具链路径改了要重新探测 ----
     context.subscriptions.push(
         vscode.workspace.onDidChangeConfiguration((e) => {
-            if (e.affectsConfiguration('scut71.toolchainPath')
-                || e.affectsConfiguration('scut71.autoDownloadToolchain')) {
+            if (e.affectsConfiguration('scut71.toolchain.path')
+                || e.affectsConfiguration('scut71.toolchain.autoDownload')) {
                 resetToolchainCache();
                 log('[配置] 工具链相关设置已变化，缓存已清除，下次使用会重新探测。');
                 void detectToolchain().then((tc) => {
@@ -324,7 +331,7 @@ export function activate(context: vscode.ExtensionContext): void {
                 });
             }
             // 工程配置类选项变化 → 落盘到 scut_project.json
-            if (CONFIG_SETTING_KEYS.some((k) => e.affectsConfiguration(`scut71.${k}`))) {
+            if (CONFIG_SETTING_KEYS.some((k) => e.affectsConfiguration(`${CONFIG_SECTION}.${k}`))) {
                 const p = projectOf();
                 if (p) {
                     const cfg = pullConfigFromSettings();
@@ -362,7 +369,8 @@ export function deactivate(): void {
  *     已按用户要求删除。）
  */
 function buildOptions(): BuildOptions {
-    const cfg = vscode.workspace.getConfiguration('scut71');
+    // ★ 0.9.3 起归在「工具链」子栏目下（见 package.json）。
+    const cfg = vscode.workspace.getConfiguration('scut71.toolchain');
     return {
         autoWatch: cfg.get<boolean>('autoWatch', true),
     };
@@ -380,6 +388,31 @@ async function commandDoctor(): Promise<void> {
             'SCUT-71 环境自检发现问题：还有必需组件没就绪，详情见刚打开的文档。',
         );
     }
+}
+
+/* ============================================================================
+ * 打开设置页
+ * ========================================================================== */
+
+/**
+ * 跳到本插件的设置界面，并展开最常被找的子栏目。
+ *
+ * ★ 为什么是"展开某个子栏目"而不是只打开页面 ★
+ *   0.9.3 把 20 项设置分成四组之后，用户点「打开设置」最想问的
+ *   通常是"我的工具链在哪 / 为什么又说要下载" —— 也就是「工具链」那组。
+ *   直接定位过去省掉一次"展开四个折叠面板找到它"的搜索。
+ *
+ * ★ 为什么不自己写一个设置界面 ★
+ *   VS Code 自带的设置页有搜索、有默认值展示、有"已被工程覆盖"的提示，
+ *   自己重写等于把这些全丢掉，换来的只是一个看起来更整齐的列表。
+ *   而"设置项太多"这个问题，官方给的折叠分组就是标准解法。
+ */
+async function commandOpenSettings(): Promise<void> {
+    await vscode.commands.executeCommand(
+        'workbench.action.openSettings',
+        // 传这个字符串会定位到该子栏目；VS Code 不支持时安静降级为打开设置页。
+        '@ext:scut-racing.scut-71-vision-studio#scut71.toolchain',
+    );
 }
 
 function formatDoctor(lines: string[], errors: string[]): string {

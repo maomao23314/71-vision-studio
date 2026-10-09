@@ -233,31 +233,38 @@ const NS = 'scut71';
 
 /** 把配置写进 VS Code 的 workspace 设置（作为编辑界面）。 */
 export async function pushConfigToSettings(cfg: ProjectConfig): Promise<void> {
-    const c = vscode.workspace.getConfiguration(NS);
+    // ★ 写入也必须用分组后的名字，否则会写出一个"设置界面里看不见、
+    //   但确实存在"的键 —— 用户改界面不会生效，而清理设置时又删不掉。
+    const p = vscode.workspace.getConfiguration(NS + '.project');
     const t = vscode.ConfigurationTarget.Workspace;
-    await c.update('imageWidth', cfg.image.width, t);
-    await c.update('imageHeight', cfg.image.height, t);
-    await c.update('inputArray', cfg.inputArray, t);
-    await c.update('outputArray', cfg.outputArray, t);
-    await c.update('initFunctions', cfg.hooks.init.join('\n'), t);
-    await c.update('frameFunctions', cfg.hooks.frame.join('\n'), t);
-    await c.update('postFunctions', cfg.hooks.post.join('\n'), t);
+    await p.update('imageWidth', cfg.image.width, t);
+    await p.update('imageHeight', cfg.image.height, t);
+    await p.update('inputArray', cfg.inputArray, t);
+    await p.update('outputArray', cfg.outputArray, t);
+    await p.update('initFunctions', cfg.hooks.init.join('\n'), t);
+    await p.update('frameFunctions', cfg.hooks.frame.join('\n'), t);
+    await p.update('postFunctions', cfg.hooks.post.join('\n'), t);
 }
 
 /** 从 VS Code 的 workspace 设置读出配置。 */
 export function pullConfigFromSettings(): ProjectConfig {
-    const c = vscode.workspace.getConfiguration(NS);
+    // ★ 配置项已在 0.9.3 分组成四个子栏目（工具链/工程配置/运行期/面板与显示）。
+    //   这里必须读【分组后的名字】—— 读旧名不会报错，
+    //   而是【静默退回默认值】。而工程配置一旦退回默认，
+    //   编译出来的数组尺寸/函数名就和用户的设置对不上，
+    //   表现为"我明明填了却没生效"，最难查。
+    const p = vscode.workspace.getConfiguration(NS + '.project');
     return normalizeConfig({
         image: {
-            width: c.get<number>('imageWidth', 188),
-            height: c.get<number>('imageHeight', 120),
+            width: p.get<number>('imageWidth', 188),
+            height: p.get<number>('imageHeight', 120),
         },
-        inputArray: c.get<string>('inputArray', 'mt9v03x_image'),
-        outputArray: c.get<string>('outputArray', ''),
+        inputArray: p.get<string>('inputArray', 'mt9v03x_image'),
+        outputArray: p.get<string>('outputArray', ''),
         hooks: {
-            init: c.get<string>('initFunctions', ''),
-            frame: c.get<string>('frameFunctions', ''),
-            post: c.get<string>('postFunctions', ''),
+            init: p.get<string>('initFunctions', ''),
+            frame: p.get<string>('frameFunctions', ''),
+            post: p.get<string>('postFunctions', ''),
         },
     });
 }

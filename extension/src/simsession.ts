@@ -157,7 +157,9 @@ export class SimSessionImpl implements SimSession {
         //         运行期改不了。硬把它做成设置项只会制造"改了没生效"的困惑。
         //         这是语言的硬约束，不是设计偷懒。
         // ------------------------------------------------------------------
-        const cfg = vscode.workspace.getConfiguration('scut71');
+        // ★ 0.9.3 起这些设置归在「运行期」子栏目下，读取要用分组名。
+        //   读旧名不报错，只是静默退回默认值 —— 表现为"改了没生效"。
+        const cfg = vscode.workspace.getConfiguration('scut71.runtime');
         const repeat = Math.max(1, cfg.get<number>('processRepeat', 1) || 1);
         // ★ 图集编号允许 0：后端会自动探测 0 起图集（pic/0.png、pic/1.png…），
         //   早期版本在这里钳到 >=1，导致 0 起的图集【永远看不到第 0 张】。
