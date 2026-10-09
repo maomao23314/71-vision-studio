@@ -6,7 +6,7 @@
  *    · 代码松耦合   → 用户代码不做集中清单，注册表是唯一的"名单"
  *
  *  ★ 为什么必须【显式排序】，不能靠"注册顺序"：
- *      SCUT_REGISTER 走构造函数。实测 GCC 下构造函数执行顺序与书写顺序
+ *      ENV_REGISTER 走构造函数。实测 GCC 下构造函数执行顺序与书写顺序
  *      【相反】（gamma→beta→alpha），且跨编译单元顺序标准未定义；
  *      MSVC 的 .CRT$XCU 语义与 GCC 也不等价。
  *      也就是说"注册顺序"这个概念在两个编译器上都不成立。
@@ -21,7 +21,6 @@
  *      （scut_registry_sort 之后不再写），而不是在核心内部塞一把锁。
  * ========================================================================== */
 #include "scut_registry.h"
-#include "scut_registry_internal.h"
 
 #include <string.h>
 #include <stdint.h>

@@ -27,7 +27,7 @@ export interface SimSessionOptions {
     toolchainBin?: string;
     /** 测试图集目录（透传给 --pic） */
     picDir?: string;
-    /** 帧 PGM 输出目录（透传给 --out，默认放系统临时目录） */
+    /** 帧图像（PPM/P6）输出目录（透传给 --out，默认放系统临时目录） */
     frameOutDir?: string;
     /** 用户勾选的变量（透传给 --select，逗号分隔） */
     selected?: string[];
@@ -130,7 +130,7 @@ export class SimSessionImpl implements SimSession {
      *   --step     每帧后等 stdin 一行 —— 这是「单步」与「运行 N 帧」的实现基础
      *   --frames 0 表示不设上限；此时进程只在收到 EOF 或被杀时结束。
      *   --advance  每帧换下一张测试图（否则 120 帧跑的都是同一张图）
-     *   --out      帧 PGM 的落盘目录
+     *   --out      帧图像（PPM/P6）的落盘目录
      */
     async start(): Promise<void> {
         if (this.child) {
@@ -317,7 +317,7 @@ export class SimSessionImpl implements SimSession {
      * 测速：当前这张图重复 N 次（协议 "b<N>"）。
      *
      * ★ 只跑【计时段】：后端收到 b<N> 后把 repeat 临时设为 N、
-     *   跑一帧、再把 repeat 还原 —— 后处理（POST/REPORT）与图集推进
+     *   跑一帧、再把 repeat 还原 —— 后处理（DRAW 阶段）与图集推进
      *   都不参与，所以测的就是算法本体。进程不重启，状态保留。
      */
     bench(n: number): Promise<void> {

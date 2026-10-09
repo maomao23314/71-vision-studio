@@ -89,12 +89,12 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 # 用户机器上 PATH 里的 python 可能是很老的版本（本机就有 3.6.2）。
 # 与其抛出难以理解的语法错误，不如在这里给出人话提示。
 # ---------------------------------------------------------------------------
-if sys.version_info < (3, 8):  # pragma: no cover - 环境相关
+if sys.version_info < (3, 7):  # pragma: no cover - 环境相关
     sys.stderr.write(
-        "本脚本需要 Python 3.8 或更高版本，当前是 %d.%d。\n"
-        "原因：脚本使用了 3.8 才稳定的标准库与语法（f-string 调试、"
-        "typing 简化写法等）。\n"
-        "解决办法：装一个 Python 3.8+ 再重试。\n"
+        "本脚本需要 Python 3.7 或更高版本，当前是 %d.%d。\n"
+        "原因：脚本第 70 行用了 `from __future__ import annotations`，"
+        "这是 3.7 才加入的特性；3.6 及更早会在那一行直接 SyntaxError。\n"
+        "解决办法：装一个 Python 3.7+ 再重试。\n"
         "    · 装了 Anaconda：它自带一份，用 where python 或 conda 找；\n"
         "    · 没装：去 python.org 下载安装（勾选 Add to PATH）；\n"
         "    · VS Code 里也可以设置 python.defaultInterpreterPath 指向它。\n"
@@ -103,6 +103,27 @@ if sys.version_info < (3, 8):  # pragma: no cover - 环境相关
         "  \"路径不存在\"，反而把真正该做的事（装一个 Python）藏起来了。\n"
         % (sys.version_info[0], sys.version_info[1])
     )
+    # ★ 闸门失败时【也要输出一份 JSON】。
+    #   原先这里直接 raise SystemExit(2)、不吐 JSON，而插件侧
+    #   （extension/src/build.ts）只在看到 /SyntaxError/ 时才换解释器重试。
+    #   于是版本刚好卡在闸门下沿时，插件拿不到结构化结果，
+    #   只能显示一句笼统的"无法运行构建脚本"——
+    #   真实原因（"你的 Python 太老"）根本没传到用户眼前。
+    #   这里补一行合法 JSON，让插件能把准确原因显示出来。
+    sys.stdout.write(json.dumps({
+        "ok": False,
+        "exePath": None,
+        "output": "",
+        "elapsedMs": 0,
+        "errors": [{
+            "severity": "error",
+            "message": "Python 版本过低（当前 %d.%d，需要 3.7+）。\n"
+                       "    下一步：用配置面板的「工具链 › Python 解释器路径」"
+                       "指定一个 3.7+ 的 python.exe。"
+                       % (sys.version_info[0], sys.version_info[1]),
+        }],
+    }, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
     raise SystemExit(2)
 
 # Windows 控制台默认编码是 GBK，直接输出中文/符号在部分终端会抛
@@ -124,6 +145,21 @@ for _stream_name in ("stdout", "stderr"):
 SCUT_DIR = ".scut"
 
 EXE_NAME = "scut_sim.exe"
+
+# 外部命令的超时（秒）。两个不同的量级，各有理由：
+#
+#   CMD_TIMEOUT_SEC   正式构建（编译 / 链接 / 归档）
+#                     给得宽：慢机器上链接带调试信息的静态库确实可能到几十秒，
+#                     首次构建还要现编核心库。它的目的是"别永久挂住"，
+#                     不是"卡性能预算"。
+#
+#   PROBE_TIMEOUT_SEC 版本探测（clang --version / objdump --version）
+#                     给得短：这只是锦上添花的诊断，而工具链探测阶段
+#                     要连试多个候选（objdump 最多 8 个路径）。
+#                     若每个都等 300 秒，光探测就能耗掉几十分钟 ——
+#                     而用户看到的是"插件卡住了"。
+CMD_TIMEOUT_SEC = 300.0
+PROBE_TIMEOUT_SEC = 20.0
 
 # 核心静态库在工程内的默认位置
 DEFAULT_CORE_LIB_REL = os.path.join(SCUT_DIR, "lib", "libscut_core.a")
@@ -289,16 +325,37 @@ def decode_output(raw: bytes) -> str:
       编译器诊断里会带上【工程路径】。工程路径可能含中文（本项目明确要求
       支持中文路径），而 Windows 上编译器输出编码可能是 UTF-8（clang）
       或本地代码页 GBK（gcc）。text=True 只按一个编码解，另一种就会炸或
-      变成乱码。所以按 utf-8 → gbk → latin-1 依次尝试。
+      变成乱码。
+
+    ★★ 为什么不能简单地"依次 try 三个编码"（本函数曾经的写法）★★
+      原先写的是 `for enc in ("utf-8","gbk","latin-1"): try: return decode(enc)`。
+      两个问题：
+
+      (1) **gbk 会静默乱码而不是抛异常**。GBK 几乎能接受任意字节序列 ——
+          一段 UTF-8 的中文诊断在 gbk 下通常也能"解出来"，只是全是乱码，
+          于是永远走不到后面的候选。用户看到一屏看不懂的字，
+          却以为是编译器本身在说怪话。
+      (2) **latin-1 永远成功**，所以列表末尾那个 errors="replace" 的兜底
+          是【不可达的死代码】。
+
+      正确做法是先用【能自证的编码】。UTF-8 自带约束：非法序列必然抛
+      UnicodeDecodeError。所以先按 UTF-8 严格解 —— 成功就一定是真 UTF-8；
+      失败才说明是本地代码页（GBK）。这与 extension/src/build.ts 的
+      decodeStream 用的是同一个判据（那里用的是 U+FFFD 替换字符哨兵），
+      两边口径一致。
     """
     if not raw:
         return ""
-    for enc in ("utf-8", "gbk", "latin-1"):
-        try:
-            return raw.decode(enc)
-        except (UnicodeDecodeError, LookupError):
-            continue
-    return raw.decode("utf-8", errors="replace")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    # 不是合法 UTF-8 → 本地代码页（中文 Windows 是 GBK/936）。
+    # 用 replace 兜住极少数既非 UTF-8 也非 GBK 的字节，保证永不抛。
+    try:
+        return raw.decode("gbk", errors="replace")
+    except LookupError:  # pragma: no cover - 无 gbk 编解码器的精简 Python
+        return raw.decode("utf-8", errors="replace")
 
 
 class CmdResult:
@@ -315,7 +372,8 @@ class CmdResult:
 
 
 def run_cmd(argv: Sequence[str], cwd: Optional[str] = None,
-            env: Optional[Dict[str, str]] = None) -> CmdResult:
+            env: Optional[Dict[str, str]] = None,
+            timeout: float = CMD_TIMEOUT_SEC) -> CmdResult:
     """
     执行外部命令。
 
@@ -323,6 +381,19 @@ def run_cmd(argv: Sequence[str], cwd: Optional[str] = None,
       这是「路径含空格与中文必须能用」的唯一可靠做法：
       字符串拼接在遇到 `D:\\我的 工程\\code\\main.c` 时必然被拆成两个参数，
       而编译器只会报「no such file」，用户完全看不出真正原因。
+
+    ★ timeout 是【必须有】的，不是可选的谨慎：
+      构建要拉 clang / objdump / ar 三个外部程序，其中 objdump 还要在
+      最多 8 个候选路径上逐个试。任何一个挂住（杀毒软件拦在启动阶段、
+      网络盘掉线、工具链版本不匹配而卡在等待输入），
+      没有超时的 subprocess.run 会让构建【永久挂起】——
+      用户看到的是"点了编译，进度条一直转"，没有任何报错可查。
+      超时后按失败处理，理由里说清是哪一个命令超时。
+
+    ★ 为什么默认值给得比较宽（300 秒）：
+      链接一份带调试信息的静态库在慢机器上确实可能到几十秒，
+      首次构建还要现编核心库。宁可比必要值宽松，也不要误杀正常构建 ——
+      超时的目的是"别永久挂住"，不是"卡性能预算"。
     """
     try:
         proc = subprocess.run(
@@ -333,11 +404,20 @@ def run_cmd(argv: Sequence[str], cwd: Optional[str] = None,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
             shell=False,
+            timeout=timeout,
         )
     except FileNotFoundError:
         return CmdResult(argv, 127,
                          "找不到可执行文件: %s\n请检查 --toolchain 指向的目录是否正确。"
                          % argv[0])
+    except subprocess.TimeoutExpired:
+        return CmdResult(argv, 124,
+                         "命令超时（超过 %.0f 秒）: %s\n"
+                         "    原因：多半是杀毒软件拦在进程启动阶段，"
+                         "或工具链与系统不匹配而卡住。\n"
+                         "    下一步：先单独在终端里跑一次这条命令看它停在哪；"
+                         "确认工具链版本与系统位数（x86_64）匹配。"
+                         % (timeout, " ".join(list(argv)[:2])))
     except OSError as exc:  # pragma: no cover - 环境相关
         return CmdResult(argv, 126, "启动命令失败: %s\n命令: %s" % (exc, argv[0]))
     return CmdResult(argv, proc.returncode, decode_output(proc.stdout))
@@ -391,6 +471,11 @@ class Toolchain:
             "cc": self.cc,
             "objdump": self.objdump,
             "objdumpIsBinutils": self.objdump_is_binutils,
+            # ★ objdumpVersion 必须导出：doctor 的人读输出里有它（"版本 : …"），
+            #   但 to_json 漏了 —— 于是插件用 --json 拿到的工具链信息
+            #   比终端里少一项，"objdump 是不是 binutils"只能看到一个布尔值，
+            #   出问题时没法把手上的版本号贴出来。
+            "objdumpVersion": self.objdump_version or None,
             "lldbDap": self.lldb_dap or None,
             "clangd": self.clangd or None,
             "python": self.python or None,
@@ -424,11 +509,18 @@ def _bin_of(root: str) -> str:
     return ""
 
 
-def _probe_version(exe: str, timeout: int = 20) -> str:
-    """取版本字符串的第一行（探测失败不阻断流程）。"""
+def _probe_version(exe: str, timeout: float = PROBE_TIMEOUT_SEC) -> str:
+    """取版本字符串的第一行（探测失败不阻断流程）。
+
+    ★ timeout 必须【真的传下去】：它原先只是签名里的一个形参，
+      从不使用 —— 于是"取版本"这一步实际用的是 run_cmd 的默认超时。
+      版本探测比正式构建"更该"有短超时：它只是个锦上添花的诊断，
+      而工具链探测阶段要连试多个候选（objdump 最多 8 个路径），
+      每个都等 300 秒的话，光探测就能耗掉几十分钟。
+    """
     if not exe:
         return ""
-    r = run_cmd([exe, "--version"])
+    r = run_cmd([exe, "--version"], timeout=timeout)
     if r.code != 0:
         return ""
     for line in r.out.splitlines():
@@ -615,7 +707,7 @@ def _find_python() -> str:
     找跑 scut_symbols.py 的解释器。
 
     ★ 优先用【正在运行本脚本的解释器】：它一定是可用的、且版本已通过顶部
-      的 3.8 闸门，不会出现「构建用 3.12、符号发现却拿 3.6 去跑」这种错配
+      的 3.7 闸门，不会出现「构建用 3.12、符号发现却拿 3.6 去跑」这种错配
       （本机 PATH 里恰好就有一个 Python 3.6.2，实测过这个坑）。
     """
     cur = sys.executable
@@ -1238,24 +1330,6 @@ def write_glue(gen_dir: str, cfg: Dict[str, Any]) -> str:
     return path
 
 
-def write_config_shim(gen_dir: str, content: str) -> None:
-    """
-    在 .scut/gen/ 下写一个面向 bind 的 scut_config.h 垫片。
-
-    ★ 为什么是「垫片」而不是直接改 bind/scut_bind.c：
-      bind 源码里的 #include "scut_config.h" 是架构契约的一部分
-      （模板给用户的文件叫 config.h）。改 bind 源码会让两种命名
-      只能活一个；用垫片则两种命名都能用，且仓库里的 bind 保持原样——
-      「用户的 config.h 是唯一真值来源」这条设计不被破坏。
-
-    ★ 为什么用 -I 顺序而不是复制内容：
-      垫片所在目录必须排在 -I 的最前面，否则工程里若恰好也有
-      scut_config.h 就会歧义。如果工程【自己】提供了 scut_config.h，
-      本函数根本不会被调用（见调用点）。
-    """
-    atomic_write_text(os.path.join(gen_dir, "scut_config.h"), content)
-
-
 def _split_mk_tokens(line: str) -> List[str]:
     """
     最小可用的 scut.extra.mk 词法分析：按空白切分，但引号内的整段算一个 token。
@@ -1538,7 +1612,8 @@ def build_one_unit(job: UnitJob, cc: str, objdump: str, python: str,
                    objcopy: str, auto_watch: bool, output_array: str,
                    output_owner: Optional[str], image_size: str,
                    reporter: Reporter, log_lock: threading.Lock,
-                   logs: List[str], proj: "Project") -> bool:
+                   logs: List[str], proj: "Project",
+                   exclude_names: str = "", max_elems: int = 0) -> bool:
     """
     一个用户编译单元的完整流水线：
 
@@ -1637,6 +1712,15 @@ def build_one_unit(job: UnitJob, cc: str, objdump: str, python: str,
             # 尺寸只用于错误提示的措辞（"环境要按 120 行 × 188 列去读它"），
             # 不参与任何生成逻辑 —— 真值来源始终是工程配置。
             gen_cmd += ["--image-size", image_size]
+        # ★ 这两个开关 scut_symbols.py 一直支持，但本脚本【从来不传】——
+        #   于是它们在整条构建链上不可达：命令行没有、配置没有、UI 也没有。
+        #   一个"实现了却没人能调到"的开关比没有更糟：读生成器代码的人
+        #   会以为构建侧已经在用它们了。
+        #   现在补上透传（值来自 --exclude / --max-elems，默认空/0 = 不启用）。
+        if exclude_names:
+            gen_cmd += ["--exclude", exclude_names]
+        if max_elems > 0:
+            gen_cmd += ["--max-elems", str(max_elems)]
         reporter.detail("  [2/3 生成] $ " + " ".join(
             '"%s"' % a if " " in a else a for a in gen_cmd))
         env = dict(os.environ)
@@ -1899,6 +1983,17 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
             "也可以显式传 --no-watch 来消除本提示。")
         auto_watch = False
 
+    # 变量发现的两个过滤器（透传给 scut_symbols.py）。
+    # ★ 用 getattr 兜底：这两个参数是本轮新增的，而 do_build 也可能被
+    #   测试脚本以手工构造的 Namespace 调用（那样就没有这两个属性）。
+    #   缺省 = 不启用，与"没传 --exclude / --max-elems"语义一致。
+    exclude_names = getattr(args, "exclude", "") or ""
+    max_elems = getattr(args, "max_elems", 0) or 0
+    if exclude_names:
+        reporter.human("  变量黑名单: %s" % exclude_names)
+    if max_elems > 0:
+        reporter.human("  变量元素上限: %d（超过的不进面板）" % max_elems)
+
     if auto_watch:
         reporter.human("  符号发现: %s" % tc.objdump)
     else:
@@ -1979,8 +2074,33 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
     core_flags = ["-std=c11", "-O2", "-Wall", "-Wextra"]
 
     def _core_fingerprint() -> str:
-        """核心库全部输入（编译参数 + .c/.h + bind 源码）的内容指纹。"""
+        """核心库全部输入（编译器身份 + 编译参数 + .c/.h + bind 源码）的内容指纹。
+
+        ★★ 为什么【必须】把编译器身份也算进去 ★★
+          指纹原先只含 core_flags 与源码字节。于是用户在配置面板里把工具链
+          从"A 处的 clang"换成"B 处的 clang"（或从 llvm-mingw 的 msvcrt 版
+          换成 ucrt 版）之后，源码没变 → 指纹没变 → **继续复用上一次编出来的
+          libscut_core.a**。而那份库是用【另一个 ABI/CRT】编的，
+          链接期就会报一堆莫名其妙的符号错误 —— 报错完全指不到
+          "库和编译器不匹配"这个真实原因。
+
+          这正是本文件别处（以及 sync-sdk.js）反复强调的那类事故：
+          分发预编译的 .a 之所以危险，就是因为 ABI 绑死。
+          增量缓存里同样会发生，只是更容易被忽略。
+
+          所以指纹里加入：编译器的【绝对路径】+ 它的【版本串】。
+          路径也要算 —— 同一台机器上可能并存多个 clang，版本串相同
+          但 CRT/sysroot 不同（实测过 msvcrt 与 ucrt 两个发行版）。
+          版本串拿不到时退化成空串，此时至少路径仍能区分。
+        """
         h = hashlib.sha256()
+        # 编译器身份：路径 + 版本。必须放在最前，便于日后排查时肉眼比对。
+        # ★ 用 tc.cc / tc.cc_version（do_build 里的 Toolchain 值），
+        #   不是 cc —— 后者是本文件别处的局部名，在这里并不存在。
+        h.update(("cc=" + str(tc.cc)).encode("utf-8", "replace"))
+        h.update(b"\0")
+        h.update(("ccver=" + str(tc.cc_version)).encode("utf-8", "replace"))
+        h.update(b"\0")
         h.update((" ".join(core_flags)).encode("utf-8"))
         for p in sorted(core_sources + core_headers + [bind_src]):
             h.update(os.path.basename(p).encode("utf-8", "replace"))
@@ -2297,7 +2417,8 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
                                SYMBOLS_TOOL, base_flags, user_flags, probe_flags,
                                include_dirs, objcopy, auto_watch, out_array,
                                out_owner, img_shape,
-                               reporter, log_lock, logs, proj)
+                               reporter, log_lock, logs, proj,
+                               exclude_names, max_elems)
         else:
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
                 futs = [ex.submit(
@@ -2305,7 +2426,8 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
                     SYMBOLS_TOOL, base_flags, user_flags, probe_flags,
                     include_dirs, objcopy, auto_watch, out_array,
                     out_owner, img_shape,
-                    reporter, log_lock, logs, proj)
+                    reporter, log_lock, logs, proj,
+                    exclude_names, max_elems)
                     for j in jobs]
                 concurrent.futures.wait(futs)
 
@@ -2672,7 +2794,8 @@ def do_doctor(args: argparse.Namespace, reporter: Reporter,
         say("  ❌ python     : 未找到")
         errors.append(
             "找不到用于运行 tools/scut_symbols.py 的 Python 解释器。"
-            "下一步：安装 Python 3.8+，或设置环境变量 SCUT71_PYTHON 指向它。")
+            "下一步：安装 Python 3.7+，或用配置面板的「工具链 › Python 解释器路径」"
+            "指定它。")
 
     for w in tc.warnings:
         # 上面已经用更具体的话说过一遍了，这里去重
@@ -2879,7 +3002,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--core-lib", default="",
                    help="预编译核心静态库路径。默认 <project>/.scut/lib/libscut_core.a")
     p.add_argument("--jobs", type=int, default=0,
-                   help="并行编译任务数（默认 = CPU 核数，上限 16）")
+                   help="并行编译任务数（默认 = CPU 核数，上限 %d）" % JOBS_MAX)
+    p.add_argument("--exclude", default="",
+                   help="逗号分隔的变量名黑名单：这些全局量不进变量面板"
+                        "（透传给 scut_symbols.py）。适合排除体积大又不想看的缓冲。")
+    p.add_argument("--max-elems", type=int, default=0, metavar="N",
+                   help="只把元素数 <= N 的变量放进面板（0 = 不限制）。"
+                        "透传给 scut_symbols.py，用于避开 22560 元素的大图数组。")
     p.add_argument("--json", action="store_true",
                    help="把机器可读结果输出到 stdout；"
                         "此时所有人类可读进度都走 stderr")
@@ -2900,6 +3029,20 @@ SYMBOLS_TOOL = os.path.join(SCUT_TOOL_ROOT, "tools", "scut_symbols.py")
 #   所以这两个路径不能混为一谈（否则升级 SDK 就等于改工程）。
 SDK_ROOT = SCUT_TOOL_ROOT
 
+# 并行编译任务数上限。
+#
+# ★ 必须有上限，而且是【硬】上限：本环境面向的是学生机器，
+#   而 --jobs 是用户可控的数字。没有上限时 `--jobs 9999` 会真的去
+#   创建 9999 个线程、每个线程拉一个 clang 进程 —— 内存瞬间打满、
+#   机器假死，而用户只看到"编译卡住了"。
+#
+# ★ 原先 --jobs 的 help 里写着"上限 16"，但那个 16 只作用在
+#   【自动推导的默认值】上，用户显式传的值完全不受约束 ——
+#   即"注释承诺了代码没做的事"。现在两边共用这一个常量。
+#   16 的理由：一般学生机 8~16 个逻辑核，再多对编译（本身就是
+#   CPU 密集）没有收益，只会互相抢内存。
+JOBS_MAX = 16
+
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
@@ -2907,6 +3050,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not args.jobs:
         cpu = os.cpu_count() or 2
         args.jobs = max(1, min(16, cpu))
+    else:
+        # ★ 夹取用户的显式值：负数/0 会在下面除零或起 0 个线程，
+        #   超大值会拖垮机器。夹取而不是报错 —— 这是个"手滑"类输入，
+        #   没必要让整次构建失败（与 --frames / --repeat 的取向一致）。
+        args.jobs = max(1, min(JOBS_MAX, args.jobs))
 
     # --json 时：stdout 只放 JSON，人类可读输出全部走 stderr。
     reporter = Reporter(as_json=args.json, verbose=args.verbose)

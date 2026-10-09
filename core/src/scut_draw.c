@@ -10,7 +10,8 @@
  *      旧实现把 SCUT_DrawPoint 写进 EasyX 的 DIB 缓冲。一旦换成
  *      headless / Webview 后端，用户所有绘制调用会【静默失效】：
  *      不报错、不崩溃，只是什么都不画 —— 极难排查。
- *      现在绘制只写覆盖层，覆盖层由 frame 模块合成进输出图。
+ *      现在绘制只写覆盖层，覆盖层由【调度器】合成进输出图
+ *      （见 scut_sched.c 的 run_one_frame：先合成、再清空）。
  *      呈现层只负责「把数组变成图」，绘制语义因此与后端彻底解耦。
  *
  *  ★ 覆盖层坐标与输出图坐标严格同源（同 w/h/stride），
@@ -289,17 +290,19 @@ void scut_draw_bind(scut_u8 *gray, scut_u32 *overlay, int w, int h,
  *  取回当前绑定的一组绘制目标
  *
  *  ★ 为什么调度器需要这个函数（本函数存在的全部理由）：
- *      帧内顺序是 PRE_FRAME → PROCESS → POST_FRAME → DRAW → sink → REPORT。
+ *      帧内顺序是 PROCESS → 默认底图 → DRAW → 合成 → 清空 → sink
+ *      （见 core/src/scut_internal.h 的阶段枚举与 scut_sched.c 的 run_one_frame）。
  *      标注是在 DRAW 阶段画上去的，而呈现后端读的是输出图，
  *      所以【必须有人把 overlay 合成进 gray】。谁来做？答案是由调度器
  *      在 DRAW 之后统一做 —— 这样每个呈现后端都自动获得正确的标注，
  *      不需要各自记得合成（后端一旦忘记，用户的标注就会全部静默消失，
  *      正是本工程要消灭的那类缺陷）。
  *
- *      但调度器并不知道绘制模块绑定的是哪一对缓冲。本工程里覆盖层缓冲
- *      存在两份（frame 模块一份、bind 单元一份），而绘制写的是被绑定的
- *      那一份。调度器若去猜（例如读 frame 自己那块），就会合成出一张
- *      永远为空的覆盖层：不报错、不崩溃，标注就是不见了。
+ *      但调度器并不知道绘制模块绑定的是哪一对缓冲。绘制写的是被绑定的
+ *      那一份，而本工程历史上覆盖层缓冲曾【存在过两份】（frame 模块一份、
+ *      bind 单元一份；frame 那份已于 2026-10-10 整块删除）。
+ *      调度器若去猜，就可能合成出一张永远为空的覆盖层：
+ *      不报错、不崩溃，标注就是不见了。
  *      只有绘制模块知道答案，所以只能由它把这一对缓冲交出来。
  *
  *  ★ 为什么每个输出参数都要判 NULL：
@@ -326,11 +329,16 @@ void scut_draw_get_target(scut_u8 **gray, scut_u32 **overlay, int *w, int *h)
 
 /* 覆盖层尺寸查询（供绘制代码做自适应）。
  * 未绑定时返回 0 —— 这样 `for (x = 0; x < SCUT_GetOutputWidth(); x++)`
- * 在未绑定时自然退化成空循环，不会越界。 */
+ * 在未绑定时自然退化成空循环，不会越界。
+ *
+ * ★ 原先这里还有一对 SCUT_GetImageWidth / SCUT_GetImageHeight，
+ *   实现与本函数【逐字相同】（都返回 s_w / s_h）。
+ *   名字暗示"输入图尺寸"，返回的却是输出图/覆盖层尺寸 ——
+ *   一个会骗人的 API。已删除；需要输入图尺寸请用
+ *   SCUT_GetInputImage(&w, &h)（它回填的是真正的输入图宽高，
+ *   且在非 PROCESS 阶段会返回 NULL 并记一次违规）。 */
 int SCUT_GetOutputWidth(void)  { return s_w; }
 int SCUT_GetOutputHeight(void) { return s_h; }
-int SCUT_GetImageWidth(void)   { return s_w; }
-int SCUT_GetImageHeight(void)  { return s_h; }
 
 /* ==========================================================================
  *  清屏

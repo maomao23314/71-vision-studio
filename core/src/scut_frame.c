@@ -306,7 +306,10 @@ static int scut_read_file(const char *path, scut_u8 **out, size_t *out_size)
     buf = (scut_u8 *)malloc((size_t)size);
     if (buf == NULL) {
         fclose(fp);
-        return SCUT_FRAME_ERR_READ;
+        /* ★ 内存不足独立成码，不要混进"读取失败"：
+         *   "文件坏了"与"文件太大装不下"的下一步完全不同
+         *   （重新导出 vs 换张小图）。 */
+        return SCUT_FRAME_ERR_NOMEM;
     }
 
     got = fread(buf, 1, (size_t)size, fp);
@@ -1171,7 +1174,7 @@ static int scut_png_decode(const scut_u8 *data, size_t size,
                 }
                 nid = (scut_u8 *)realloc(idat, ncap);
                 if (nid == NULL) {
-                    rc = SCUT_FRAME_ERR_PNG_FORMAT;       /* 内存不足 */
+                    rc = SCUT_FRAME_ERR_NOMEM;            /* IDAT 拼接缓冲分配失败 */
                     goto fail;
                 }
                 idat     = nid;
@@ -1231,7 +1234,7 @@ end_chunks:
 
     raw = (scut_u8 *)malloc(filtered_size);
     if (raw == NULL) {
-        rc = SCUT_FRAME_ERR_PNG_FORMAT;     /* 内存不足：按「数据无效」归因 */
+        rc = SCUT_FRAME_ERR_NOMEM;          /* 解压缓冲分配失败 */
         goto fail;
     }
 
@@ -1251,7 +1254,7 @@ end_chunks:
 
     gray = (scut_u8 *)malloc(gray_size);
     if (gray == NULL) {
-        rc = SCUT_FRAME_ERR_PNG_FORMAT;
+        rc = SCUT_FRAME_ERR_NOMEM;          /* 灰度缓冲分配失败 */
         goto fail;
     }
 
@@ -1401,6 +1404,7 @@ const char *scut_frame_strerror(int code)
     case SCUT_FRAME_ERR_PNG_INFLATE:      return "PNG 压缩流不合法（deflate 解码失败）";
     case SCUT_FRAME_ERR_PNG_FILTER:       return "PNG 行滤波类型不合法";
     case SCUT_FRAME_ERR_PNG_FORMAT:       return "PNG 色深/颜色类型/交织方式不在支持范围内";
+    case SCUT_FRAME_ERR_NOMEM:            return "内存不足：图片太大，无法分配解码缓冲";
     default:                              return "未知错误码";
     }
 }

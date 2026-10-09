@@ -326,12 +326,9 @@ static void run_one_frame(void)
 {
     scut_u64 frame_begin;
     scut_u64 frame_end;
-    scut_u64 sink_begin;
-    scut_u64 sink_end;
     scut_u64 t0;
     scut_u64 t1;
     double   draw_us         = 0.0;
-    double   sink_us;
     double   process_total_us = 0.0;   /* repeat 次 PROCESS 的【总和】 */
     double   process_avg_us;           /* 除以 repeat 得到的每次平均 */
     double   frame_us;
@@ -503,15 +500,18 @@ static void run_one_frame(void)
      *   "SCUT_PHASE_IDLE = 帧外（含 frame sink 期间）"的语义一致）：
      *   后端属于呈现层，不属于任何算法阶段。若让它停留在 DRAW 阶段里，
      *   后端一旦顺手调用 SCUT_GetInputImage() 就会被记成"用户违规"，
-     *   把后端自身的行为算到用户头上，误导排查方向。 */
+     *   把后端自身的行为算到用户头上，误导排查方向。
+     *
+     * ★ 这里【不再】为 sink 单独计时：
+     *   frame_us 已在上面读过表，sink 的开销按定义就不该计入任何指标
+     *   （它属于呈现层）。原先还算了 sink_begin/sink_end/sink_us
+     *   却只用一句 (void)sink_us 丢掉 —— 那是一段"算了但没人要"的死代码，
+     *   已删除。真要诊断后端耗时，应该由后端自己上报，
+     *   而不是在核心的帧路径上留下三个没人读的变量。 */
     scut_input_set_phase(SCUT_PHASE_IDLE);
-    sink_begin = scut_tick_now();
     if (s_sink != NULL) {
         s_sink(s_sink_user);
     }
-    sink_end = scut_tick_now();
-    sink_us = scut_tick_delta_us(sink_begin, sink_end);
-    (void)sink_us;   /* 仅用于诊断；不参与上面已发布的 frame_us */
 }
 
 /* 描述符与初始化状态是否允许跑帧。
@@ -686,6 +686,15 @@ int scut_run_frames(int n)
  * 直接改 s_cfg.repeat（调度器每帧都从它取值），不需要重启进程。 */
 int  scut_sched_get_repeat(void)      { return s_cfg.repeat; }
 void scut_sched_set_repeat(int n)     { s_cfg.repeat = (n >= 1) ? n : 1; }
+
+/* 日志 / 绘制的运行期开关。
+ *
+ * ★ 与 set_repeat 同一种写法：直接改 s_cfg，调度器每帧从它取值 ——
+ *   所以"改完立即生效、不需要重启进程"是自然结果，不需要额外机制。
+ * ★ run_one_frame 里已经处理了"关掉时不留陈旧读数"：
+ *   draw_enabled 为 0 时 draw_us 会被写成 0（而不是保留上次的值）。 */
+void scut_sched_set_log_enabled(int enable)  { s_cfg.log_enabled  = (enable != 0) ? 1 : 0; }
+void scut_sched_set_draw_enabled(int enable) { s_cfg.draw_enabled = (enable != 0) ? 1 : 0; }
 
 int scut_run_until_quit(void)
 {

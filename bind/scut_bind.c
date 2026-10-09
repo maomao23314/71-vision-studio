@@ -172,18 +172,21 @@ static const scut_image_desc_t s_desc = {
 /* 核心的绑定入口。main() 之前由构造函数注册好描述符，
  * 这样核心在初始化时（main 里）就能拿到正确的尺寸。
  *
- * ★ repeat 的初值来自编译期配置（SCUT_PROCESS_REPEAT）；
- *   运行期的 --repeat 会在 init 之后覆盖它（见后端）。 */
-#ifdef SCUT_PROCESS_REPEAT
-#  define SCUT_BIND_REPEAT SCUT_PROCESS_REPEAT
-#else
-#  define SCUT_BIND_REPEAT 1
-#endif
-
+ * ★ 三个运行期字段的初值都是"默认开、跑一遍"：
+ *     repeat = 1 / log_enabled = 1 / draw_enabled = 1
+ *   后端的 --repeat 会在 init 之后覆盖 repeat（见 scut_headless_main.c），
+ *   日志与绘制的开关则走 scut_sched_set_log_enabled / set_draw_enabled。
+ *
+ * ★ 这里【曾经】写着 `#ifdef SCUT_PROCESS_REPEAT` 来读一个"编译期默认值"，
+ *   但那个宏【从来没有任何地方生成】—— 生成的 scut_config.h 只发
+ *   SCUT_IMAGE_W/H 与 SCUT_INPUT_ARRAY（见 tools/scut_build.py 的
+ *   write_generated_config）。于是 #ifdef 恒假，永远走 #else 的 1，
+ *   那条分支是一条不可能执行的死路径，读代码的人却会以为"能配编译期次数"。
+ *   已删除：需要改次数请用配置面板的「每帧重复次数」（运行期，立即生效）。 */
 void scut_bind_apply(void)
 {
     scut_run_config_t cfg;
-    cfg.repeat       = (SCUT_BIND_REPEAT >= 1) ? SCUT_BIND_REPEAT : 1;
+    cfg.repeat       = 1;
     cfg.log_enabled  = 1;
     cfg.draw_enabled = 1;
 

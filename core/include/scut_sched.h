@@ -24,11 +24,16 @@
 extern "C" {
 #endif
 
-/* --- 运行配置 --- */
+/* --- 运行配置 ---
+ *
+ * ★ 三个字段都【有运行期入口】（见下面的 setter）：
+ *   只在结构体里放一个恒为 1 的字段，会让读代码的人以为"能关"，
+ *   实际却没有任何办法关掉 —— 那是"半死的配置"，比没有更误导。
+ *   所以能设的就必须能改：与 repeat 一致，log/draw 也各给一个 setter。 */
 typedef struct {
     int  repeat;          /* 每帧重复调用 PROCESS 的次数（复杂度测试用） */
-    int  log_enabled;     /* 是否允许 REPORT 阶段输出 */
-    int  draw_enabled;    /* 是否允许 DRAW 阶段绘制 */
+    int  log_enabled;     /* 是否允许 DRAW 阶段写日志（SCUT_Log） */
+    int  draw_enabled;    /* 是否允许 DRAW 阶段绘制与合成 */
 } scut_run_config_t;
 
 /* 初始化核心。必须在任何 Run* 之前调用。 */
@@ -44,6 +49,24 @@ void scut_core_shutdown(void);
  * 报出的 process_us / cycles 即"每次的平均值"。 */
 int  scut_sched_get_repeat(void);
 void scut_sched_set_repeat(int n);
+
+/* --- 日志 / 绘制的运行期开关（与 repeat 同一套语义） ---
+ *
+ * ★ 为什么需要它们：这两个字段原先只有 scut_bind_apply() 写死成 1，
+ *   全树没有任何入口能改 —— 于是"关闭日志""关闭绘制"两条分支永远走不到。
+ *   结构体里留着一个改不了的字段，比没有这个字段更误导，
+ *   所以补齐 setter，让它名实相符。
+ *
+ * 用途：
+ *   · 关日志：压测时避免日志缓冲被刷满
+ *   · 关绘制：做"纯算法"基准测试，去掉覆盖层写入与合成的开销
+ *
+ * ★ 语义差别（别混）：
+ *   scut_sched_set_draw_enabled(0) 关的是【绘制与合成本身】；
+ *   而 scut_enable_draw_timing(0) 关的只是【对 DRAW 的计时】。
+ *   前者影响画面，后者只影响 draw_us 这个读数。 */
+void scut_sched_set_log_enabled(int enable);
+void scut_sched_set_draw_enabled(int enable);
 
 /* 跑一帧。返回 0 = 正常，非 0 = 请求退出。 */
 int scut_run_once(void);

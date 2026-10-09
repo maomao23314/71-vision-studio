@@ -2,7 +2,7 @@
  *  simview.js —— 仿真视图的 webview 端脚本（纯 JS，无依赖）
  *  --------------------------------------------------------------------------
  *  设计理念对照：
- *    · 模拟单片机 → 这是一个「屏幕」：拿到灰度字节就画，不做任何处理
+ *    · 模拟单片机 → 这是一个「屏幕」：拿到 RGB 字节就画，不做任何处理
  *    · 上手即用   → 变量勾选、曲线、计时都在一个面板里
  *
  *  ★ 为什么不用框架、不引依赖：
@@ -10,14 +10,25 @@
  *    引一个打包器会带来构建步骤，而这个 webview 的资源是直接
  *    asWebviewUri 出去的，源码即产物 —— 少一层就少一处会坏的地方。
  *
- *  ★ 协议（与 src/simview.ts 严格对应）：
- *    收到 {type:'frame', index,width,height,rgb,timing}
- *    收到 {type:'vars',  snapshots:[{name,values[],truncated,total,dims,kind}], frame, timing}
- *    收到 {type:'catalog', variables:[...], selected:[...]}
+ *  ★ 协议（权威在宿主侧：src/simview.ts + src/simsesion.ts 的推送点。
+ *    本清单必须与那里逐字对齐 —— 它曾经漂移过，见下面两条更正。）
+ *
+ *    收到 {type:'frame',  index,width,height,rgb,timing,pic}
+ *         ★ 曾漏写 pic（宿主 simview.ts 的 onFrame 会带它）。
+ *    收到 {type:'vars',   snapshots:[{name,values[],truncated,total,
+ *                                    dims,kind,manual}], frame, timing}
+ *         ★ 曾漏写 dims/kind/manual（宿主 sendSnapshot 会补齐）。
+ *    收到 {type:'catalog',variables:[...], selected:[...], hasManifest}
  *    收到 {type:'status', running, exePath}
- *    收到 {type:'log', line}
- *    发出 {type:'ack', index}           ← 背压：必须发，否则会话会卡住
- *    发出 {type:'cmd', cmd:'run'|'step'|'stop'|'clearLog', n?}
+ *    收到 {type:'log',    line}
+ *
+ *    发出 {type:'ack',    index}          ← 背压：必须发，否则会话会卡住
+ *    发出 {type:'cmd',    cmd:'stop'|'build'|'debug'|'bench'
+ *                             |'prevPic'|'nextPic'|'settings', n?}
+ *         ★ 曾写 'run'|'step'|'stop'|'clearLog' —— 四个里三个是错的：
+ *           run/step 从未发出（「运行」走宿主侧的 runFrames），
+ *           clearLog 是本地清空（见下方 btn-clear 的绑定，不发消息）。
+ *           真实取值以 src/simview.ts 的 handleMessage switch 为准。
  *    发出 {type:'select', names:[...]}
  *    发出 {type:'ready'}
  * ========================================================================== */

@@ -59,9 +59,12 @@ void scut_env_seed_output_from_input(void);
 
 /* --- 防呆违规计数 ---
  * 用户在设计外的阶段访问输入图像时递增。
- * 目前只用于 stderr 的一次性提示（见 scut_input.c）。 */
-int  scut_input_violations(void);
-void scut_input_reset_violations(void);
+ *
+ * ★ 计数只用于 scut_input.c 内部的"一次性提示"（见那里的
+ *   `if (s_violations == 1)`），不对外暴露读接口 ——
+ *   原先有一个 scut_input_violations() getter 与一个
+ *   scut_input_reset_violations()，两者全树零调用，已删除。
+ *   一次性提示由 `== 1` 自己实现，不需要外部重置。 */
 
 #ifdef __cplusplus
 }

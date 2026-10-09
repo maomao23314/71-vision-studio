@@ -695,13 +695,13 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
         理由：
           · 设置是【偶尔才用】的操作，不该和「编译/调试/停止」抢注意力；
           · 但它必须【随时可达】—— 用户改工具链、改图像尺寸时找不到入口，
-            就会去改 settings.json 手改，既慢又容易写错键名。
+            就会去改 scut_project.json 手改，既慢又容易写错键名。
         所以：不放视图标题栏（那里是高频动作区），也不塞进日志区，
         而是工具行末尾的一个不显眼的按钮，鼠标移上去才看得清。
         点它直接跳到本插件的设置页并展开「工具链」子栏目 ——
         最常被找的就是这一组。
       -->
-      <button id="btn-settings" class="ghost" title="打开设置（工具链 / 工程配置 / 运行期 / 面板与显示）">⚙</button>
+      <button id="btn-settings" class="ghost" title="打开设置（图像尺寸 / 数组 / 钩子 / 图集 / 运行期 / 工具链）">⚙</button>
     </section>
 
     <section id="status-section">

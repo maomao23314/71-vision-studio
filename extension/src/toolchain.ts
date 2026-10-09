@@ -110,7 +110,7 @@ async function pickToolchainFolder(): Promise<string> {
  *
  * ★ 所以这里【不猜任何盘符目录】 ★
  *   探测链条只保留三种可信来源：
- *     ① 用户在设置里显式指定（scut71 › 工具链 › 工具链根目录）
+ *     ① 用户在插件配置面板里显式指定（工具链 › 工具链根目录，
  *     ② SCUT71_TOOLCHAIN 环境变量
  *     ③ PATH 上真的有 clang —— 用户自己装好并确认能用的证据
  *   三者都没有 → 弹窗让用户【手动指定 or 下载】，而不是替他决定。
@@ -520,7 +520,7 @@ function detectImpl(allowDownload: boolean): Promise<Toolchain> {
         //   导致 PATH 兜底那段代码【永远执行不到】。
         const roots: Array<{ root: string; from: string }> = [];
         if (configured) {
-            roots.push({ root: configured, from: '工具链根目录（设置）' });
+            roots.push({ root: configured, from: '工具链根目录（工程配置）' });
         }
         if (envRoot) {
             roots.push({ root: envRoot, from: 'SCUT71_TOOLCHAIN 环境变量' });
@@ -668,9 +668,9 @@ function detectImpl(allowDownload: boolean): Promise<Toolchain> {
                 + '    下一步（任选其一）：\n'
                 + '      1) 从 github.com/mstorsjo/llvm-mingw/releases 下载 '
                 + 'ucrt-x86_64 包，解压到任意目录，'
-                + '再用设置「Scut71 › Toolchain Path」指向它（里面有 bin\\clang.exe 的那一层）；\n'
+                + '再用配置面板的「工具链 › 工具链根目录」指向它（里面有 bin\\clang.exe 的那一层）；\n'
                 + '      2) 把 clang 的 bin 目录加进 PATH；\n'
-                + '      3) 检查设置里的「Scut71 › Auto Download Toolchain」是否被关掉了。');
+                + '      3) 检查配置面板的「工具链 › 允许自动下载工具链」是否被关掉了。');
         } else {
             // 版本探测失败【不算】探测失败，只记 undefined，不阻断流程
             const ver = await probeVersion(cc);
@@ -804,7 +804,7 @@ function fallbackToolchain(e: unknown): Toolchain {
         root: '', cc: '', cxx: '', ld: '', objdump: '',
         warnings: [`工具链探测过程中出现意外错误：${msg}\n`
             + '    下一步：执行「SCUT-71: 环境自检」查看详细信息，'
-            + '或在设置里手动指定「工具链根目录」。'],
+            + '或在配置面板里手动指定「工具链 › 工具链根目录」。'],
     };
 }
 

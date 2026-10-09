@@ -51,7 +51,7 @@ function isFile(p: string): boolean {
  * 在一个目录下找工程配置，返回配置文件的绝对路径或 undefined。
  *
  * ★ 两种约定都认：
- *     scut_project.json —— 新约定（设置界面维护的真值来源）
+ *     scut_project.json —— 新约定（插件配置面板维护的真值来源）
  *     config.h          —— 老约定（迁移期不该让老工程突然认不出来）
  */
 function findProjectConfig(root: string): string | undefined {

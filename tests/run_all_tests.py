@@ -176,37 +176,46 @@ def main():
                     help="在含中文与空格的工程路径上再跑一遍端到端")
     args = ap.parse_args()
 
-    banner("0/12  准备被测工程（从模板新建并构建）")
+    banner("0/13  准备被测工程（从模板新建并构建）")
     proj = args.project or bootstrap_project(ROOT)
 
-    banner("1/12  端到端：模板工程 → 零注册用户代码 → 构建 → 运行")
+    banner("1/13  端到端：模板工程 → 零注册用户代码 → 构建 → 运行")
     # ★ 这条排在第一位：它验证的是【设计理念本身】（用户代码零注册、
     #   环境接管图像管道、配置真的生效）。后面的测试都是组件级的，
     #   组件都对但主线断了，这个环境依然是不可用的。
     run("e2e", [PY, os.path.join(HERE, "test_e2e_pipeline.py")])
 
-    banner("2/12  接线单元边界（三条「静默算错」缺陷的回归）")
+    banner("2/13  接线单元边界（三条「静默算错」缺陷的回归）")
     # ★ 这三条都是"构建成功、运行正常、结果悄悄是错的"：
     #   同函数填两阶段（性能数字少一半）、--no-watch 重复定义、
     #   结果图数组名指向标量（越界读）。它们不会让任何东西看起来坏掉，
     #   所以必须有专门的测试盯着。
     run("glue-edges", [PY, os.path.join(HERE, "test_glue_edges.py")])
 
-    banner("3/12  自动符号发现（35 变量 × gcc + clang）")
+    banner("3/13  代码卫生（死代码 / 过时注释 / 健壮性常量）")
+    # ★ 这条盯的是"删掉之后没有任何测试会变红"的那类改动。
+    #   死代码的特点是双向无感：删错了没人拦，删对了下次有人
+    #   "顺手加回来"也没人发现。所以专门写一条断言守着这两件事：
+    #     · 不该存在的确实不存在（防回潮）
+    #     · 本该存在的确实存在（防误删）
+    #   它不需要工具链，纯静态判据，所以在任何机器上都会真的跑起来。
+    run("cleanup", [PY, os.path.join(HERE, "test_cleanup.py")])
+
+    banner("4/13  自动符号发现（35 变量 × gcc + clang）")
     run("symbols", [PY, os.path.join(HERE, "test_symbols.py"),
                     "--cc", "gcc", "--also", CLANG])
 
-    banner("4/12  JSON 协议合法性（插件依赖它）")
+    banner("5/13  JSON 协议合法性（插件依赖它）")
     run("json", [PY, os.path.join(HERE, "check_json_protocol.py")])
 
-    banner("5/12  内存安全（两处 snprintf 返回值误用 → 栈越界）")
+    banner("6/13  内存安全（两处 snprintf 返回值误用 → 栈越界）")
     # ★ 这条盯的是"越界但不崩溃"的那类缺陷：静默、随机、只在特定输入下出现，
     #   常规功能回归永远测不到。它直接 include 真实源码并用
     #   AddressSanitizer + 金丝雀双重判据验证。
     #   已经抓到过两个真实缺陷：json_escape 越界写、scut_watch_read 越界读。
     run("mem-safety", [PY, os.path.join(HERE, "test_mem_safety.py")])
 
-    banner("6/12  设置项分组一致性（分组后静默失效的唯一防线）")
+    banner("7/13  设置项分组一致性（分组后静默失效的唯一防线）")
     # ★ 这条盯的是"分组改动最容易漏的地方"：
     #   设置改名/搬家之后，读错键名【不会报错】，只是静默退回默认值，
     #   现象是"我在设置里改了却没反应"，而且它出现在编译产物上，
@@ -215,25 +224,25 @@ def main():
     #     它确实报红（第一版正则写错过一次，没报红，见该文件注释）。
     run("settings", [PY, os.path.join(HERE, "test_extension_settings.py")])
 
-    banner("7/12  插件纯逻辑（协议解析 / PPM / 诊断）")
+    banner("8/13  插件纯逻辑（协议解析 / PPM / 诊断）")
     run("extension", ["node", os.path.join(HERE, "extension_smoke.js"),
                       os.path.join(proj, ".scut", "frames"),
                       os.path.join(proj, ".scut", "bin", "scut_sim.exe")])
 
-    banner("7/12  会话：运行 / 测速 / 翻页 / 停止（ACK 背压链路）")
+    banner("9/13  会话：运行 / 测速 / 翻页 / 停止（ACK 背压链路）")
     # ★ 这条盯的是"按钮点了到底有没有反应"：运行/测速/翻页全都靠 ACK 背压
     #   驱动仿真进程前进，背压断在哪一环的表现都是"画面停在第 1 帧"、不报错。
     #   它已经抓到过一个真实缺陷：runFrames(N) 会多跑一帧。
     run("session", ["node", os.path.join(HERE, "run_frames.js"),
                     os.path.join(proj, ".scut", "bin", "scut_sim.exe"), proj])
 
-    banner("8/12  主动暴露变量（源码扫描 → 分组 → 恒显示）")
+    banner("10/13 主动暴露变量（源码扫描 → 分组 → 恒显示）")
     # ★ 这条盯的是"用户主动注册的结构体成员能不能在面板里看见"。
     #   它已经抓到过一个真实缺陷：判据用"运行期注册表减编译期 DWARF"，
     #   而两边完全重合、差集恒空，导致主动暴露永远是 0 个、面板全空。
     run("manual-vars", ["node", os.path.join(HERE, "manual_vars.js"), proj])
 
-    banner("9/12  调试器真实 DAP 会话（lldb-dap）")
+    banner("11/13 调试器真实 DAP 会话（lldb-dap）")
     # ★ 用户源文件名不再是固定的 main.c（模板默认给的是 camera.c，
     #   而且用户可以任意命名）。所以这里动态挑一个真实存在的 .c，
     #   避免测试因为"模板换了默认文件名"而误报失败。
@@ -253,7 +262,7 @@ def main():
                 os.path.join(proj, ".scut", "bin", "scut_sim.exe"),
                 user_c_src])
 
-    banner("10/12  Webview 渲染（真实 Chromium + 真实帧数据）")
+    banner("12/13 Webview 渲染（真实 Chromium + 真实帧数据）")
     wv_out = os.path.join(tempfile.gettempdir(), "scut_wv_test")
     ok, out = run("webview", ["node", os.path.join(HERE, "webview_render.js"),
                               os.path.join(proj, ".scut", "frames"), wv_out])
@@ -263,7 +272,7 @@ def main():
         print("  --> ❌ 脚本成功退出，但渲染判定未通过")
 
     if args.also_cn:
-        banner("11/12  端到端（含空格 + 中文的工程路径）")
+        banner("13/13 端到端（含空格 + 中文的工程路径）")
         cn = os.path.join(tempfile.gettempdir(), "scut proj 中文", "demo")
         if os.path.isdir(cn):
             run("cn-e2e", ["node", os.path.join(HERE, "extension_smoke.js"),
@@ -272,7 +281,7 @@ def main():
         else:
             print("  SKIP  中文路径工程不存在：%s" % cn)
     else:
-        banner("11/12  跳过（用 --also-cn 启用中文路径端到端）")
+        banner("13/13 跳过（用 --also-cn 启用中文路径端到端）")
 
     banner("汇总")
     npass = sum(1 for _, ok, _ in results if ok)

@@ -22,11 +22,22 @@ scut_symbols.py -- 从 DWARF 自动发现用户代码的全局变量，生成 Wa
 ================================================================================
 流水线（两遍编译用户 TU；用户代码很小，代价可忽略）：
 ================================================================================
-    1) gcc -g -O0 -c user.c -o user.o                      # 探针编译，产出 DWARF
+    1) clang -g -O0 -c user.c -o user.o                    # 探针编译，产出 DWARF
     2) python scut_symbols.py --obj user.o --src user.c \
               --out-c user.wrapped.c --out-json user.vars.json
-    3) gcc -g -O0 -c user.wrapped.c -o user.o              # 真正的目标文件
+    3) clang -g -O0 -c user.wrapped.c -o user.o            # 真正的目标文件
     4) 链接
+
+★ 上面写的是 clang 而不是 gcc：本环境的编译器固定为 clang（LLVM-MinGW），
+  它的 DWARF 输出与 binutils objdump 的组合是实测过的通路
+  （见 docs/实测证据.md 的 A-18/A-19）。这里原先写 gcc，
+  会让人以为换 gcc 也行 —— 而 objdump 对两者的间接字符串格式并不相同。
+
+★ 本脚本【不设版本闸门】：它只有 argparse/json/re/subprocess/sys/collections
+  五个标准库 import，语法在 Python 3.6 上也能跑。
+  调用方 scut_build.py 有 3.7 闸门（因为那边用了 __future__ annotations），
+  而且它会把【同一个解释器】同时用于两个脚本 —— 所以实际下限由那边决定，
+  这里重复设一道闸门只会制造"两个脚本下限不一致"的困惑。
 """
 import argparse
 import json

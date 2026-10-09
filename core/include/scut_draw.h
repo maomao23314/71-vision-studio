@@ -49,11 +49,19 @@ void  SCUT_OutImageSet(int x, int y, scut_u8 value);
 void  SCUT_OutImageSetRGB(int x, int y, scut_u8 r, scut_u8 g, scut_u8 b);
 scut_u8 SCUT_OutImageGet(int x, int y);
 
-/* --- 覆盖层尺寸查询（供绘制代码做自适应） --- */
+/* --- 覆盖层尺寸查询（供绘制代码做自适应） ---
+ *
+ * ★ 这里【只有】输出图/覆盖层的尺寸，没有"输入图尺寸"的访问器。
+ *   原因是原先那一对 SCUT_GetImageWidth/Height 的实现与本函数
+ *   逐字相同（都返回同一组 s_w/s_h），名字却暗示输入图 —— 会骗人，已删除。
+ *   需要输入图尺寸请用 SCUT_GetInputImage(&w, &h)：
+ *   它回填的是真正的输入图宽高，且只在 PROCESS 阶段有效
+ *   （其余阶段返回 NULL 并记一次违规，防止把图像处理藏进不计时的阶段）。
+ *
+ * 未绑定时返回 0，因此 `for (x = 0; x < SCUT_GetOutputWidth(); x++)`
+ * 在未绑定时自然退化成空循环。 */
 int SCUT_GetOutputWidth(void);
 int SCUT_GetOutputHeight(void);
-int SCUT_GetImageWidth(void);
-int SCUT_GetImageHeight(void);
 
 /* --- 核心内部使用：由 frame 模块绑定实际缓冲 ---
  * gray_stride 单位是【字节】（RGB 下 = 宽度 × 3）；

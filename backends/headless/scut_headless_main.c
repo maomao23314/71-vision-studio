@@ -15,15 +15,27 @@
  *  输出协议（供 VsCode 插件 / CI 消费）
  *  ---------------------------------------------------------------------------
  *  每帧输出一行 JSON 到 stdout（--json 模式），格式：
- *    {"frame":1,"w":188,"h":120,"img":"<path to pgm>",
- *     "pic":"<path to source image>","timing":{...}}
- *  变量快照单独输出：
- *    {"vars":[{"name":"g_threshold","values":"128","truncated":false}, ...]}
+ *    {"frame":1,"w":188,"h":120,"img":"<path to ppm>",
+ *     "pic":"<path to source image>",
+ *     ["loadError":"<短中文原因>",]        ← 仅当本帧加载失败时出现
+ *     "bench":false,
+ *     "vars":[{"name":..,"kind":..,"dim":..,"total":..,"values":"..",
+ *              "truncated":bool}, ...],     ← 每帧内嵌，面板数值与画面同步
+ *     "timing":{"processUs":..,"drawUs":..,"frameUs":..,
+ *               "cycles":..,"cyclesValid":bool}}
  *
- *  ★ "pic" 是【本帧输入所用的测试图路径】，是本轮新增的追加字段：
+ *  ★ 帧图是 **PPM(P6)**，不是 PGM —— 输出缓冲改成 RGB 三通道之后换的
+ *    （PGM 只能表达单通道灰度）。这里原先写成 "<path to pgm>"，
+ *    照它去写解析器会按灰度格式读彩色数据。
+ *
+ *  ★ 变量快照【也】有一条独立输出行（仅 --list-vars 模式）：
+ *    {"vars":[{"name":"g_threshold","values":"128","truncated":false}, ...]}
+ *    会话模式（--json --step）下快照随帧走，不再单独发。
+ *
+ *  ★ "pic" 是【本帧输入所用的测试图路径】：
  *    IDE 要在界面上显示「这一帧看的是哪张图」，否则批跑整组图时
- *    画面与文件对不上号，用户只能靠帧号去猜。除此之外，
- *    JSON 的形状、字段名、字段顺序一律未动（只增不改）。
+ *    画面与文件对不上号，用户只能靠帧号去猜。
+ *    追加字段一律排在旧字段后面（只增不改），老解析端照常工作。
  *
  *  ★ 关于 "pic" 的【取值格式】（本轮调整）：
  *    修复"测试图找不到"的 bug 之后，内部使用的图片路径变成了绝对路径
@@ -132,8 +144,13 @@ static void ensure_dir(const char *path)
  *   如果这里不做兜底，用户手上任何一份老 config.h 都会让宿主
  *   直接编译失败，而报错信息是「SCUT_PIC_DIR 未声明」，
  *   完全看不出「其实是你配置头文件版本旧了」。
- *   所以这里给出与 templates/starter/config.h 逐字一致的默认值：
- *   老工程能编译、新工程以 config.h 为准，两边都不需要改代码。
+ *   所以这里给出与历史 config.h 逐字一致的默认值
+ *   （`SCUT_PIC_DIR "pic/1"` / `SCUT_PIC_EXT ".bmp"`）：
+ *   老工程能编译、新工程以 scut_project.json 为准，两边都不需要改代码。
+ *
+ * ★ 注意 templates/starter/ 里【没有】config.h ——
+ *   新模板是 scut_project.json + code/camera.c。
+ *   这里的默认值只在"既没有 --pic、也没有老 config.h"时兜底。
  *
  * ★ 用 #ifndef 而不是 #define 覆盖：
  *   宏在 include 链上已经定义过就是权威，绝不在这里重新定义 ——
@@ -1645,6 +1662,13 @@ static int scut_pic_load(int index)
             why  = "读取文件失败（IO 错误或文件为空）。";
             next = "请确认文件未损坏、且磁盘可读。";
             break;
+        case SCUT_FRAME_ERR_NOMEM:
+            /* ★ 必须与"格式不支持"分开说：那张图本身没问题，
+             *   照"请转格式"的提示去做永远解决不了。 */
+            why  = "内存不足：这张图太大，分配解码缓冲失败了。"
+                   "图片本身没有问题。";
+            next = "换成尺寸小一些的测试图，或关掉其它占用内存的程序后重试。";
+            break;
         default:
             why  = "解码失败。";
             next = "请把这张图发给环境维护者，并附上下面的错误码。";
@@ -2183,8 +2207,13 @@ static void on_frame(void *user)
     /* ----------------------------------------------------------------------
      *  ★ 把用户算法写的 SCUT_Log 行送到扩展（之前【没人取】，日志区永远空）
      *
-     *  为什么放这里：REPORT 角色回调结束后，日志缓冲正好装着本帧的输出；
-     *  核心的阶段门控在 REPORT 结束时会关闸，下一帧开始前不会有新行。
+     *  为什么放这里：本函数是 frame sink，被核心在 DRAW 阶段【跑完之后】调用
+     *  （见 scut_sched.c 的 run_one_frame：DRAW → 合成 → 清空 → sink）。
+     *  也就是说此刻日志缓冲里装的是本帧 DRAW 阶段的输出，而 DRAW 的日志门控
+     *  已经关闸、下一帧开始前不会有新行 —— 正好是取走这一批的时机。
+     *  ★ 注意不是"REPORT 阶段"：核心只有 INIT / PROCESS / DRAW 三个阶段，
+     *    REPORT 是旧实现的角色，早已删除。
+     *
      *  送到 stderr 而不是 stdout：stdout 是 JSON 协议通道（扩展逐行解析），
      *  日志混进去会炸掉解析；扩展对 stderr 是【透传到日志区】的，
      *  用户在界面「日志」折叠区里就能看到。
@@ -2218,10 +2247,17 @@ static void on_frame(void *user)
      *  这里是本功能最容易写错、且错了以后最难发现的地方，所以写清楚：
      *
      *  一帧的时间线是
-     *      PRE_FRAME → PROCESS(读输入图) → POST_FRAME → frame sink(本函数)
-     *                → DRAW → REPORT
+     *      PROCESS(读输入图) → 默认底图 → DRAW(画标注/打日志) → 合成覆盖层
+     *                → 清空覆盖层 → frame sink(本函数)
      *  也就是说，本函数被调用时，第 N 帧的算法【已经跑完】、
      *  它的结果也已经写盘并报出去了。
+     *
+     *  ★ 更正（曾经写错并把它升格成了"契约"）：
+     *    这里原先把顺序写成 PRE_FRAME → PROCESS → POST_FRAME → sink → DRAW → REPORT，
+     *    那三个阶段早已删除，而且 **sink 的位置也写反了**——
+     *    sink 在 DRAW 与合成【之后】，不是之前。真实顺序见
+     *    core/src/scut_internal.h 的阶段枚举与 scut_sched.c 的 run_one_frame。
+     *    把错误顺序写成"契约"是最糟的一种注释：后来者会照着它去"修正"代码。
      *
      *  于是：
      *    · 在【开头】推进 → 载入的是第 N+1 张图，但第 N 帧的结果
@@ -2254,7 +2290,8 @@ static void on_frame(void *user)
      *        也就是说「一次换行 = 前进一张并处理它」，既不多也不少。
      *
      *    · 运行：连续喂 '\n'
-     *        → 每帧换下一张，到第 s_pic_count 张之后回绕到第 1 张，
+     *        → 每帧换下一张，到图集最后一张之后回绕到【图集起点】（s_pic_first，
+ *          0 起图集就是 0），
      *          如此循环。这就是"播放整组图"的期望行为。
      *
      *  ★ 为什么"预载"这一步不能省（它是单步体验的关键）：
@@ -2279,7 +2316,7 @@ static void on_frame(void *user)
      *    （默认第 1 张）。本函数里的推进是它【之后】才发生的。
      *
      *  ★★ 没有独立的 --loop 开关，也不应该有 ★★
-     *    回绕行为已经写在 scut_pic_next() 里（越过最后一张就回到第 1 张），
+     *    回绕行为已经写在 scut_pic_next() 里（越过最后一张就回到图集起点），
      *    也就是说 --advance 本身就【自带循环】。
      *    再加一个 --loop 会立刻产生一个问题：--advance 不带 --loop 时
      *    到底该停在最后一张、还是继续停在那儿空转？两个开关的组合语义
@@ -2536,8 +2573,13 @@ int main(int argc, char **argv)
                        ? scut_pic_path_display()
                        : "(该图加载失败，本帧为黑图，原因见上方提示)");
             if (o.advance) {
-                printf("逐帧推进: 开启（每帧切换到下一张，到第 %d 张后回到第 1 张）\n",
-                       scut_pic_count());
+                /* ★ 回绕目标是 s_pic_first，不是写死的 1：
+                 *   0 起编号的图集（pic/0.png、pic/1.png…）要回到 0 号，
+                 *   说成"回到第 1 张"会把用户引到错的地方 ——
+                 *   而这条是直接打给用户看的。 */
+                printf("逐帧推进: 开启（每帧切换到下一张，"
+                       "到第 %d 张后回到第 %d 张）\n",
+                       scut_pic_count() + s_pic_first - 1, s_pic_first);
             }
         } else {
             printf("测试图集 %s（共 0 张）—— 本帧输入为全黑图像，"

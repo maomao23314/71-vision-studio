@@ -35,16 +35,6 @@ scut_phase_t scut_input_get_phase(void)
     return s_phase;
 }
 
-int scut_input_violations(void)
-{
-    return s_violations;
-}
-
-void scut_input_reset_violations(void)
-{
-    s_violations = 0;
-}
-
 /* --------------------------------------------------------------------------
  * 输入图像访问器
  *
