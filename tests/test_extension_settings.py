@@ -1,245 +1,211 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""设置项归口 —— 配置必须且只能来自 scut_project.json。
+
+★★ 这条测试为什么存在 ★★
+
+0.9.3 把 20 项配置写进 package.json 的 contributes.configuration，
+并分了四个组（工具链 / 工程配置 / 运行期 / 面板与显示）。结果三重坑：
+
+  ① 嵌套 object 分组【不注册内层键】
+        "scut71.toolchain": { "type": "object",
+                              "properties": { "scut71.toolchain.path": {...} } }
+     VS Code 只注册 properties 的顶层键，所以注册的是【一个名叫
+     scut71.toolchain 的对象型设置】，内层 properties 只是 JSON Schema。
+
+  ② 后果之一：cfg.get('path') 读不到，静默返回默认值
+        用户在设置页填了工具链路径，插件完全看不见，而且不报错。
+
+  ③ 后果之二：cfg.update('path', ...) 直接抛
+        「没有注册配置 scut71.toolchain.path」  ← 用户在自检报告里看到的
+
+除了这三个，还有两个更隐蔽的：
+
+  ④ 同一份数据有两个真值：scut_project.json 的 pic.dir 与设置的
+     scut71.runtime.picDir。project.ts 里写的是
+        fromSettings ?? fromProjectConfig
+     也就是【设置压过工程配置】—— 工程 JSON 里配的图集目录根本不生效。
+
+  ⑤ UI 上存在没人读的字段：view.showTiming / showVariables / showLog /
+     pickPersist 四项全项目没有任何代码读取（勾选的持久化由 webview 的
+     setState 完成）。用户勾了「不显示日志」，日志照旧出现。
+
+所以这一版把配置完全交给 scut_project.json。本文件守住这个约定：
+
+    A. package.json 里不许再有 contributes.configuration
+    B. 源码里不许再读 VS Code 的 scut71.* 设置
+    C. UI 上每个字段都必须【真的有人读】—— 没有读取点的字段就是死界面
+    D. scut_project.json 的形状（projectconfig.ts）与构建脚本的默认值
+       （scut_build.py）必须逐字一致 —— 两边是同一份数据的两个视图
 """
-test_extension_settings.py —— 设置项分组的一致性回归。
-
-★★★ 这个测试为什么存在 ★★★
-
-2026-10-11 把 16 项设置分成四个子栏目（工具链 / 工程配置 / 运行期 / 面板与显示）。
-这类改动有一个特别危险的性质：
-
-    ★ 读错设置名【不会报错】，只会静默退回默认值 ★
-
-也就是说，漏改一个读取点不会让任何测试变红，只会让用户
-"明明在设置里改了，却一点反应都没有" —— 而且现象出现在编译产物上，
-排查时根本想不到要去查读取点。
-
-实际改的时候就有 9 处读取点（cfg.get / cfg.update / affectsConfiguration），
-手工核对漏一处是迟早的事，所以这里把它变成断言。
-
-检查两件事：
-    ① package.json 里声明的设置键，与源码里读写的键【完全一致】
-       （不多、不少、不重名）
-    ② 源码里不得残留【旧的扁平键名】 —— 那种写法不报错，只是失效
-"""
+import io
 import json
 import os
 import re
 import sys
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-except (AttributeError, ValueError):
-    pass
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+EXT = os.path.join(ROOT, 'extension')
+SRC = os.path.join(EXT, 'src')
+PKGJSON = os.path.join(EXT, 'package.json')
+BUILD = os.path.join(ROOT, 'tools', 'scut_build.py')
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
-EXT = os.path.join(ROOT, "extension")
-
-# 这些是 0.9.3 之前的扁平键名。任何一个出现在源码里都是 bug：
-# 它读/写的是一个"设置界面里不存在、但确实存在"的键。
-LEGACY_KEYS = [
-    "toolchainPath", "autoDownloadToolchain", "autoWatch",
-    "imageWidth", "imageHeight", "inputArray", "outputArray",
-    "initFunctions", "frameFunctions", "postFunctions",
-    "picDir", "picExt", "startFrame", "processRepeat",
-    "benchRepeat", "runFrames",
-]
-
-# 分组名（package.json 里的子栏目 id）
-SECTIONS = ["scut71.toolchain", "scut71.project", "scut71.runtime", "scut71.view"]
+bad = []
+note = []
 
 
-def declared_keys():
-    """返回 {设置键: 子栏目名}。"""
-    with open(os.path.join(EXT, "package.json"), "r", encoding="utf-8") as f:
-        pkg = json.load(f)
-    out = {}
-    props = pkg["contributes"]["configuration"]["properties"]
-    for sec_id, sec in props.items():
-        if sec.get("type") != "object" or "properties" not in sec:
-            # 还是扁平的（没分组）
-            out[sec_id] = "(flat)"
-            continue
-        for k in sec["properties"]:
-            if k in out:
-                raise AssertionError("设置键重复声明：%s" % k)
-            out[k] = sec_id
-    return out
+def strip_comments(t):
+    t = re.sub(r"/\*[\s\S]*?\*/",
+               lambda m: "".join("\n" if c == "\n" else " " for c in m.group(0)), t)
+    return re.sub(r"//[^\n]*", lambda m: " " * len(m.group(0)), t)
 
 
-def src_files():
-    d = os.path.join(EXT, "src")
-    for name in sorted(os.listdir(d)):
-        if name.endswith(".ts"):
-            yield os.path.join(d, name)
+def read(p):
+    return io.open(p, encoding='utf-8').read()
 
 
-def main():
-    bad = []
+def fail(msg):
+    bad.append(msg)
 
-    # ---------- ① 分组结构本身 ----------
-    keys = declared_keys()
-    got_sections = sorted(set(keys.values()))
-    if got_sections != sorted(SECTIONS):
-        bad.append("子栏目不对。\n    期望: %s\n    实际: %s"
-                   % (sorted(SECTIONS), got_sections))
 
-    flat = [k for k, v in keys.items() if v == "(flat)"]
-    if flat:
-        bad.append("这些设置还没分组（应为 object 子栏目）：%s" % flat)
+# ==================================================================
+#  A. package.json 不许再有 contributes.configuration
+# ==================================================================
+pkg = json.loads(read(PKGJSON))
+contrib = pkg.get('contributes', {})
+if 'configuration' in contrib:
+    keys = list(contrib['configuration'].get('properties', {}))
+    fail('★ package.json 仍有 contributes.configuration（%d 项）\n'
+         '    0.9.3 的坑就在这里：嵌套 object 分组【不注册内层键】，\n'
+         '    于是 cfg.get 读不到、cfg.update 抛「没有注册配置」。\n'
+         '    配置已经全部搬到 scut_project.json，这里必须删干净。\n'
+         '    残留键：%s' % (len(keys), ', '.join(keys[:8])))
+else:
+    note.append('package.json 已无 contributes.configuration（配置只在工程 JSON）')
 
-    # ---------- ②③ 逐个读取点核对所属分组 ----------
-    # 抓的是这一类错误：
-    #     getConfiguration('scut71.runtime').get<number>('benchRepeat')  ✔ 对
-    #     getConfiguration('scut71').get<number>('benchRepeat')            ✘ 错
-    # 错的那个读不到键（键已迁到 scut71.runtime），会静默退回默认值。
-    #
-    # ★ 三点都是被自己的负向验证逼出来的 ★
-    #   ① 必须【跨行】匹配：本项目的写法是
-    #        const cfg = vscode.workspace.getConfiguration('scut71');
-    #        const n = cfg.get<number>('benchRepeat', 1000);
-    #      getConfiguration 和 .get 根本不在同一行。用单行正则会漏掉
-    #      【全部】真实读取点 —— 也就是这个检查会永远显示"通过"，
-    #      而它恰恰是本文件唯一要做的事。
-    #   ② 必须【先剥掉注释】：注释里提到旧键名是正常的说明文字。
-    #   ③ 必须能识别【变量拼接】的栏目名：projectconfig.ts 写的是
-    #        getConfiguration(NS + '.project')      NS 是模块常量 'scut71'
-    #      只认字面量的话，7 个工程配置键全都逃出了检查（实测确认）。
-    #      所以先把 NS 常量的值解析出来，再展开拼接。
-    #   ④ 泛型参数是【可选】的：pushConfigToSettings 里写的是
-    #        p.update('imageWidth', cfg.image.width, t);   ← 没有 <T>
-    #      而 pullConfigFromSettings 写的是 p.get<number>('imageWidth', 188);
-    #      两种都得匹配到，否则 7 个工程配置键一个都查不到
-    #      （实测：严格版只认出 7 个里的 get 那半，update 那半全漏）。
+# configurationDefaults 是改【别人】的设置（关 cpptools），不是自己的配置项，
+# 属于完全不同的机制，必须留着。
+if 'configurationDefaults' not in contrib:
+    fail('★ configurationDefaults 被误删了 —— 它用来关掉 cpptools 的 '
+         'intellisense，不是本插件自己的配置项')
 
-    def strip_comments(text):
-        """把 // 与 /* */ 注释换成等长空白，保持行号不变。"""
-        text = re.sub(r"/\*[\s\S]*?\*/",
-                      lambda m: "".join("\n" if ch == "\n" else " " for ch in m.group(0)),
-                      text)
-        text = re.sub(r"//[^\n]*", lambda m: " " * len(m.group(0)), text)
-        return text
+# ==================================================================
+#  B. 源码里不许再读 VS Code 的 scut71.* 设置
+# ==================================================================
+leftover = []
+for fn in sorted(os.listdir(SRC)):
+    if not fn.endswith('.ts'):
+        continue
+    for i, line in enumerate(read(os.path.join(SRC, fn)).split('\n'), 1):
+        clean = strip_comments(line)
+        if 'getConfiguration' in clean and 'scut71' in clean:
+            leftover.append('%s:%d  %s' % (fn, i, clean.strip()[:76]))
+if leftover:
+    fail('★ 源码里还有 %d 处读 VS Code 的 scut71.* 设置：\n    %s\n'
+         '    这些键已经不存在（contributes.configuration 已删），\n'
+         '    读了只会静默拿到默认值。改读 scut_project.json。'
+         % (len(leftover), '\n    '.join(leftover)))
+else:
+    note.append('源码零处读取 VS Code 的 scut71.* 设置')
 
-    def namespace_of(text):
-        """解析模块常量 NS 的值（extension.ts 里 const NS = 'scut71';）。"""
-        m = re.search(r"\bNS\s*=\s*'([A-Za-z0-9_.]+)'", text)
-        return m.group(1) if m else "scut71"
+# ==================================================================
+#  C. UI 上每个字段都必须真的有人读（防死界面）
+# ==================================================================
+cf = read(os.path.join(SRC, 'configfields.ts'))
+field_re = re.compile(r"path:\s*\[([^\]]*)\]")
+declared = []
+for m in field_re.finditer(strip_comments(cf)):
+    parts = re.findall(r"'([^']+)'", m.group(1))
+    if parts:
+        declared.append(parts)
 
-    # 栏目名的三种写法：字面量 / NS + '.x' / 纯 NS（= 旧扁平键）
-    section_re = re.compile(
-        r"getConfiguration\(\s*(?:"
-        r"'([A-Za-z0-9_.]+)'"                     # 'scut71.runtime'
-        r"|([A-Za-z_][A-Za-z0-9_]*)\s*\+\s*'\.([a-zA-Z]+)'"  # NS + '.runtime'
-        r"|([A-Za-z_][A-Za-z0-9_]*)"              # 裸 NS
-        r")\s*\)"
-    )
-    get_re = re.compile(r"\.\s*(?:get|update)(?:<[^>]*>)?\(\s*'([A-Za-z]+)'")
+# 只在自己写的文件里提到，不能算"有人用" —— 那只能证明字段存在。
+AUTHORED = {'configfields.ts', 'projectconfig.ts', 'settingsview.ts'}
 
-    sites = 0
-    for p in src_files():
-        rel = os.path.relpath(p, ROOT)
-        with open(p, "r", encoding="utf-8") as f:
-            raw = f.read()
-        clean = strip_comments(raw)
-        ns = namespace_of(clean)
-        for m in section_re.finditer(clean):
-            literal, var, suffix, bare = m.groups()
-            if literal:
-                section = literal
-            elif var:
-                section = "%s.%s" % (ns, suffix)
-            else:
-                section = ns           # 裸 NS = 读扁平键，这里判为错
-            window = clean[m.end():m.end() + 600]
-            lineno = clean.count("\n", 0, m.start()) + 1
-            # ★ 同一段代码里可能连着读/写【多个】键（projectconfig.ts 里
-            #   pushConfigToSettings 一口气 7 个 p.update）。
-            #   所以要 finditer 全部收下，只取第一个会漏掉其余 6 个。
-            found = list(get_re.finditer(window))
-            if not found:
-                continue               # 这个 getConfiguration 后面没有 .get/.update
-            for gm in found:
-                key = gm.group(1)
-                sites += 1
-                full = "%s.%s" % (section, key)
-                if full in keys:
-                    if keys[full] != section:
-                        bad.append("%s:%d  读到 %s，但它属于 %s"
-                                   % (rel, lineno, full, keys[full]))
-                elif section == "scut71":
-                    bad.append(
-                        "%s:%d  ★ 读了旧的扁平键 scut71.%s —— "
-                        "不会报错，只会静默退回默认值（用户改了没反应）"
-                        % (rel, lineno, key))
-                else:
-                    # ★ 挂在某个分组下，但【没有这个分组下的这个键】。
-                    #   分组时最容易犯的就是"挂错栏目"：
-                    #       getConfiguration('scut71.view').get('benchRepeat')
-                    #   benchRepeat 明明属于 runtime，于是读不到，
-                    #   而且不报错、只是静默退回默认值。
-                    #   （负对照第 3 例抓到的就是这个：原判断只有
-                    #     "section == scut71" 才报错，把这种漏掉了。）
-                    owner = [s for s, v in keys.items() if key in v]
-                    hint = ('，它其实属于 %s' % owner[0]) if owner else ''
-                    bad.append(
-                        "%s:%d  ★ %s.%s 不是有效的设置键%s —— "
-                        "读不到值，会静默退回默认值"
-                        % (rel, lineno, section, key, hint))
+# 收集所有非 authored 文件的正文
+others = {}
+for fn in sorted(os.listdir(SRC)):
+    if fn.endswith('.ts') and fn not in AUTHORED:
+        others[fn] = strip_comments(read(os.path.join(SRC, fn)))
+build_py = read(BUILD)
 
-    # ---------- ③b 覆盖度自检：正则有没有失灵 ----------
-    # 20 个键里，projectconfig.ts 一个就占 7 个读取点。
-    # 若哪天有人改坏正则，最可能的结果就是"匹配数掉到个位数却依然全绿"。
-    # 所以这里给一个下限，掉下去直接判失败。
-    MIN_SITES = 12
-    if sites < MIN_SITES:
-        bad.append(
-            "★ 只找到 %d 个读取点（下限 %d）—— 正则多半是失灵了，"
-            "不是代码没问题。改这个文件前先验证正则还能匹配。"
-            % (sites, MIN_SITES))
+dead = []
+for parts in declared:
+    leaf = parts[-1]
+    hit = any(leaf in body for body in others.values()) or (leaf in build_py)
+    if not hit:
+        dead.append('.'.join(parts))
+if dead:
+    fail('★ UI 上有 %d 个字段【没有任何代码读取】：%s\n'
+         '    这就是死界面：用户勾了/填了却没效果，\n'
+         '    还会反过来怀疑是自己用错了。要么接上读取，要么删掉。'
+         % (len(dead), ', '.join(dead)))
+else:
+    note.append('UI 上 %d 个字段全部有真实读取点' % len(declared))
 
-    # ---------- ④ 设置按钮与命令必须成对存在 ----------
-    with open(os.path.join(EXT, "src", "simview.ts"), "r",
-              encoding="utf-8") as f:
-        simview = f.read()
-    with open(os.path.join(EXT, "media", "simview.js"), "r",
-              encoding="utf-8") as f:
-        simjs = f.read()
-    with open(os.path.join(EXT, "package.json"), "r", encoding="utf-8") as f:
-        pkg_text = f.read()
+# ==================================================================
+#  D. TS 的 ProjectConfig 形状 与 Python 的 DEFAULT_CONFIG 必须一致
+# ==================================================================
+pcSrc = read(os.path.join(SRC, 'projectconfig.ts'))
 
-    if 'id="btn-settings"' not in simview:
-        bad.append("仿真面板里没有 btn-settings 按钮")
-    if "btn-settings" not in simjs:
-        bad.append("media/simview.js 里没有给 btn-settings 绑事件")
-    if "cmd === 'settings'" not in simview:
-        bad.append("simview.ts 没有处理 settings 命令（按钮点了没反应）")
-    if '"scut71.openSettings"' not in pkg_text:
-        bad.append("package.json 里没有声明 scut71.openSettings 命令")
+# ★ 两边都只认【恰好 4 空格缩进】的一级键 ★
+#   不加缩进限制会把嵌套的第二层键（width / dir / processRepeat …）
+#   也当成一级字段，于是报告一堆并不存在的"两边不一致"。
+#   这个坑今天已经踩第二次了 —— 检查脚本出错时，最像 bug 的表现
+#   就是"报了一堆错"，而不是"什么都不报"。
+m = re.search(r"interface\s+ProjectConfig\s*\{(.*?)\n\}", pcSrc, re.S)
+if not m:
+    fail('★ projectconfig.ts 里找不到 interface ProjectConfig')
+    ts_top = []
+else:
+    body = strip_comments(m.group(1))
+    ts_top = re.findall(r"^\s{4}([a-zA-Z][a-zA-Z0-9_]*)\s*[:;]", body, re.M)
 
-    # ---------- 汇总 ----------
-    print("=" * 68)
-    print("  设置项分组一致性")
-    print("=" * 68)
-    by_sec = {}
-    for k, v in keys.items():
-        by_sec.setdefault(v, []).append(k)
-    for sec in sorted(by_sec):
-        print("  %-16s %d 项" % (sec, len(by_sec[sec])))
-    print()
-    print("  核对到的读取点: %d 个" % sites)
+m2 = re.search(r"DEFAULT_CONFIG:\s*Dict\[str,\s*Any\]\s*=\s*\{(.*?)\n\}",
+               read(BUILD), re.S)
+if not m2:
+    fail('★ scut_build.py 里找不到 DEFAULT_CONFIG')
+    py_top = []
+else:
+    py_top = re.findall(r'^\s{4}"([a-zA-Z][a-zA-Z0-9_]*)"\s*:', m2.group(1), re.M)
+
+if ts_top and py_top:
+    only_ts = [k for k in ts_top if k not in py_top]
+    only_py = [k for k in py_top if k not in ts_top]
+    if only_ts or only_py:
+        fail('★ scut_project.json 的形状两边不一致 —— 同一份数据的两个视图'
+             '不能各写一套：\n'
+             '    只在 projectconfig.ts: %s\n'
+             '    只在 scut_build.py   : %s\n'
+             '    后果：插件写的字段脚本读不到，或反过来。'
+             % (', '.join(only_ts) or '（无）', ', '.join(only_py) or '（无）'))
+    else:
+        note.append('两边形状一致（%d 个一级段：%s）'
+                    % (len(ts_top), ', '.join(ts_top)))
+
+# ---- run 段的默认值两边也必须一致（最容易各写一套的地方）----
+for key, expect in [('processRepeat', 1), ('runFrames', 60), ('benchRepeat', 1000)]:
+    if re.search(r"%s:\s*number;" % key, pcSrc) is None:
+        continue
+    if '"%s": %d' % (key, expect) not in read(BUILD):
+        fail('★ run.%s 的默认值两边不一致（scut_build.py 应为 %d）' % (key, expect))
+
+# ==================================================================
+#  报告
+# ==================================================================
+print('=' * 66)
+print('  设置项归口检查')
+print('=' * 66)
+for n in note:
+    print('  ✔ %s' % n)
+print()
+
+if bad:
+    print('=' * 66)
     for b in bad:
-        print("  ❌ " + b)
-    if not bad:
-        print("  ✅ 分组、读取点、按钮链路全部一致")
-    ok = not bad
-    print()
-    print("=" * 68)
-    print("  %s  设置项分组" % ("✅ 通过" if ok else "❌ 失败"))
-    print("=" * 68)
-    return 0 if ok else 1
+        print('  ❌ %s' % b)
+    print('=' * 66)
+    print('  ❌ 失败  设置项归口')
+    sys.exit(1)
 
-
-if __name__ == "__main__":
-    sys.exit(main())
+print('  ✅ 通过  设置项归口')
+sys.exit(0)

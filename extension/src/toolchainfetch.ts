@@ -34,6 +34,8 @@ import * as https from 'https';
 import { spawn, type ChildProcess } from 'child_process';
 import type { IncomingMessage } from 'http';
 import { URL } from 'url';
+import { detectProject } from './project';
+import { defaultConfig, readConfig } from './projectconfig';
 
 export interface FetchProgress { (message: string, percent?: number): void; }
 
@@ -473,11 +475,23 @@ function removeQuietly(target: string): void {
     } catch { /* 故意忽略 */ }
 }
 
-/** 用户是否允许自动下载。★ 读设置失败时按「允许」处理，不能因此把「到手即用」卡住。 */
+/**
+ * 用户是否允许自动下载。
+ *
+ * ★ 默认允许，但不能因此把「到手即用」卡住 ★
+ *   读不到工程配置（还没打开工程、文件坏了）时按允许处理 ——
+ *   这个默认值让插件在"什么都不知道"时依然能用，
+ *   而不是抛错或卡住。真正要拦下载的场合不多，
+ *   而误拦一次的代价（用户以为插件坏了）比多下一个 165MB 更大。
+ */
 function autoDownloadEnabled(): boolean {
     try {
-        // ★ 0.9.3 起归在「工具链」子栏目下（见 package.json）。
-        return vscode.workspace.getConfiguration('scut71.toolchain').get<boolean>('autoDownload', true) !== false;
+        const project = detectProject();
+        if (!project) {
+            return true;
+        }
+        const { config } = readConfig(project.root);
+        return (config ?? defaultConfig()).toolchain.autoDownload;
     } catch {
         return true;
     }

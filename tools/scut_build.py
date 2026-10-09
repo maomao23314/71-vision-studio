@@ -800,13 +800,44 @@ def parse_image_size(header: str) -> Tuple[int, int]:
 
 PROJECT_CONFIG_NAME = "scut_project.json"
 
-# 默认配置。键名与 extension/src/projectconfig.ts 的接口一一对应。
+# 默认配置。键名与 extension/src/projectconfig.ts 的 interface 一一对应。
+#
+# ★★★ 0.9.4 起：配置只有这一个真值来源 ★★★
+#
+#   以前有两处，且互相覆盖：
+#       VS Code settings.json  scut71.runtime.picDir / picExt / startFrame
+#       工程 scut_project.json  pic.dir / pic.ext / pic.start
+#   插件里写的是 fromSettings ?? fromProjectConfig，
+#   也就是【设置页压过工程配置】—— 工程 JSON 里配了图集目录却不生效，
+#   排查起来极难发现（不报错，只是"配了没用"）。
+#
+#   现在：全部搬进本文件，settings.json 不再参与。
+#   理由有三，都不是"风格偏好"：
+#     ① 唯一真值。配置跟着工程走，能进 git、发给同学、换机器不丢。
+#     ② 不再依赖 contributes.configuration。那套机制有真实缺陷：
+#        嵌套 object 分组【不会注册内层键】，导致 cfg.get 静默拿不到值、
+#        cfg.update 直接抛「没有注册配置」。用户为此排查了很久。
+#     ③ 用户打开 scut_project.json 就能看到全部配置，所见即所得。
+#
+#   图像宽高仍在这份文件里，且它们同时被写进 scut_config.h ——
+#   C 里数组大小是编译期常量，运行期改不了，这是语言硬约束。
 DEFAULT_CONFIG: Dict[str, Any] = {
     "image": {"width": 188, "height": 120},
     "inputArray": "mt9v03x_image",
     "outputArray": "",
     "hooks": {"init": [], "frame": [], "post": []},
+    # 图集。dir 空 = 用工程下的 pic/；ext 空 = 交给后端按实际文件探测。
     "pic": {"dir": "", "ext": "", "start": 1},
+    # 运行期行为：仿真进程启动参数与「运行 / 测速」的次数。
+    "run": {"processRepeat": 1, "runFrames": 60, "benchRepeat": 1000},
+    # ★ 故意没有 view 段 ★
+    #   面板显示开关（showTiming/showLog 之类）与勾选变量的持久化，
+    #   都由 VS Code 那边的面板机制完成。把它们也搬进这份工程配置，
+    #   只会造出一组【没人读】的字段 —— 用户勾了却没有任何效果，
+    #   反过来怀疑是自己用错了。宁缺毋滥。
+    # 本机工具链。path 空 = 依次探测：SCUT71_TOOLCHAIN 环境变量
+    # → 插件自动下载过的目录 → PATH；都找不到时弹窗问用户。
+    "toolchain": {"path": "", "autoDownload": True, "autoWatch": True},
 }
 
 

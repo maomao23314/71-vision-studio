@@ -19,6 +19,8 @@ import * as os from 'os';
 import { execFile } from 'child_process';
 import type { DoctorResult, Toolchain, ToolInfo } from './types';
 import { ensureToolchain, findInstalledToolchain } from './toolchainfetch';
+import { detectProject } from './project';
+import { defaultConfig, readConfig, writeConfig } from './projectconfig';
 
 /** 探测结果缓存：activate 不能因为探测慢而卡住，所以探测是异步 + 惰性 + 只做一次。 */
 let cached: Toolchain | undefined = undefined;
@@ -402,12 +404,64 @@ async function findPython(binDir: string | undefined): Promise<{ path?: string; 
     };
 }
 
+/**
+ * 读工程配置里的 toolchain 段。
+ *
+ * ★ 为什么工具链路径也进了工程配置（用户 2026-10-11 明确要求）★
+ *   整个插件的配置统一只留一个真值：`scut_project.json`。
+ *   以前它在 VS Code 设置里（scut71.toolchain.path），而
+ *   contributes.configuration 的嵌套 object 分组【不注册内层键】，
+ *   于是 cfg.get('path') 永远读不到 —— 用户在设置页填了，插件看不见，
+ *   而且不报错，只是静默当作没填（用户为此重装过 VS Code）。
+ *   现在面板直接读写 JSON，不再经过 VS Code 那套机制，也不再有两个真值。
+ *
+ * ★ 代价要说清楚 ★
+ *   工具链是【这台机器】的环境，放工程里意味着换台机器要重新填一次；
+ *   而且【没有打开工程时读不到它】（detectProject 返回 undefined），
+ *   此时下面返回空串，探测继续往下走环境变量 → PATH → 询问用户。
+ *   所以"没开工程"不会崩，只是享受不到这份配置而已 ——
+ *   打开工程后一切照常，而那本来就是插件的使用方式。
+ *
+ *   SCUT71_TOOLCHAIN 环境变量优先级最高，适合 CI 或临时换工具链。
+ */
+function configuredToolchainRoot(): string {
+    const project = detectProject();
+    if (!project) {
+        return '';          // 没有工程 → 当作没配置，继续往下探测
+    }
+    const { config } = readConfig(project.root);
+    return (config ?? defaultConfig()).toolchain.path.trim();
+}
+
+/**
+ * 把用户手动选的工具链目录记进工程配置。
+ *
+ * 写失败【不阻断探测】—— 目录已经选对了、编译器已经找到了，
+ * 这次编译能跑通；写不进去只是"下次还要再选一次"。
+ * 把它当致命错误处理，等于因为存个偏好而拦住用户干活。
+ */
+function saveToolchainRoot(root: string, warnings: string[]): void {
+    const project = detectProject();
+    if (!project) {
+        return;
+    }
+    const { config } = readConfig(project.root);
+    const next = config ?? defaultConfig();
+    next.toolchain.path = root;
+    try {
+        writeConfig(project.root, next);
+    } catch (e) {
+        warnings.push(
+            '已找到工具链，但没能把它记进工程配置'
+            + `（${e instanceof Error ? e.message : String(e)}）\n`
+            + '    本次编译不受影响，下次找不到工具链时会再问你一次。');
+    }
+}
+
 function detectImpl(allowDownload: boolean): Promise<Toolchain> {
     return (async () => {
         const warnings: string[] = [];
-        // ★ 0.9.3 起归在「工具链」子栏目下（见 package.json）。
-        const cfg = vscode.workspace.getConfiguration('scut71.toolchain');
-        const configured = (cfg.get<string>('path', '') ?? '').trim();
+        const configured = configuredToolchainRoot();
         const envRoot = (process.env.SCUT71_TOOLCHAIN ?? '').trim();
 
         // ---- 1) 工具链根目录：配置 > 环境变量 > 插件自下载 > 已知位置 ----
@@ -521,8 +575,12 @@ function detectImpl(allowDownload: boolean): Promise<Toolchain> {
                         lldbDap = firstExisting(binDir, ['lldb-dap.exe', 'lldb-dap']);
                         clangd = firstExisting(binDir, ['clangd.exe', 'clangd']);
                         ld = firstExisting(binDir, ['ld.lld.exe', 'ld.lld']);
-                        // 写回设置，下次不用再选
-                        await cfg.update('path', picked, vscode.ConfigurationTarget.Global);
+                        // 写回工程配置，下次不用再选。
+                        // ★ 原来这里是 cfg.update('path', …)，
+                        //   而那个键【从来没被注册过】，VS Code 直接抛
+                        //   「没有注册配置 scut71.toolchain.path」——
+                        //   用户在自检报告里看到的就是它。
+                        saveToolchainRoot(picked, warnings);
                     } else {
                         warnings.push(
                             `你选择的目录里没找到 bin\\clang.exe：${picked}\n`

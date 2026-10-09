@@ -15,10 +15,10 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import * as vscode from 'vscode';
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import { LineSplitter, parseFrameLine, parsePpm, parseVariablesLine, repairLooseJson } from './protocol';
 import type { FramePacket, SimSession, TimingInfo, VariableSnapshot } from './types';
+import { defaultConfig, readConfig } from './projectconfig';
 
 export interface SimSessionOptions {
     exePath: string;
@@ -30,6 +30,16 @@ export interface SimSessionOptions {
     frameOutDir?: string;
     /** 用户勾选的变量（透传给 --select，逗号分隔） */
     selected?: string[];
+    /**
+     * 工程根目录。
+     *
+     * ★ 用它读 scut_project.json 的 run / pic 段（每帧重复次数、
+     *   起始帧、图集后缀）。这些是【运行期】参数，改完立即生效。
+     *
+     *   0.9.4 前它们存在 VS Code 设置里，而设置项根本没注册成功，
+     *   于是"用户填了、插件读不到"。现在只有一个真值，就是工程 JSON。
+     */
+    projectRoot?: string;
 }
 
 /**
@@ -147,9 +157,8 @@ export class SimSessionImpl implements SimSession {
         //   "这种配置不应该丢进仿真环境里面吗？包括图像大小、图片格式、
         //     图集位置不应该都用UI吗？"）：
         //
-        //     图集目录 / 后缀 / 起始张号 / 每帧推进 / 重复次数
-        //       → 这些是【运行期行为】，改完立即生效，不需要重编译，
-        //         所以放进 VS Code 设置界面，不占用工程目录。
+        //       → 这些是【运行期行为】：改完立即生效，不需要重新编译，
+        //         因此不需要占用 config.h（那是编译期契约的领地）。
         //
         //     图像宽高 SCUT_IMAGE_W/H
         //       → 这个【必须】留在 config.h。C 语言里数组大小是编译期常量，
@@ -157,15 +166,22 @@ export class SimSessionImpl implements SimSession {
         //         运行期改不了。硬把它做成设置项只会制造"改了没生效"的困惑。
         //         这是语言的硬约束，不是设计偷懒。
         // ------------------------------------------------------------------
-        // ★ 0.9.3 起这些设置归在「运行期」子栏目下，读取要用分组名。
-        //   读旧名不报错，只是静默退回默认值 —— 表现为"改了没生效"。
-        const cfg = vscode.workspace.getConfiguration('scut71.runtime');
-        const repeat = Math.max(1, cfg.get<number>('processRepeat', 1) || 1);
+        // ★ 0.9.4 起这些值都来自工程配置 scut_project.json，不再读 VS Code 设置。
+        //   读不到工程配置时用默认值，让"没有 scut_project.json"也能跑起来。
+        const cfg = (() => {
+            const root = this.opts.projectRoot;
+            if (!root) {
+                return defaultConfig();
+            }
+            const { config } = readConfig(root);
+            return config ?? defaultConfig();
+        })();
+        const repeat = Math.max(1, cfg.run.processRepeat || 1);
         // ★ 图集编号允许 0：后端会自动探测 0 起图集（pic/0.png、pic/1.png…），
         //   早期版本在这里钳到 >=1，导致 0 起的图集【永远看不到第 0 张】。
         //   后端对 1 起图集传 0 也会自己夹回 1，所以放宽到这里是安全的。
-        const startFrame = Math.max(0, Math.floor(cfg.get<number>('startFrame', 1) || 0));
-        const picExt = (cfg.get<string>('picExt', '') || '').trim();
+        const startFrame = Math.max(0, Math.floor(cfg.pic.start || 0));
+        const picExt = cfg.pic.ext.trim();
 
         const args = ['--json', '--step', '--frames', '0', '--out', outDir];
         // ★★ 不加 --advance（0.7.1 起）：图集推进完全走运行期协议。

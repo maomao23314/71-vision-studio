@@ -19,6 +19,7 @@ import * as crypto from 'crypto';
 import { SimSessionImpl } from './simsession';
 import { getSimLogChannel } from './extension';
 import type { FramePacket, VariableManifest, VariableSnapshot, WatchedVariable } from './types';
+import { defaultConfig, readConfig } from './projectconfig';
 
 /** 视图 id（必须与 package.json 的 contributes.views 一致）。 */
 export const SIM_VIEW_ID = 'scut71.simview';
@@ -39,8 +40,10 @@ export interface SimViewDeps {
     getExePath(): string | undefined;
     /** 工具链 bin 目录（子进程 PATH 前置用）。未就绪时返回 undefined。 */
     getToolchainBin(): string | undefined;
-    /** 用户勾选的图集目录（设置项）。未设置时返回 undefined。 */
+    /** 用户勾选的图集目录（工程配置的 pic.dir）。未设置时返回 undefined。 */
     getPicDir(): string | undefined;
+    /** 工程根目录。仿真进程靠它读 scut_project.json 的运行期参数。 */
+    projectRoot(): string | undefined;
     /** 环境日志（写进侧边栏日志折叠区）。 */
     log(line: string): void;
 }
@@ -201,9 +204,8 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
      *   算法状态、图集位置、进程全部保持不变。
      */
     public async bench(): Promise<void> {
-        // ★ 0.9.3 起归在「运行期」子栏目下（见 package.json）。
-        const cfg = vscode.workspace.getConfiguration('scut71.runtime');
-        const n = Math.max(1, cfg.get<number>('benchRepeat', 1000) || 1000);
+        const cfg = this.runConfig();
+        const n = Math.max(1, cfg.benchRepeat || 1000);
 
         const s = await this.ensureSession();
         if (!s) {
@@ -238,8 +240,7 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
      *   这与车上的行为一致 —— 翻页/连跑都不该把状态清零。
      */
     public async run(): Promise<void> {
-        const cfg = vscode.workspace.getConfiguration('scut71.runtime');
-        const n = Math.max(1, cfg.get<number>('runFrames', 60) || 60);
+        const n = Math.max(1, this.runConfig().runFrames || 60);
 
         const s = await this.ensureSession();
         if (!s) {
@@ -347,6 +348,24 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
 
     /* --------------------------------------------------------- 会话管理 */
 
+    /**
+     * 读工程配置里的运行期参数（测速次数、连跑帧数等）。
+     *
+     * ★ 0.9.4：不再读 VS Code 设置。
+     *   以前读 scut71.runtime.*，而那些键【从未注册成功】 ——
+     *   用户在设置页改了数字，这里拿到的一直是默认值。
+     *   现在只认 scut_project.json，读不到就用默认值，
+     *   保证"没有配置文件也能跑"。
+     */
+    private runConfig() {
+        const root = this.deps.projectRoot();
+        if (!root) {
+            return defaultConfig().run;
+        }
+        const { config } = readConfig(root);
+        return (config ?? defaultConfig()).run;
+    }
+
     private async ensureSession(): Promise<SimSessionImpl | undefined> {
         if (this.session && this.session.running) {
             return this.session;
@@ -364,6 +383,7 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
             toolchainBin,
             picDir: this.deps.getPicDir(),
             selected: [...this.selected],
+            projectRoot: this.deps.projectRoot(),
         });
         // ★ 只交给 pushLog 一处分流：它内部决定去 webview / 输出通道 /
         //   环境日志通道。此前这里先 deps.log 再 pushLog，非用户日志会被记两遍。

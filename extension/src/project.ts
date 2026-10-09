@@ -211,32 +211,29 @@ export function detectProject(explicitDir?: string): ScutProject | undefined {
 
     const configHeader = findConfigHeader(root) ?? path.join(root, 'config.h');
 
-    // ★ 图集目录的取值顺序（这里曾经是个大坑）：
-    //   1) 设置项「运行期 › 测试图集目录」—— 用户在设置界面指定的，最优先
-    //   2) scut_project.json 的 pic.dir —— 工程自己声明的
-    //   3) config.h 里的 SCUT_PIC_DIR —— 老工程的约定（兼容）
-    //   4) 兜底 "pic"
+    // ★★ 0.9.4：配置只有一个真值，就是 scut_project.json ★★
+    //   取值顺序反而缩短了：
+    //     1) scut_project.json 的 pic.dir —— 真值来源
+    //     2) config.h 里的 SCUT_PIC_DIR —— 老工程兼容
+    //     3) 兜底 "pic"
     //
-    //   ★★ 早期版本【写死了 path.join(root, 'pic')】，把 2) 完全忽略 ——
-    //      这就是用户报的「pic/1 里的 BMP 也无法加载」的根因：
-    //      图集约定是 pic/<组号>/<编号>.bmp，图片天生在 pic\1\ 子目录里，
-    //      而插件却把 pic\ 这个【父目录】传给了仿真程序；
-    //      仿真程序在 pic\ 下找 1.bmp 当然找不到（它在 pic\1\ 下），
-    //      于是静默跑黑图，一个字都不提示。
-    const fromSettings = (() => {
-        try {
-            // ★ 0.9.3 起归在「运行期」子栏目下（见 package.json）。
-            const v = vscode.workspace.getConfiguration('scut71.runtime')
-                .get<string>('picDir', '');
-            return (v && v.trim()) ? v.trim() : undefined;
-        } catch {
-            return undefined;
-        }
-    })();
-    // 工程配置（scut_project.json）优先于老 config.h：它是新约定的真值来源。
+    //   以前这里第一优先是 VS Code 设置项 scut71.runtime.picDir
+    //   （fromSettings ?? fromProjectConfig），后果有三个：
+    //     · 工程 JSON 里配了图集目录却不生效
+    //     · 而那个设置键本身因为 contributes.configuration 的
+    //       嵌套 object 分组【没注册成功】，连设置里的值也读不到
+    //     · 两头都落空，却一个字都不报
+    //
+    //   ★★ 另一个坑（现在只剩真值那一半）★★
+    //   早期版本【写死了 path.join(root, 'pic')】，完全忽略 pic.dir ——
+    //   这就是用户报的「pic/1 里的 BMP 也无法加载」的根因：
+    //   图集约定是 pic/<组号>/<编号>.bmp，图片天生在 pic\1\ 子目录里，
+    //   而插件却把 pic\ 这个【父目录】传给了仿真程序；
+    //   仿真程序在 pic\ 下找 1.bmp 当然找不到（它在 pic\1\ 下），
+    //   于是静默跑黑图，一个字都不提示。
     const fromProjectConfig = readConfig(root).config?.pic.dir || undefined;
     const fromLegacyConfig = parsePicDirFromFile(configHeader) ?? undefined;
-    const rel = fromSettings ?? fromProjectConfig ?? fromLegacyConfig ?? 'pic';
+    const rel = fromProjectConfig ?? fromLegacyConfig ?? 'pic';
     const picDir = path.isAbsolute(rel) ? rel : path.join(root, rel);
 
     return {

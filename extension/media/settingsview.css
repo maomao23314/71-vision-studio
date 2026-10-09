@@ -1,0 +1,246 @@
+/* settingsview.css —— 配置面板样式
+ *
+ * 刻意复用 simview.css 的配色与控件尺寸，让两个面板看起来是一套东西。
+ * 只声明这个面板用到的部分，不做全局重置。
+ */
+
+:root {
+    --gap: 12px;
+    --radius: 4px;
+}
+
+body {
+    padding: 0;
+    font-family: var(--vscode-font-family);
+    font-size: var(--vscode-font-size);
+    color: var(--vscode-foreground);
+    background: var(--vscode-editor-background);
+}
+
+code {
+    font-family: var(--vscode-editor-font-family, monospace);
+    background: var(--vscode-textCodeBlock-background, rgba(127,127,127,.12));
+    padding: 1px 4px;
+    border-radius: 3px;
+}
+
+/* ---------- 顶栏 ---------- */
+
+#top {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--gap);
+    padding: 14px 16px 10px;
+    border-bottom: 1px solid var(--vscode-panel-border, rgba(128,128,128,.25));
+    position: sticky;
+    top: 0;
+    background: var(--vscode-editor-background);
+    z-index: 2;
+}
+
+.top-title { font-size: 1.15em; font-weight: 600; }
+
+.top-sub {
+    color: var(--vscode-descriptionForeground, rgba(128,128,128,.9));
+    font-size: .85em;
+    margin-top: 3px;
+    word-break: break-all;
+}
+
+.top-actions { margin-left: auto; display: flex; gap: 6px; flex-shrink: 0; }
+
+/* ---------- 按钮 ---------- */
+
+button {
+    font-family: inherit;
+    font-size: inherit;
+    padding: 4px 10px;
+    border-radius: var(--radius);
+    border: 1px solid var(--vscode-button-border, transparent);
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    cursor: pointer;
+}
+button:hover { background: var(--vscode-button-hoverBackground); }
+
+button.primary {
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    font-weight: 600;
+    padding: 5px 18px;
+}
+button.primary:hover { background: var(--vscode-button-hoverBackground); }
+
+button.ghost {
+    background: transparent;
+    color: var(--vscode-foreground);
+    border: 1px solid var(--vscode-panel-border, rgba(128,128,128,.35));
+}
+button.ghost:hover { background: var(--vscode-list-hoverBackground); }
+
+button.danger-ghost:hover {
+    background: var(--vscode-inputValidation-errorBackground, rgba(255,0,0,.15));
+    border-color: var(--vscode-inputValidation-errorBorder, #be1100);
+}
+
+button:disabled { opacity: .5; cursor: default; }
+
+button.link {
+    background: none;
+    border: none;
+    color: var(--vscode-textLink-foreground);
+    padding: 2px 6px;
+    text-decoration: underline;
+}
+button.link:hover { color: var(--vscode-textLink-activeForeground); }
+
+/* ---------- 提示条 ---------- */
+
+#hint {
+    margin: 10px 16px 0;
+    padding: 8px 10px;
+    border-radius: var(--radius);
+    font-size: .9em;
+    display: none;
+}
+#hint.show { display: block; }
+#hint.err {
+    background: var(--vscode-inputValidation-errorBackground, rgba(255,0,0,.12));
+    border: 1px solid var(--vscode-inputValidation-errorBorder, #be1100);
+    color: var(--vscode-inputValidation-errorForeground, var(--vscode-foreground));
+    white-space: pre-wrap;
+}
+
+/* ---------- 分组 ---------- */
+
+#groups { padding: 12px 16px 8px; }
+
+.group {
+    border: 1px solid var(--vscode-panel-border, rgba(128,128,128,.25));
+    border-radius: var(--radius);
+    margin-bottom: 8px;
+    overflow: hidden;
+}
+
+.group-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 9px 12px;
+    cursor: pointer;
+    user-select: none;
+    background: var(--vscode-sideBarSectionHeader-background, rgba(128,128,128,.08));
+}
+.group-head:hover { background: var(--vscode-list-hoverBackground); }
+
+.chevron { display: inline-block; transition: transform .12s ease; font-size: .8em; }
+.group.open .chevron { transform: rotate(90deg); }
+
+.group-title { font-weight: 600; }
+
+.group-note {
+    margin-left: auto;
+    font-size: .82em;
+    color: var(--vscode-descriptionForeground, rgba(128,128,128,.9));
+}
+
+.group-body { display: none; padding: 4px 12px 10px; }
+.group.open .group-body { display: block; }
+
+/* ---------- 字段行 ---------- */
+
+.field {
+    display: grid;
+    grid-template-columns: minmax(120px, 190px) 1fr;
+    gap: 10px;
+    align-items: start;
+    padding: 9px 0;
+    border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,.14));
+}
+.field:first-child { border-top: none; }
+
+.field-label { padding-top: 5px; }
+.field-label .name { display: block; }
+.field-label .path {
+    display: block;
+    font-size: .78em;
+    color: var(--vscode-descriptionForeground, rgba(128,128,128,.85));
+    font-family: var(--vscode-editor-font-family, monospace);
+    margin-top: 2px;
+    word-break: break-all;
+}
+.badge {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 0 5px;
+    border-radius: 7px;
+    font-size: .72em;
+    vertical-align: 1px;
+    background: var(--vscode-badge-background, rgba(128,128,128,.25));
+    color: var(--vscode-badge-foreground, var(--vscode-foreground));
+}
+
+.field-control { min-width: 0; }
+
+input[type="text"],
+input[type="number"],
+textarea {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 4px 7px;
+    font-family: inherit;
+    font-size: inherit;
+    color: var(--vscode-input-foreground);
+    background: var(--vscode-input-background);
+    border: 1px solid var(--vscode-input-border, rgba(128,128,128,.35));
+    border-radius: var(--radius);
+}
+input:focus, textarea:focus {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: -1px;
+}
+textarea {
+    font-family: var(--vscode-editor-font-family, monospace);
+    min-height: 62px;
+    resize: vertical;
+}
+input.bad, textarea.bad { border-color: var(--vscode-inputValidation-errorBorder, #be1100); }
+
+.field-hint {
+    font-size: .84em;
+    color: var(--vscode-descriptionForeground, rgba(128,128,128,.9));
+    margin-top: 4px;
+}
+.field-hint.bad { color: var(--vscode-inputValidation-errorForeground, #f14c4c); }
+
+.row-inline { display: flex; gap: 6px; align-items: center; }
+.row-inline input { flex: 1; }
+.unit { color: var(--vscode-descriptionForeground, rgba(128,128,128,.9)); font-size: .9em; }
+
+/* 开关：用原生 checkbox，不自绘 —— 自绘的开关在不同主题下很容易糊。 */
+.switch { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; }
+.switch input { width: 15px; height: 15px; margin: 0; cursor: pointer; }
+.switch .state { font-size: .88em; color: var(--vscode-descriptionForeground, rgba(128,128,128,.9)); }
+
+/* ---------- 底栏 ---------- */
+
+#foot {
+    position: sticky;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    gap: var(--gap);
+    padding: 10px 16px;
+    border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,.25));
+    background: var(--vscode-editor-background);
+}
+#foot .spacer { flex: 1; }
+.dim { color: var(--vscode-descriptionForeground, rgba(128,128,128,.9)); font-size: .86em; }
+
+/* 保存成功时给底栏一次绿色闪动，让"已经落盘"这件事有反馈。
+ * 不弹通知：改配置是高频动作，弹窗会变成噪音。 */
+#foot.flash { animation: flash .6s ease; }
+@keyframes flash {
+    from { box-shadow: inset 0 2px 0 var(--vscode-testing-iconPassed, #73c991); }
+    to   { box-shadow: inset 0 2px 0 transparent; }
+}

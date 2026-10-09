@@ -1,24 +1,33 @@
 /**
- * projectconfig.ts —— 工程配置（scut_project.json）的读写与 UI 编辑。
+ * projectconfig.ts —— 工程配置（scut_project.json）的读写与编辑。
  *
  * 设计理念对照：
- *   · 上手即用     → 用户不需要知道任何文件格式，全部走 VS Code 设置界面
+ *   · 上手即用     → 用户不需要知道任何文件格式，插件的设置面板维护它
  *   · 松耦合       → 本文件是「配置」的唯一真值来源；构建脚本只读它
  *   · 可移植       → 用户代码里不留注册信息，钩子函数名存在这里
  *
- * ★★ 为什么配置放在工程的 JSON 里，而不是 VS Code 的 settings.json ★★
+ * ★★ 为什么配置全部放在工程 JSON 里，而不是 VS Code 的 settings.json ★★
  *
- *   两者都"能被 UI 编辑"，但生命周期完全不同：
+ *   0.9.4 之前有两处真值：settings.json 的 scut71.* 和本文件。
+ *   两个都保留着，结果互相覆盖 —— project.ts 里写的是
+ *       fromSettings ?? fromProjectConfig
+ *   也就是【设置页压过工程配置】。于是工程 JSON 里配了图集目录
+ *   却不生效，不报错，只是"配了没用"，排查极难。
  *
- *     VS Code 用户设置  跟着【这台电脑 / 这个用户】走。
- *                        换台机器、发给同学、或者重装 VS Code，
- *                        配置全丢 —— 而配置里有"哪个函数是处理函数"
- *                        这种【工程固有信息】，丢了工程就跑不起来。
+ *   更要命的是 VS Code 那套 contributes.configuration 有真实缺陷：
+ *   它把 "scut71.toolchain": {"type":"object","properties":{...}}
+ *   注册成【一个名叫 scut71.toolchain 的对象型设置】，
+ *   内层 properties 只是 JSON Schema，【不是注册项】。后果：
+ *       cfg.get('path')      读不到 → 静默返回默认值
+ *       cfg.update('path')   直接抛「没有注册配置 scut71.toolchain.path」
+ *   用户为了这个问题排查了很久，重装了 VS Code。
  *
- *     工程内的 JSON     跟着【这个工程】走，可以进 git，
- *                        换机器只要拷工程目录即可。这才是工程配置该待的地方。
+ *   所以现在：settings.json 不再参与，全部搬到这里。
+ *   工程配置跟着工程走，能进 git、发给同学、换机器不丢；
+ *   用户打开 scut_project.json 就能看到全部配置，所见即所得。
  *
- *   VS Code 的用户设置里只留"这台机器的环境"类选项（工具链路径之类）。
+ *   唯一留在 settings.json 的是 VS Code 自己的设置（如主题、字体），
+ *   与本插件无关。
  *
  * ★ 写入策略：读-改-写，保留用户手写的未知字段。
  *   直接用 JSON.stringify 整体覆盖会把用户加的注释性字段抹掉，
@@ -26,7 +35,6 @@
  *   而且不可恢复。
  */
 
-import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -76,11 +84,40 @@ export interface ProjectConfig {
         /** 每帧调用，不计时。典型：画标注、打日志。 */
         post: string[];
     };
-    /** 测试图集（运行期设置，改完立即生效，不需要重编译）。 */
+    /** 测试图集。dir 空 = 用工程下的 pic/；ext 空 = 后端按实际文件探测。 */
     pic: {
         dir: string;
         ext: string;
+        /** 图集起始编号，允许 0（后端会自己夹回合法值）。 */
         start: number;
+    };
+    /** 运行期行为。改完立即生效，不需要重新编译。 */
+    run: {
+        /** 每帧把算法跑几遍取平均（>1 时结果更稳，耗时也成倍）。 */
+        processRepeat: number;
+        /** 「运行」按钮连着跑几帧。 */
+        runFrames: number;
+        /** 「测速」按钮对同一张图重复几遍取平均。 */
+        benchRepeat: number;
+    };
+    // ★ 这里【故意】没有 view 段 ★
+    //   0.9.4 曾加了 showTiming / showVariables / showLog / pickPersist
+    //   四项，但全项目没有任何代码读取它们 —— 面板一直按自己的方式显示。
+    //   留着就是骗人的死界面：用户勾了「不显示日志」，日志照旧出现，
+    //   于是反过来怀疑"是不是我用的方式不对"。
+    //   勾选变量的持久化也已由面板自己的 setState 完成，
+    //   不需要再在这里存一份 —— 两份数据就是两个真值。
+    //
+    //   教训：把字段名写进 UI 很容易，难的是确认有人真的读它。
+    //
+    /** 本机工具链。path 空 = 依次探测环境变量 → 已下载的目录 → PATH。 */
+    toolchain: {
+        /** 工具链根目录（里面应有 bin/clang.exe）。 */
+        path: string;
+        /** 找不到工具链时，是否允许下载一份（下载前一定会先问）。 */
+        autoDownload: boolean;
+        /** 编译时自动发现全局变量（关闭可加快构建，但变量面板会是空的）。 */
+        autoWatch: boolean;
     };
 }
 
@@ -92,6 +129,8 @@ export function defaultConfig(): ProjectConfig {
         outputArray: '',
         hooks: { init: [], frame: [], post: [] },
         pic: { dir: '', ext: '', start: 1 },
+        run: { processRepeat: 1, runFrames: 60, benchRepeat: 1000 },
+        toolchain: { path: '', autoDownload: true, autoWatch: true },
     };
 }
 
@@ -134,9 +173,16 @@ export function normalizeConfig(raw: unknown): ProjectConfig {
     const img = asRecord(root.image) ?? {};
     const hooks = asRecord(root.hooks) ?? {};
     const pic = asRecord(root.pic) ?? {};
+    const run = asRecord(root.run) ?? {};
+    const tc = asRecord(root.toolchain) ?? {};
 
     const str = (v: unknown, fb: string): string =>
         (typeof v === 'string' ? v.trim() : fb);
+    const bool = (v: unknown, fb: boolean): boolean =>
+        (typeof v === 'boolean' ? v : fb);
+    // 运行次数至少 1；用户写 0 或负数按 1 处理，否则后端会跑 0 帧。
+    const count = (v: unknown, fb: number): number =>
+        Math.max(1, asInt(v, fb));
 
     return {
         image: {
@@ -153,7 +199,20 @@ export function normalizeConfig(raw: unknown): ProjectConfig {
         pic: {
             dir: str(pic.dir, ''),
             ext: str(pic.ext, ''),
-            start: asInt(pic.start, 1),
+            // ★ 允许 0：后端支持 0 起的图集，早期版本钳到 >=1
+            //   导致 pic/0.png 永远看不到。
+            start: Math.max(0, asInt(pic.start, 1)),
+        },
+        run: {
+            processRepeat: count(run.processRepeat, 1),
+            runFrames: count(run.runFrames, 60),
+            benchRepeat: count(run.benchRepeat, 1000),
+        },
+        // view 段见接口处的说明：故意不存在，空实现避免读写 ghost 字段。
+        toolchain: {
+            path: str(tc.path, ''),
+            autoDownload: bool(tc.autoDownload, true),
+            autoWatch: bool(tc.autoWatch, true),
         },
     };
 }
@@ -180,8 +239,8 @@ export function readConfig(projectRoot: string): { config?: ProjectConfig; error
     } catch (e) {
         return {
             error: `${CONFIG_FILENAME} 解析失败：${e instanceof Error ? e.message : String(e)}\n`
-                + '    这个文件由设置界面维护；若手改坏了，'
-                + '删掉它再重新打开设置界面即可（会重建一份默认配置）。',
+                + '    这个文件由配置面板维护；若手改坏了，'
+                + '删掉它再打开一次配置面板即可（会重建一份默认配置）。',
         };
     }
 }
@@ -206,6 +265,8 @@ export function writeConfig(projectRoot: string, cfg: ProjectConfig): void {
     merged.image = { ...(asRecord(merged.image) ?? {}), ...cfg.image };
     merged.hooks = { ...(asRecord(merged.hooks) ?? {}), ...cfg.hooks };
     merged.pic = { ...(asRecord(merged.pic) ?? {}), ...cfg.pic };
+    merged.run = { ...(asRecord(merged.run) ?? {}), ...cfg.run };
+    merged.toolchain = { ...(asRecord(merged.toolchain) ?? {}), ...cfg.toolchain };
     merged.inputArray = cfg.inputArray;
     merged.outputArray = cfg.outputArray;
 
@@ -214,62 +275,7 @@ export function writeConfig(projectRoot: string, cfg: ProjectConfig): void {
     fs.renameSync(tmp, p);
 }
 
-/* ==========================================================================
- *  设置界面的字段定义
- *
- *  用 VS Code 的 settings.json 作为「编辑 UI」——它自带多行文本框、
- *  数字校验、按工程覆盖等功能，而且用户已经很熟悉。
- *
- *  ★ 为什么走 workspace 级设置而不是自己画一个 webview 表单：
- *    自画表单要处理校验、保存、撤销、多根工作区……这些 VS Code 已经做好了。
- *    我们只需要把 workspace 设置当成"这个工程的配置草稿"，
- *    变更时落盘到 scut_project.json。
- *
- *  ★ 键名与 ProjectConfig 的对应关系集中在下面这一个映射表里，
- *    加字段只需要改这里 + ProjectConfig。
- * ========================================================================== */
-
-const NS = 'scut71';
-
-/** 把配置写进 VS Code 的 workspace 设置（作为编辑界面）。 */
-export async function pushConfigToSettings(cfg: ProjectConfig): Promise<void> {
-    // ★ 写入也必须用分组后的名字，否则会写出一个"设置界面里看不见、
-    //   但确实存在"的键 —— 用户改界面不会生效，而清理设置时又删不掉。
-    const p = vscode.workspace.getConfiguration(NS + '.project');
-    const t = vscode.ConfigurationTarget.Workspace;
-    await p.update('imageWidth', cfg.image.width, t);
-    await p.update('imageHeight', cfg.image.height, t);
-    await p.update('inputArray', cfg.inputArray, t);
-    await p.update('outputArray', cfg.outputArray, t);
-    await p.update('initFunctions', cfg.hooks.init.join('\n'), t);
-    await p.update('frameFunctions', cfg.hooks.frame.join('\n'), t);
-    await p.update('postFunctions', cfg.hooks.post.join('\n'), t);
-}
-
-/** 从 VS Code 的 workspace 设置读出配置。 */
-export function pullConfigFromSettings(): ProjectConfig {
-    // ★ 配置项已在 0.9.3 分组成四个子栏目（工具链/工程配置/运行期/面板与显示）。
-    //   这里必须读【分组后的名字】—— 读旧名不会报错，
-    //   而是【静默退回默认值】。而工程配置一旦退回默认，
-    //   编译出来的数组尺寸/函数名就和用户的设置对不上，
-    //   表现为"我明明填了却没生效"，最难查。
-    const p = vscode.workspace.getConfiguration(NS + '.project');
-    return normalizeConfig({
-        image: {
-            width: p.get<number>('imageWidth', 188),
-            height: p.get<number>('imageHeight', 120),
-        },
-        inputArray: p.get<string>('inputArray', 'mt9v03x_image'),
-        outputArray: p.get<string>('outputArray', ''),
-        hooks: {
-            init: p.get<string>('initFunctions', ''),
-            frame: p.get<string>('frameFunctions', ''),
-            post: p.get<string>('postFunctions', ''),
-        },
-    });
-}
-
-/** 判断设置里是否已经填过钩子（用来自动决定要不要弹首次配置引导）。 */
+/** 判断配置里是否已经填过钩子（用来自动决定要不要弹首次配置引导）。 */
 export function hasHooks(cfg: ProjectConfig): boolean {
     return cfg.hooks.frame.length > 0 || cfg.hooks.init.length > 0;
 }

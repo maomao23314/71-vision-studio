@@ -25,12 +25,12 @@ import { createProjectFromTemplate, describeProject, detectProject, locatePicRea
 import { build, disposeBuildOutputChannel, getBuildOutputChannel } from './build';
 import {
     CONFIG_FILENAME,
+    defaultConfig,
     hasHooks,
-    pullConfigFromSettings,
-    pushConfigToSettings,
     readConfig,
     writeConfig,
 } from './projectconfig';
+import { showSettingsPanel } from './settingsview';
 
 /**
  * 用户算法 SCUT_Log 的独立输出通道（VS Code 底部「输出」面板）。
@@ -64,33 +64,15 @@ function exePathOf(project: ScutProject): string {
 }
 
 /**
- * 属于「工程配置」的设置项。
+ * 启动时确认工程配置存在。
  *
- * ★ 为什么要有这份清单：这些设置项是 scut_project.json 的【编辑界面】，
- *   改动必须落盘到工程里；而工具链路径之类是「本机环境」，
- *   不该进工程文件（换台机器就不同）。两类混在一起会互相污染。
+ * ★ 0.9.4 简化到只剩一件事：文件不存在就建一份默认的。
+ *   以前还要"把 JSON 同步进 VS Code 设置界面"，那是因为设置页
+ *   当时是编辑 UI。现在编辑 UI 是插件自己的面板（settingsview.ts），
+ *   它直接读写 JSON，中间不再需要任何同步 ——
+ *   同步步骤本身就是"两份数据可能对不上"的来源。
  */
-const CONFIG_SETTING_KEYS = [
-    'imageWidth', 'imageHeight', 'inputArray', 'outputArray',
-    'initFunctions', 'frameFunctions', 'postFunctions',
-];
-/* ★ 0.9.3 起这批设置归在「工程配置」子栏目下。
- *   CONFIG_SECTION 必须与 package.json 里子栏目的 id 一致，
- *   否则监听不到变化 —— 而"监听不到变化"的后果是
- *   用户改了设置却不触发重新编译，表现为"改了没生效"。
- *   tests/test_extension_settings.py 里有一条断言守着这层对应关系。 */
-const CONFIG_SECTION = 'scut71.project';
-
-/**
- * 启动时把工程配置同步进设置界面。
- *
- * ★ 方向是 JSON → 设置，不是反过来：
- *   scut_project.json 是【真值来源】（它跟着工程走，能进 git），
- *   设置界面只是这台机器上的一个编辑视图。
- *   若反过来（设置覆盖 JSON），换台机器打开工程时，
- *   空的用户设置会把工程里正确的配置清掉。
- */
-async function syncConfigOnActivate(log: (l: string) => void): Promise<void> {
+function ensureConfigOnActivate(log: (l: string) => void): void {
     const project = detectProject();
     if (!project) {
         return;
@@ -100,36 +82,27 @@ async function syncConfigOnActivate(log: (l: string) => void): Promise<void> {
         log(`[配置] ${error}`);
         return;
     }
-    if (!config) {
-        // 首次打开：把设置界面里的值（可能是老版本的）落盘成 JSON
-        const fromSettings = pullConfigFromSettings();
-        try {
-            writeConfig(project.root, fromSettings);
-            await pushConfigToSettings(fromSettings);
-            log(`[配置] 已为工程创建 ${CONFIG_FILENAME}。`);
-        } catch (e) {
-            log(`[配置] 创建 ${CONFIG_FILENAME} 失败：${e instanceof Error ? e.message : String(e)}`);
-        }
-        if (!hasHooks(fromSettings)) {
-            log('[配置] 还没有配置「图像处理函数」——执行「SCUT-71: 配置本工程」即可开始。');
-        }
+    if (config) {
+        log(`[配置] 工程配置来自 ${CONFIG_FILENAME}（${config.image.width}×${config.image.height}）。`);
         return;
     }
     try {
-        await pushConfigToSettings(config);
-        log(`[配置] 已从 ${CONFIG_FILENAME} 载入工程配置（${config.image.width}x${config.image.height}）。`);
+        writeConfig(project.root, defaultConfig());
+        log(`[配置] 已为工程创建 ${CONFIG_FILENAME}。`);
+        if (!hasHooks(defaultConfig())) {
+            log('[配置] 还没有填「每帧处理函数」——点面板上的 ⚙ 配置本工程。');
+        }
     } catch (e) {
-        log(`[配置] 同步到设置界面失败（不影响构建）：${e instanceof Error ? e.message : String(e)}`);
+        log(`[配置] 创建 ${CONFIG_FILENAME} 失败：${e instanceof Error ? e.message : String(e)}`);
     }
 }
 
 /**
  * 「配置本工程」向导。
  *
- * ★ 为什么需要这个命令（而不是只依赖设置界面）：
- *   设置界面有几十个条目，用户不知道该填哪几个。而一个工程真正必须填的
- *   只有【图像处理函数】一项 —— 其它都能用默认值跑起来。
- *   这里用几个输入框把这条必经之路走完，填完立刻可用。
+ * ★ 为什么保留这个命令（面板里也能改）：
+ *   新工程只有【图像处理函数】是必填的，其余都能用默认值跑起来。
+ *   这个向导把这条必经之路用两个输入框走完，比在面板里翻找快。
  */
 async function commandSetupProject(log: (l: string) => void): Promise<void> {
     const project = detectProject();
@@ -145,7 +118,7 @@ async function commandSetupProject(log: (l: string) => void): Promise<void> {
         void vscode.window.showErrorMessage(`SCUT-71：${error}`);
         return;
     }
-    const base = existing ?? pullConfigFromSettings();
+    const base = existing ?? defaultConfig();
 
     const frameFn = await vscode.window.showInputBox({
         title: 'SCUT-71：配置本工程（1/2）',
@@ -175,7 +148,6 @@ async function commandSetupProject(log: (l: string) => void): Promise<void> {
     };
     try {
         writeConfig(project.root, next);
-        await pushConfigToSettings(next);
     } catch (e) {
         void vscode.window.showErrorMessage(
             `SCUT-71：写入 ${CONFIG_FILENAME} 失败：${e instanceof Error ? e.message : String(e)}`);
@@ -271,6 +243,7 @@ export function activate(context: vscode.ExtensionContext): void {
             const p = projectOf();
             return p && dirExists(p.picDir) ? p.picDir : undefined;
         },
+        projectRoot: (): string | undefined => projectOf()?.root,
         log,
     });
 
@@ -308,47 +281,26 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('scut71.stop', () => commandStop(simView, log)),
         vscode.commands.registerCommand('scut71.prevPic', () => simView.prevPic()),
         vscode.commands.registerCommand('scut71.nextPic', () => simView.nextPic()),
-        vscode.commands.registerCommand('scut71.openSettings', () => commandOpenSettings()),
+        vscode.commands.registerCommand('scut71.openSettings', () => commandOpenSettings(context.extensionUri, log)),
         vscode.commands.registerCommand('scut71.selectVariables', () => commandSelectVariables(simView)),
         vscode.commands.registerCommand('scut71.setupProject', () => commandSetupProject(log)),
         vscode.commands.registerCommand('scut71.showLog', () => getSimLogChannel().show(true)),
     );
 
-    // ---- 启动时把工程配置同步进设置界面（设置界面是编辑 UI，JSON 是真值）----
-    void syncConfigOnActivate(log);
+    // ---- 启动时确认工程配置存在 ----
+    void ensureConfigOnActivate(log);
 
-    // ---- 配置变化：工具链路径改了要重新探测 ----
-    context.subscriptions.push(
-        vscode.workspace.onDidChangeConfiguration((e) => {
-            if (e.affectsConfiguration('scut71.toolchain.path')
-                || e.affectsConfiguration('scut71.toolchain.autoDownload')) {
-                resetToolchainCache();
-                log('[配置] 工具链相关设置已变化，缓存已清除，下次使用会重新探测。');
-                void detectToolchain().then((tc) => {
-                    log(tc.cc
-                        ? `[配置] 重新探测完成：clang = ${tc.cc}`
-                        : '[配置] 重新探测完成：仍然没有找到 clang。');
-                });
-            }
-            // 工程配置类选项变化 → 落盘到 scut_project.json
-            if (CONFIG_SETTING_KEYS.some((k) => e.affectsConfiguration(`${CONFIG_SECTION}.${k}`))) {
-                const p = projectOf();
-                if (p) {
-                    const cfg = pullConfigFromSettings();
-                    try {
-                        writeConfig(p.root, cfg);
-                        log(`[配置] 已写入 ${CONFIG_FILENAME}（改「图像尺寸」后需要重新编译）。`);
-                    } catch (err) {
-                        log(`[配置] 写入 ${CONFIG_FILENAME} 失败：${err instanceof Error ? err.message : String(err)}`);
-                    }
-                }
-            }
-        }),
-    );
-
+    // ★★ 0.9.4：不再监听 VS Code 设置变化 ★★
+    //   配置的唯一真值是 scut_project.json，它【不在 VS Code 的配置系统里】，
+    //   onDidChangeConfiguration 永远不会因为它触发。
+    //   而且这段监听器本身就是"第二个真值"的产物：它在设置变化时把值
+    //   落盘到 JSON，等于两边来回同步 —— 一旦哪次没同步上，
+    //   就是"设置页改了但没生效"这类最难查的问题。
+    //   现在改配置只有一个入口（面板），落盘也只发生在那里。
+    //
     // ---- 退出时清理输出通道 ----
     context.subscriptions.push({ dispose: () => disposeBuildOutputChannel() });
-        context.subscriptions.push({ dispose: () => disposeSimLogChannel() });
+    context.subscriptions.push({ dispose: () => disposeSimLogChannel() });
 }
 
 export function deactivate(): void {
@@ -368,11 +320,12 @@ export function deactivate(): void {
  *   （原来的 Scut71: Build Mode 参数只影响环境库，对用户没有意义，
  *     已按用户要求删除。）
  */
-function buildOptions(): BuildOptions {
-    // ★ 0.9.3 起归在「工具链」子栏目下（见 package.json）。
-    const cfg = vscode.workspace.getConfiguration('scut71.toolchain');
+function buildOptions(projectRoot: string): BuildOptions {
+    // ★ 0.9.4：配置只在 scut_project.json 里，读不到就用默认值，
+    //   不再回落到 VS Code 设置 —— 回落到设置等于请回第二个真值。
+    const { config } = readConfig(projectRoot);
     return {
-        autoWatch: cfg.get<boolean>('autoWatch', true),
+        autoWatch: (config ?? defaultConfig()).toolchain.autoWatch,
     };
 }
 
@@ -395,24 +348,43 @@ async function commandDoctor(): Promise<void> {
  * ========================================================================== */
 
 /**
- * 跳到本插件的设置界面，并展开最常被找的子栏目。
+ * 打开本插件的配置面板（scut_project.json 的编辑器）。
  *
- * ★ 为什么是"展开某个子栏目"而不是只打开页面 ★
- *   0.9.3 把 20 项设置分成四组之后，用户点「打开设置」最想问的
- *   通常是"我的工具链在哪 / 为什么又说要下载" —— 也就是「工具链」那组。
- *   直接定位过去省掉一次"展开四个折叠面板找到它"的搜索。
+ * ★ 为什么自己画面板，而不用 VS Code 的 settings.json ★
+ *   0.9.3 用的就是设置页，结果踩了三重坑：
+ *     ① contributes.configuration 里的嵌套 object 分组【不注册内层键】，
+ *        用户在设置页填了工具链路径，cfg.get 静默返回默认值 —— 不报错，
+ *        只是"配了没用"；
+ *     ② cfg.update 直接抛「没有注册配置 scut71.toolchain.path」；
+ *     ③ 配置跟着用户走，不跟着工程走 —— 换机器、发给同学就丢了，
+ *        而里面存着"哪个函数是处理函数"，丢了工程根本跑不起来。
  *
- * ★ 为什么不自己写一个设置界面 ★
- *   VS Code 自带的设置页有搜索、有默认值展示、有"已被工程覆盖"的提示，
- *   自己重写等于把这些全丢掉，换来的只是一个看起来更整齐的列表。
- *   而"设置项太多"这个问题，官方给的折叠分组就是标准解法。
+ *   现在配置只在 scut_project.json 里，面板是它的编辑器。
+ *   面板自己不持有状态：关掉再开、窗口重载，值都还在。
  */
-async function commandOpenSettings(): Promise<void> {
-    await vscode.commands.executeCommand(
-        'workbench.action.openSettings',
-        // 传这个字符串会定位到该子栏目；VS Code 不支持时安静降级为打开设置页。
-        '@ext:scut-racing.scut-71-vision-studio#scut71.toolchain',
-    );
+function commandOpenSettings(
+    extensionUri: vscode.Uri,
+    log: (l: string) => void,
+): void {
+    const project = detectProject();
+    if (!project) {
+        void vscode.window.showWarningMessage(
+            'SCUT-71：没有找到仿真工程（需要含 code/ 的文件夹），配置按工程存放。\n'
+            + '    下一步：用「文件 → 打开文件夹」打开你的工程。');
+        return;
+    }
+    showSettingsPanel(extensionUri, project.root, (sections) => {
+        log(`[配置] 已更新：${sections.join(', ')}`);
+        // 工具链改了要重新探测，否则界面还停在"未找到编译器"上。
+        if (sections.includes('toolchain')) {
+            resetToolchainCache();
+            void detectToolchain().then((tc) => {
+                log(tc.cc
+                    ? `[配置] 重新探测完成：clang = ${tc.cc}`
+                    : '[配置] 重新探测完成：仍然没有找到 clang。');
+            });
+        }
+    });
 }
 
 function formatDoctor(lines: string[], errors: string[]): string {
@@ -470,7 +442,7 @@ async function commandBuild(
     //   本来就要重新开始。
     await simView.stop();
 
-    const options = buildOptions();
+    const options = buildOptions(project.root);
     log(`[构建] ${describeProject(project)}（自动发现 ${options.autoWatch ? '开' : '关'}）`);
 
     let result: BuildResult;
