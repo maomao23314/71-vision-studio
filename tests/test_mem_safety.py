@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-test_mem_safety.py —— 内存安全回归：snprintf 返回值语义的两种踩法。
+test_mem_safety.py —— 内存安全回归：snprintf 返回值语义 + 截断回退边界。
 
 ★★★ 这个测试为什么存在 ★★★
 
@@ -16,18 +16,23 @@ test_mem_safety.py —— 内存安全回归：snprintf 返回值语义的两种
        把返回值累加到输出下标 o，\\uXXXX 分支一次推进 6 字节，
        o 跳过缓冲末尾，最后 dst[o]='\\0' 写在【栈数组之外】—— 越界【写】。
 
+2026-10-11 第二次评审又对 build_vars_json 的截断回退提出
+"合法但未证明不越界"。实测结论是安全的（见 VARS_JSON_DRIVER 上方），
+但"推了一遍"不等于"有回归保护"，所以也一并纳进来。
+
 所以这个测试的做法是【直接测真实源码】：
-    · ② 用 #include 把整个 headless 宿主拉进来 —— 不复制、不改写，
+    · 用 #include 把整个 headless 宿主拉进来 —— 不复制、不改写，
       测的就是仓库里那份代码，而不是"看起来像"的副本
       （复制一份函数再测，等于测的是副本，回归保护是假的）。
-    · ① scut_watch_read 依赖注册表，这里改用同样机制的等价驱动，
+    · scut_watch_read 依赖注册表，这里改用同样机制的等价驱动，
       因为把整个 watch 模块 + 手工注册流程拉进来成本过高；
       它的截断逻辑与仓库实现逐行对应（见下方注释）。
 
-两种验证手段同时用：
+三种验证手段同时用：
     · AddressSanitizer（能编译出来的话）—— 权威判据
     · 金丝雀字节扫描 —— 不依赖 ASan，任何工具链都能跑，
       能捕捉到"越界但恰好没崩"的情况
+    · 源码形态 / 内容断言 —— 防止"实现改了、测试却还在测旧形状"
 
 退出码 0 = 通过。
 """
@@ -296,6 +301,134 @@ def check_source_shape():
     return bad
 
 
+# ---------------------------------------------------------------------------
+# build_vars_json 的截断回退边界
+# ---------------------------------------------------------------------------
+# 2026-10-11 第二次外部评审对这一处做了【自我更正】：
+# 它上轮把 build_vars_json 的截断回退列为"验证过没问题"，
+# 本轮主动更正为"JSON 合法"已验证、"不越界"【没有】独立证明。
+#
+# 我实测的结论：那一版自我更正【不成立】—— 代码是安全的。
+#   依据是调用点维持的不变量：
+#     · 循环里每次 memcpy 前都判过 used + wl + 2 < cap，
+#       memcpy 后 out[used]='\0'  ⇒ used <= cap-2 恒成立；
+#     · 收尾段 snprintf 写 "]" 使 used += 1；
+#     · 于是 k = used-1 <= cap-3，写 out[k+1]/out[k+2] 最多落到 cap-1，不越界。
+#
+# ★ 但"我推了一遍"不等于"回归保护" ★
+#   上面这套推导依赖三处细节（判界留 2 的余量、收尾只推进 1、k 从 used-1 起），
+#   任何一处被改动都可能悄悄打破不变量 —— 而这类破坏【完全静默】。
+#   所以补一个"直接跑真实函数"的回归，让不变量从注释里的推理变成被检验的事实。
+VARS_JSON_DRIVER = r'''
+#define main scut_headless_main_unused_main
+#include "scut_headless_main.c"
+#undef main
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int g_pool[1200];
+/* ★ 名字必须是【静态存储】，不能是循环里的栈数组 ★
+   SCUT_Watch() 只保存指针、不复制字符串（本文件第 55 行
+   `s_watch[s_count].name = name;`）。第一版驱动把它写成
+   `char nm[200]` 放在 for 循环体内，于是注册表里存的是
+   一批已失效的栈地址 —— ASan 报 stack-use-after-scope。
+   那是【驱动自己的】 bug，不是被测代码的：真实代码里变量名
+   全是字符串字面量或 long-lived 缓冲。 */
+static char g_names[1200][160];
+
+int main(void)
+{
+    options_t o;
+    int i, fail = 0;
+    /* 刻意刁钻的一组容量：边界值、恰好卡界、以及 absurd 大的值 */
+    size_t caps[] = {3, 4, 5, 6, 7, 8, 16, 64, 255, 256, 1000,
+                     2048, 4096, 8191, 8192, 8193, 16384, 65536, 200000};
+    int ncaps = (int)(sizeof(caps) / sizeof(caps[0]));
+
+    memset(&o, 0, sizeof(o));
+    o.select_vars = NULL;           /* 全选 = 把输出逼到最长 */
+
+    /* 注册足够多、名字足够长的变量，把 build_vars_json 推进截断分支 */
+    for (i = 0; i < 1200; i++) {
+        int j;
+        for (j = 0; j < 150; j++) { g_names[i][j] = 'A' + ((i * 7 + j) % 26); }
+        g_names[i][150] = '\0';
+        g_pool[i] = i * 7;
+        SCUT_Watch(g_names[i], &g_pool[i], SCUT_T_I32, 1, (int)sizeof(int), 0);
+    }
+
+    for (i = 0; i < ncaps; i++) {
+        size_t cap = caps[i];
+        char  *out = (char *)malloc(cap);
+        int    term = 0;
+        size_t k;
+
+        if (out == NULL) { continue; }
+        build_vars_json(&o, out, cap);
+
+        /* 断言 1：缓冲内必须能找到 '\0'，否则调用方 strlen 会读飞 */
+        for (k = 0; k < cap; k++) { if (out[k] == '\0') { term = 1; break; } }
+        if (!term && cap >= 4) {
+            printf("NO_TERMINATOR cap=%zu\n", cap);
+            fail = 1;
+        }
+        /* 断言 2：首尾必须是方括号（合法 JSON 数组） */
+        if (cap >= 4 && (out[0] != '[' || out[strlen(out) - 1] != ']')) {
+            printf("BAD_SHAPE cap=%zu\n", cap);
+            fail = 1;
+        }
+        free(out);
+    }
+
+    printf(fail ? "VARS_JSON_FAIL\n" : "VARS_JSON_OK\n");
+    return fail;
+}
+'''
+
+
+def check_no_hardcoded_paths():
+    """断言面向用户的产物里不残留开发机绝对路径。
+
+    ★ 这条为什么值得固化成测试 ★
+      2026-10-11 清掉了 scut_build.py / toolchain.ts / package.json 里
+      硬编码的 D:\\TOOLS\\... 与 anaconda3 路径。当时是纯手工清理 ——
+      也就是说下一个人加路径时没有任何东西挡着他。
+      而这类路径的伤害是【静默】的：代码照常跑，只是报错文案里那句话
+      在别人机器上永远对不上，反而把真正该做的事（装一个）藏起来了。
+
+    只查【会被发给学生的文件】：Python 构建脚本、插件源码、插件清单、
+    以及打进 .vsix 的 sdk 副本。docs/ 与 tests/ 不查 ——
+    测试脚本 --help 里写本机路径是合理的，那是给我自己看的。
+    """
+    targets = []
+    for rel in ("tools", "extension/src", "extension/package.json",
+                "extension/sdk"):
+        p = os.path.join(ROOT, rel)
+        if os.path.isfile(p):
+            targets.append(p)
+        elif os.path.isdir(p):
+            for dp, _dn, fn in os.walk(p):
+                for name in fn:
+                    if name.endswith((".py", ".ts", ".c", ".h", ".json")):
+                        targets.append(os.path.join(dp, name))
+
+    bad = []
+    needles = ("D:" + "\\TOOLS", "anaconda3")
+    for p in targets:
+        try:
+            with open(p, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            continue
+        rel = os.path.relpath(p, ROOT)
+        if needles[0] in text:
+            bad.append("%s 里仍硬编码开发机路径 D:\\TOOLS" % rel)
+        if needles[1] in text:
+            bad.append("%s 里仍硬编码本机 Python 安装目录 anaconda3" % rel)
+    return bad
+
+
 def main():
     if find_clang() is None:
         print("⚠️  找不到 clang，跳过（需要 C 工具链）")
@@ -347,6 +480,24 @@ def main():
 
     print()
     print("=" * 68)
+    print("  build_vars_json —— 截断回退的边界（评审要求独立证明的那条）")
+    print("=" * 68)
+    src3 = os.path.join(tmp, "d_vars.c")
+    with open(src3, "w", encoding="utf-8", newline="\n") as f:
+        f.write(VARS_JSON_DRIVER)
+    ok4, out4 = compile_and_run("t_vars", src3, tmp, asan=True,
+                                extra_inc=inc, extra_src=srcs)
+    if ok4 is None:
+        print("  " + out4)
+        ok4, out4 = compile_and_run("t_vars_n", src3, tmp, asan=False,
+                                    extra_inc=inc, extra_src=srcs)
+        print("  [无ASan] " + (out4.splitlines()[-1] if out4 else "(无输出)"))
+    else:
+        print("  [ASan]   " + ("✅ 19 种容量下无越界，且均为合法 JSON"
+                              if ok4 else "❌ " + out4[:400]))
+
+    print()
+    print("=" * 68)
     print("  源码形态检查（防止实现与测试漂移）")
     print("=" * 68)
     bad = check_source_shape()
@@ -355,7 +506,14 @@ def main():
     if not bad:
         print("  ✅ scut_watch.c 的拷贝长度已收窄为 n")
 
-    allok = ok_canary and (ok_asan is not False) and ok3 and not bad
+    badpaths = check_no_hardcoded_paths()
+    for b in badpaths:
+        print("  ❌ " + b)
+    if not badpaths:
+        print("  ✅ 面向学生的产物里没有开发机绝对路径")
+
+    allok = ok_canary and (ok_asan is not False) and ok3 and ok4 \
+        and not bad and not badpaths
     print()
     print("=" * 68)
     print("  %s  内存安全回归" % ("✅ 通过" if allok else "❌ 失败"))

@@ -2006,17 +2006,41 @@ static const char *scut_pic_path_display(void)
 }
 
 /* --------------------------------------------------------------------------
- *  变量快照分配失败时的回退值。
+ *  变量快照缓冲（每帧 JSON 里的 "vars" 字段）。
  *
- * ★ 必须是【字符串字面量】而不能是别处 malloc 出来的内存：
- *   它在整帧的生命周期里只被读取，用完不释放。
- *   对应地，收尾处只能按 malloc_ok 判断能不能 free，
- *   不能按 "指针非空" 判断（那会把字面量 free 掉 —— 未定义行为）。
+ * ★ 为什么是【一次分配、整个进程复用】，而不是每帧 malloc/free ★
+ *   以前是每帧 malloc(80KB) + free。IDE 常驻会话下这是一帧一次分配释放，
+ *   而每帧本来就要 snprintf / write_ppm / printf —— 多这一对系统调用
+ *   虽然微秒级，但它是【纯浪费】：缓冲大小从头到尾没变过。
+ *   改成进程级单例后，判空分支也一起消失了（见 run_simulation）。
+ *
  * ★ 内容必须是合法 JSON：外层格式串把它原样嵌进 "vars":%s 里，
  *   塞个空字符串会让插件 JSON 解析失败，面板直接不更新。
  *   空数组 [] 表示"这次没取到变量"，是最诚实也最省事的降级。
  * -------------------------------------------------------------------------- */
+#define VARS_JSON_CAP   81920
 #define FALLBACK_VARS_JSON "[]"
+
+/* 进程级快照缓冲：main 里分配一次，on_frame 每帧覆写它。
+ *
+ * ★ 为什么放在文件作用域而不是 options_t / on_frame 内部 ★
+ *   on_frame 是被核心每帧回调的，它的局部变量每帧都重建；
+ *   缓冲必须活过【整帧】才能被 printf("%s") 引用。
+ *   做成 static 后所有权一目了然：谁分配谁释放，on_frame 只管写。
+ *
+ * ★ 失败时指向 FALLBACK_VARS_JSON（字符串字面量）而不是 NULL：
+ *   下面 printf 的格式里有 "%s" 传它，而 printf("%s", NULL)
+ *   在 glibc 上打印 "(null)"、在 MSVCRT 上直接【崩溃】——
+ *   跨平台行为不一致，也就是"老师机器好好的、学生机器一运行就闪退"。
+ *   变量面板少数据是次要的，JSON 合法才是硬要求。 */
+static char *s_vars_json = (char *)FALLBACK_VARS_JSON;
+/* s_vars_json 是否由 malloc 取得（决定收尾时能不能 free）。
+ * ★ 为什么必须用独立标志，而不能写 `s_vars_json != FALLBACK_VARS_JSON`：
+ *   那样会把两个字符串字面量拿来做指针比较 —— C 标准明确说这是
+ *   【未指定行为】（编译器可以合并、也可以不合并相同的字面量），
+ *   clang 会直接给 -Wstring-compare 警告。靠它判断 = 在赌编译器怎么实现。
+ *   这正是上一轮 free 字面量那个坑的同源问题，只是这次发生在【判据】上。 */
+static int   s_vars_json_owned = 0;
 
 /* 帧钩子：核心每跑完一帧就把结果交给这里。
  * 这是「核心不拥有窗口」的落地 —— 换成 Webview 后端时只需换掉这个函数。 */
@@ -2029,8 +2053,7 @@ static void on_frame(void *user)
     char         img_esc[1024];
     char         pic_esc[SCUT_PATH_MAX * 2];
     char         err_esc[256];      /* loadError 转义缓冲（短语，够用） */
-    char        *vars_json;         /* 每帧变量快照（堆分配，见下） */
-    int          malloc_ok;         /* vars_json 是否真的由 malloc 取得（决定能否 free） */
+    char        *vars_json = s_vars_json;   /* 进程级缓冲（main 分配一次，见 VARS_JSON_CAP） */
     int          load_error;
     int          is_bench;
     const scut_u8 *out;
@@ -2048,24 +2071,10 @@ static void on_frame(void *user)
         scut_sched_set_repeat(s_repeat_before_bench);
     }
 
-    /* 每帧变量快照：80KB 上限（--select 过滤后通常远小于此）。
-     * ★ 为什么堆分配而不是栈：快照随勾选数量伸缩，栈上 80KB 在
-     *   部分平台接近默认栈上限的警戒线；这里每帧一次 malloc/free
-     *   的开销（微秒级）与算法本体（几十微秒起）相比可以忽略，
-     *   却换来了"面板数值与画面同帧更新"。 */
-    vars_json  = (char *)malloc(81920);
-    malloc_ok  = (vars_json != NULL);
-    if (malloc_ok) {
-        build_vars_json(o, vars_json, 81920);
-    } else {
-        /* ★ 失败时必须给一个【合法 JSON 空数组】而不是留 NULL。
-         *   下面 printf 的格式里有 "%s" 传 vars_json，
-         *   而 printf("%s", NULL) 在 glibc 上会打印 "(null)"、
-         *   在 MSVCRT 上直接【崩溃】—— 跨平台行为不一致，
-         *   也就是"老师机器上好好的、学生机器上一运行就闪退"。
-         *   变量面板此时少数据是次要的，JSON 合法才是硬要求。 */
-        vars_json = (char *)FALLBACK_VARS_JSON;
-    }
+    /* 变量快照：写入【进程级】缓冲（run_simulation 里分配一次）。
+     * 为什么不用栈：80KB 在部分平台接近默认栈上限的警戒线。
+     * 为什么不再每帧 malloc/free：见 VARS_JSON_CAP 的说明。 */
+    build_vars_json(o, vars_json, VARS_JSON_CAP);
 
     /* 合成：输出图像 + 覆盖层 → 最终 RGB 图
      * ★ 调度器已经在 DRAW 之后把覆盖层合成进输出图了，
@@ -2195,14 +2204,13 @@ static void on_frame(void *user)
         }
     }
 
-    /* ★ 只在堆分配成功时才 free —— vars_json 可能是上面的
-     *   FALLBACK_VARS_JSON（字符串字面量），
-     *   对字面量调 free() 是未定义行为（MSVCRT 上会直接崩）。
-     *   所以这里用 malloc_ok 而不是 "vars_json != NULL" 来判断：
-     *   fallback 非空，用指针判空分辨不出来。 */
-    if (malloc_ok) {
-        free(vars_json);
-    }
+    /* vars_json 是【进程级】缓冲，由 run_simulation 分配一次，
+     *   这里【不】释放 —— 它要被下一帧继续用。
+     *   ★ 这也顺带消灭了上一轮那个"free 字面量"的坑：
+     *     以前每帧 malloc/free，回退值是字符串字面量，
+     *     于是必须额外记一个 malloc_ok 标志才能避免 free(字面量)。
+     *     改成进程级单例后，缓冲要么是真 malloc 来的、要么是常量，
+     *     所有权单一，不再需要那种标志。 */
 
     /* ----------------------------------------------------------------------
      *  ★★ 推进图片：必须放在【帧钩子的最后】，顺序本身是契约 ★★
@@ -2488,6 +2496,20 @@ int main(int argc, char **argv)
     /* --- 5) 装帧钩子并运行 --- */
     scut_set_frame_sink(on_frame, &o);
 
+    /* 变量快照缓冲：整个进程【只分配这一次】。
+     * ★ 以前是每帧 malloc(80KB)+free —— 常驻 IDE 会话下一帧一次，
+     *   而缓冲大小从头到尾没变过，纯属浪费。做成进程级单例后，
+     *   上一轮那个"判空回退 + malloc_ok 标志"的复杂度整体消失。
+     *   分配失败不用报错：s_vars_json 已预置为合法 JSON "[]"，
+     *   变量面板空着只是少数据，不该因此拒绝跑仿真。 */
+    {
+        char *buf = (char *)malloc(VARS_JSON_CAP);
+        if (buf != NULL) {
+            s_vars_json = buf;
+            s_vars_json_owned = 1;
+        }
+    }
+
     /* 帧输出目录（PPM 落盘处）。失败不致命：写文件时会报具体错误。
      * ★ 必须在第一帧之前建好：sink 每帧都会往这里写。 */
     ensure_dir(o.out_dir);
@@ -2536,5 +2558,11 @@ int main(int argc, char **argv)
 
     scut_frame_free();
     scut_core_shutdown();
+    /* 进程级快照缓冲在此归还。只在它确实是 malloc 来的时才 free ——
+     * 分配失败时 s_vars_json 仍是 FALLBACK_VARS_JSON 那个字面量，
+     * free(字面量) 是未定义行为。 */
+    if (s_vars_json_owned) {
+        free(s_vars_json);
+    }
     return 0;
 }

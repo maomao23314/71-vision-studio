@@ -2,7 +2,7 @@
   "name": "scut-71-vision-studio",
   "displayName": "SCUT-71 Vision Studio",
   "description": "智能车视觉仿真环境 —— 只写算法，其余交给环境",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "publisher": "scut-racing",
   "license": "GPL-3.0",
   "engines": {
@@ -289,7 +289,7 @@
         "scut71.toolchainPath": {
           "type": "string",
           "default": "",
-          "description": "【本机环境】编译工具链根目录（含 bin/clang.exe）。留空 = 依次探测：SCUT71_TOOLCHAIN 环境变量 → 插件自动下载的目录 → D:\\TOOLS\\llvm-mingw → PATH。"
+          "description": "【本机环境】编译工具链根目录（含 bin/clang.exe）。留空 = 依次探测：SCUT71_TOOLCHAIN 环境变量 → 插件自动下载的目录 → 常见安装位置 → PATH。"
         },
         "scut71.autoDownloadToolchain": {
           "type": "boolean",

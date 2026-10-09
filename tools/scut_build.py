@@ -94,9 +94,13 @@ if sys.version_info < (3, 8):  # pragma: no cover - 环境相关
         "本脚本需要 Python 3.8 或更高版本，当前是 %d.%d。\n"
         "原因：脚本使用了 3.8 才稳定的标准库与语法（f-string 调试、"
         "typing 简化写法等）。\n"
-        "解决办法：安装 Python 3.8+ 后重试，例如本机已有的 "
-        "D:\\TOOLS\\anaconda3\\python.exe（3.12.4）；\n"
-        "也可以在 VS Code 里把 python.defaultInterpreterPath 指向它。\n"
+        "解决办法：装一个 Python 3.8+ 再重试。\n"
+        "    · 装了 Anaconda：它自带一份，用 where python 或 conda 找；\n"
+        "    · 没装：去 python.org 下载安装（勾选 Add to PATH）；\n"
+        "    · VS Code 里也可以设置 python.defaultInterpreterPath 指向它。\n"
+        "★ 这段提示里刻意【不写任何具体机器的绝对路径】——\n"
+        "  开发者的本机路径对学生毫无意义，照着敲只会得到\n"
+        "  \"路径不存在\"，反而把真正该做的事（装一个 Python）藏起来了。\n"
         % (sys.version_info[0], sys.version_info[1])
     )
     raise SystemExit(2)
@@ -125,14 +129,37 @@ EXE_NAME = "scut_sim.exe"
 DEFAULT_CORE_LIB_REL = os.path.join(SCUT_DIR, "lib", "libscut_core.a")
 
 # 工具链候选根目录：--toolchain > SCUT71_TOOLCHAIN > 下面这些 > PATH
+#
+# ★★★ 这里曾经只有一条开发机的绝对路径 ★★★
+#   插件分发给学生之后，绝大多数人的机器上根本没有那个盘符 ——
+#   探测必然落空，白白多走一遍。
+#   更糟的是报错文案里也印着它，学生照着敲只会得到
+#   "系统找不到指定的路径"，而真正该做的事（装一个 LLVM-MinGW）被藏起来了。
+#
+#   所以现在：① 留空默认，靠 PATH / --toolchain / 环境变量；
+#        ② 补上【跨机器真实存在】的通用安装位置；
+#        ③ 探测失败时给的是"去哪儿装"，不是"我机器上在哪"。
+#   （被删掉的那条具体路径记在 docs/改动流水账.md 里 ——
+#     注释不该留本机路径，它是会被照抄的，而照抄必然失败。
+#     tests/test_mem_safety.py 里有一条断言专门守这件事。）
 TOOLCHAIN_ROOT_CANDIDATES = [
-    r"D:\TOOLS\llvm-mingw",
+    # Scoop（Windows 上常见的无管理员安装方式）
+    os.path.join(os.environ.get("USERPROFILE", ""), "scoop", "apps", "llvm-mingw", "current"),
+    # MSYS2 随带的 mingw-w64 环境
+    r"C:\msys64\mingw64",
+    r"C:\msys64\clang64",
+    # LLVM 官方安装器默认位置
+    r"C:\Program Files\LLVM",
+    # Chocolatey
+    r"C:\ProgramData\chocolatey\lib\llvm-mingw\tools\install",
+    # 传统 MinGW-w64（clang 也能用它做宿主编译；sysroot 另说）
+    r"C:\mingw64",
 ]
 
 # binutils 的 objdump 候选（相对「工具链根」之外的本机常见位置）。
 # ★ 为什么必须找 binutils：见文件头【四】。
 BINUTILS_OBJDUMP_CANDIDATES = [
-    r"D:\TOOLS\mingw-w64\bin\objdump.exe",
+    r"C:\Program Files\Git\mingw64\bin\objdump.exe",
     r"C:\mingw64\bin\objdump.exe",
     r"C:\msys64\mingw64\bin\objdump.exe",
 ]
@@ -389,8 +416,8 @@ def _first_existing(paths: Sequence[str]) -> str:
 def _bin_of(root: str) -> str:
     """
     允许用户把 --toolchain 指到两种位置：
-        D:\\TOOLS\\llvm-mingw          （根目录，bin/ 在里面）
-        D:\\TOOLS\\llvm-mingw\\bin     （直接就是 bin）
+        C:\\Program Files\\LLVM        （根目录，bin/ 在里面）
+        C:\\Program Files\\LLVM\\bin   （直接就是 bin）
     两种都接受，避免「明明路径没错却报找不到编译器」。
     """
     if os.path.isfile(os.path.join(root, "bin", "clang.exe")):
@@ -457,7 +484,7 @@ def detect_toolchain(explicit_root: str, verbose_reporter: Optional[Reporter] = 
                      ) -> Toolchain:
     """
     按优先级探测工具链：
-        --toolchain  >  SCUT71_TOOLCHAIN 环境变量  >  D:\\TOOLS\\llvm-mingw  >  PATH
+        --toolchain  >  SCUT71_TOOLCHAIN 环境变量  >  常见安装位置  >  PATH
     """
     tc = Toolchain()
 
@@ -554,7 +581,7 @@ def _find_objdump(tc: Optional[Toolchain]) -> str:
     找 binutils 的 objdump。
 
     ★ 顺序很关键：
-      1) 显式候选路径里的 binutils（D:\\TOOLS\\mingw-w64 等）；
+      1) 显式候选路径里的 binutils（C:\\Program Files\\Git\\mingw64\\bin 等）；
       2) PATH 上的 `objdump.exe` —— 【带扩展名】才会命中真正的 .exe；
          llvm-mingw 的 bin 目录里同时有 `llvm-objdump.exe` 和无扩展名的
          `objdump` 脚本（内容就是 llvm-objdump），若用 which('objdump')
@@ -1764,9 +1791,16 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
         reporter.error("找不到 clang 编译器，无法构建。\n"
                        "    原因：本环境的 C 编译器固定为 clang（LLVM-MinGW），"
                        "它自带 MinGW sysroot，装完即可编译。\n"
-                       "    下一步：安装 LLVM-MinGW，或用 "
-                       "--toolchain D:\\TOOLS\\llvm-mingw 指定根目录，"
-                       "或把它的 bin 目录加进 PATH。")
+                       "    下一步（三选一）：\n"
+                       "      1) 装 LLVM-MinGW：\n"
+                       "         https://github.com/mstorsjo/llvm-mingw/releases\n"
+                       "         下载后解压到一个固定目录，例如 C:\\llvm-mingw\n"
+                       "      2) 或把解压出来的 bin 目录加进系统 PATH\n"
+                       "      3) 或用 --toolchain 指定根目录，例如：\n"
+                       "         scut_build.py --toolchain C:\\llvm-mingw ...\n"
+                       "         （根目录下要有 bin\\clang.exe）\n"
+                       "    ★ 不要照抄别人机器上的绝对路径 —— 各人装的位置不同，\n"
+                       "      那条命令在你自己机器上几乎必然不存在。")
         return finish(2)
     reporter.human("  编译器  : %s" % tc.cc)
 
@@ -2736,7 +2770,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="工程目录（含 code/ 与 config.h）")
     p.add_argument("--toolchain", default="",
                    help="工具链根目录。省略时按 SCUT71_TOOLCHAIN 环境变量、"
-                        r"D:\TOOLS\llvm-mingw、PATH 的顺序自动探测")
+                        "常见安装位置、PATH 的顺序自动探测")
     p.add_argument("--no-watch", action="store_true",
                    help="关闭自动符号发现（构建更快，但 IDE 变量面板会是空的）")
     p.add_argument("--core-lib", default="",

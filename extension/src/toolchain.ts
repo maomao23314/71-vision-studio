@@ -53,14 +53,28 @@ const PROBE_TIMEOUT_MS = 6000;
 /**
  * 工具链根目录兜底候选（与 tools/scut_build.py 的 TOOLCHAIN_ROOT_CANDIDATES 保持一致）。
  *
- * ★ 为什么可以在最后一步用「已知位置」而不是全靠 PATH：
- *   本项目的目标用户是第一次配环境的学生。LLVM-MinGW 解压到哪个目录
- *   在文档里是写死的（D:\TOOLS\llvm-mingw），照着文档做的人不该
- *   因为「没配 PATH」就被卡住。探测顺序仍然是
- *   设置 > 环境变量 > 已知位置 > PATH，显式配置永远优先。
+ * ★★★ 这里曾经只有一条开发机的绝对路径 ★★★
+ *   插件分发给学生之后，大多数人机器上根本没有那个盘符 —— 探测必然落空。
+ *   注释里曾经写"文档里是写死的，照着文档做的人不该被卡住"，
+ *   但恰恰因为那是【别人的】机器路径，照做的人只会更困惑。
+ *   所以改为只列【跨机器真实可能存在】的通用安装位置，
+ *   并且不再假装"某处一定有一个"。
+ *   （被删掉的那条具体路径记在 docs/改动流水账.md 里 ——
+ *     代码注释不该留本机路径：注释是会被照抄的，而照抄必然失败。
+ *     tests/test_mem_safety.py 里有一条断言专门守这件事。）
  */
-const ROOT_CANDIDATES = [
-    'D:\\TOOLS\\llvm-mingw',
+const ROOT_CANDIDATES: string[] = [
+    // Scoop（Windows 上常见的无管理员安装方式）
+    path.join(process.env.USERPROFILE || 'C:\\Users', 'scoop', 'apps', 'llvm-mingw', 'current'),
+    // MSYS2 自带的环境
+    'C:\\msys64\\mingw64',
+    'C:\\msys64\\clang64',
+    // LLVM 官方安装器默认位置
+    'C:\\Program Files\\LLVM',
+    // Chocolatey
+    'C:\\ProgramData\\chocolatey\\lib\\llvm-mingw\\tools\\install',
+    // 传统 MinGW-w64
+    'C:\\mingw64',
 ];
 
 /**
@@ -73,10 +87,13 @@ const ROOT_CANDIDATES = [
  *   （实测：`llvm-objdump: --dwarf=<value>: The only supported value is 'frames'`），
  *   自动符号发现会【静默失效】（退出码非 0，没有任何提示）。
  *   所以这里先按已知位置找真·binutils，最后才退回 PATH。
+ *
+ * ★ Git for Windows 自带的 MinGW-w64 是最稳的一个来源：装 Git 的人基本都有，
+ *   且它带的确实是 GNU binutils。
  */
 const BINUTILS_OBJDUMP_CANDIDATES = [
-    'D:\\TOOLS\\mingw-w64\\bin\\objdump.exe',
-    'D:\\TOOLS\\Dev-Cpp\\MinGW64\\bin\\objdump.exe',
+    'C:\\Program Files\\Git\\mingw64\\bin\\objdump.exe',
+    'C:\\Program Files\\Git\\usr\\bin\\objdump.exe',
     'C:\\mingw64\\bin\\objdump.exe',
     'C:\\msys64\\mingw64\\bin\\objdump.exe',
     'C:\\msys64\\ucrt64\\bin\\objdump.exe',
@@ -354,7 +371,7 @@ function detectImpl(allowDownload: boolean): Promise<Toolchain> {
         //
         // ★ 顺序即优先级，而「插件自下载」排在已知位置之前是有意的：
         //   用户装了插件却什么编译器都没有时，我们下载的那份是【确定可用】的；
-        //   而 D:\TOOLS\llvm-mingw 这种硬编码路径只在开发机上存在，
+        //   而任何硬编码的开发机路径只在开发机上存在，
         //   换个同学就变成"看起来配了其实没有"。先用自己的，再碰运气。
         const roots: Array<{ root: string; from: string }> = [];
         if (configured) {
@@ -479,8 +496,9 @@ function detectImpl(allowDownload: boolean): Promise<Toolchain> {
                     + '    影响：算法能编译能运行，但 IDE 变量面板里一个变量都不会出现。\n'
                     + '    下一步（任选其一）：\n'
                     + '      1) 安装 MinGW-w64（它自带 binutils），把它的 bin 目录加进 PATH；\n'
-                    + '      2) 已经有 Dev-C++ 的话，直接在设置里把 objdump 指到 '
-                    + 'D:\\TOOLS\\Dev-Cpp\\MinGW64\\bin\\objdump.exe 所在目录也行；\n'
+                    + '         最省事的一条：装了 Git for Windows 的话，它的\n'
+                    + '         C:\\Program Files\\Git\\mingw64\\bin\\objdump.exe 通常就在；\n'
+                    + '      2) 已经有 MinGW-w64 的话，在设置里把 objdump 指到它的 bin 目录；\n'
                     + '      3) 暂时跳过：先用 --no-watch 语义构建（本插件会自动这样做），'
                     + '仿真照常跑，只是没有变量。');
             } else {
