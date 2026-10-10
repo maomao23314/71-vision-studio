@@ -44,7 +44,18 @@ void SCUT_DrawRect(int x0, int y0, int x1, int y1, scut_u32 color);
 void SCUT_DrawText(int x, int y, scut_u32 color, const char *fmt, ...);
 
 /* --- 输出图像（RGB 三通道结果图，PROCESS 阶段写） ---
- * ★ 输出缓冲每像素 3 字节（R/G/B 紧凑排列，行步长 = 宽度 × 3）。 */
+ * ★ 输出缓冲每像素 3 字节（R/G/B 紧凑排列，行步长 = 宽度 × 3）。
+ *
+ * ★ 这三个是"算法直接产出显示图"的路径（不配 outputArray 时用）。
+ *   2026-10-11 修掉一个缺口：调度器原先每帧无条件把输入图铺满输出图当
+ *   默认底图，会把这里写的像素整幅冲掉。现在只要本帧调过 Set/SetRGB，
+ *   调度器就跳过铺底图（见 scut_draw_output_written）。
+ *
+ * ★ 为什么保留 SetRGB / Get（复核时它们零调用）：
+ *   SetRGB 是"算法直接产【彩色】图"的唯一接口 —— 与 Set（灰度）成对，
+ *   删掉等于砍掉一条已宣传的用法；
+ *   Get 是调试用的读回接口，自定义呈现后端（车载 IPS 之外）可能需要它。
+ *   两者都在公开头文件里，属于承诺的能力，不是内部死代码。 */
 void  SCUT_OutImageSet(int x, int y, scut_u8 value);
 void  SCUT_OutImageSetRGB(int x, int y, scut_u8 r, scut_u8 g, scut_u8 b);
 scut_u8 SCUT_OutImageGet(int x, int y);

@@ -37,6 +37,19 @@ void SCUT_LogClear(void);
 /* --- 核心内部使用：供呈现后端取出日志行 --- */
 int         scut_log_line_count(void);
 const char *scut_log_line_at(int index);
+
+/* 日志总开关。默认开（scut_log.c 里 s_enabled 初值 1）。
+ *
+ * ★ 与 scut_sched_set_log_enabled 的区别（2026-10-11 复核时理清）：
+ *   两者【语义重叠】，都在控"要不要记日志"，但落点不同：
+ *     scut_log_set_enabled    → 本模块的总开关（读的时候直接跳过）
+ *     scut_sched_set_log_*    → 调度器侧的阶段门控（DRAW 期间才开闸）
+ *   实测两个都是"有实现、无调用方"。保留它们而不是删掉的理由：
+ *   它们是公开头文件里的开关，且"压测时别让日志刷屏"是真实需求；
+ *   真要接的时候，接 scut_sched_set_log_enabled 即可（它是每帧生效的那个），
+ *   本组 getter/setter 留给"整个会话彻底静音"的场景。
+ *   若将来确认后者永远不需要，可以把它并进前者 —— 但那是决定，
+ *   不是"零调用就删"。 */
 int         scut_log_enabled(void);
 void        scut_log_set_enabled(int enabled);
 

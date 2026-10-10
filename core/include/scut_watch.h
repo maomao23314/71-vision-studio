@@ -85,6 +85,14 @@ void SCUT_Watch(const char *name, const void *p, scut_watch_type_t t,
 /* --- 供呈现后端/UI 遍历 --- */
 int                          scut_watch_count(void);
 const scut_watch_entry_t    *scut_watch_at(int index);
+
+/* 清空观察表。供【会话重建】与测试使用。
+ *
+ * ★ 为什么保留它（2026-10-11 复核：它当前零调用）：
+ *   与 scut_registry_reset 同理 —— 注册发生在 main 之前、只增不减，
+ *   运行期不需要清空。但"同进程重开会话"的场景（软复位、多工程切换、
+ *   单元测试）需要它，而它是公开接口。
+ *   tests/test_mem_safety.py 的驱动就是靠这类 reset 反复建表验越界的。 */
 void                         scut_watch_reset(void);
 
 /* --- 读值 ---

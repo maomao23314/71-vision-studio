@@ -66,9 +66,15 @@ export const SECTIONS: SectionDef[] = [
 /**
  * 字段表。顺序即面板显示顺序。
  *
- * ★ 注意 pic.start 不在这里 —— 它与 image 同属"图集起点"但含义不同：
- *   image 是画布尺寸，pic.start 是从第几张图开始。
- *   放在一起会让人以为改一个能连带另一个，所以分开，并各自写清。
+ * ★ 更正（这条注释原先自相矛盾，2026-10-11 修）：
+ *   它曾写着"注意 pic.start 【不在这里】"，而下面的 FIELDS 里
+ *   明明就有 path:['pic','start'] —— 注释与代码直接打架，
+ *   读代码的人会以为那个字段不存在。
+ *
+ *   现在的说明（与代码一致）：
+ *     pic.start 就排在图集那一组里，紧跟 pic.ext 之后。
+ *     它与 image（画布尺寸）含义不同，所以 hint 里各自写清了，
+ *     但没有把它挪出本表 —— 它是设置项，就该出现在设置面板里。
  */
 export const FIELDS: FieldDef[] = [
     {
@@ -119,7 +125,10 @@ export const FIELDS: FieldDef[] = [
     },
     {
         path: ['pic', 'start'], label: '图集起始编号', kind: 'number',
-        hint: '0 或 1 都支持（pic\\0\\*.png 这种 0 起的图集也能跑）',
+        hint: '从第几张图开始跑。★ 省略或留空时默认按 1 起编号 —— '
+            + '如果你的图集是 0 起的（pic/0.png、pic/1.png…），'
+            + '这里必须显式填 0，否则第 0 张永远轮不到。'
+            + '（后端也会自己探测 0.<ext> 是否存在，但显式填最稳。）',
     },
     {
         path: ['run', 'processRepeat'], label: '每帧重复次数', kind: 'number',
