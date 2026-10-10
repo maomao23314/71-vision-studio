@@ -163,6 +163,21 @@ export const FIELDS: FieldDef[] = [
         path: ['toolchain', 'autoWatch'], label: '自动发现全局变量', kind: 'bool',
         hint: '关闭可加快构建，但变量面板会是空的',
     },
+    {
+        path: ['toolchain', 'watchExclude'], label: '变量黑名单', kind: 'text',
+        rebuild: true,
+        hint: '逗号分隔的变量名：这些全局量不进变量面板。'
+            + '适合排除体积大又不想看的缓冲（例如整幅中间图）。留空 = 不排除。'
+            + '★ 改完要重新编译',
+    },
+    {
+        path: ['toolchain', 'watchMaxElems'], label: '变量元素数上限', kind: 'number',
+        rebuild: true,
+        hint: '只把元素数不超过这个值的变量放进面板；0 = 不限制。'
+            + '★ 与「默认勾选」的区别：本项是【根本不出现在列表里】，'
+            + '而大缓冲本来默认就不勾选（仍在列表里，想要可以勾上）。'
+            + '★ 改完要重新编译',
+    },
 ];
 
 /** 按路径取值，取不到返回 undefined。 */

@@ -20,7 +20,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import type { BuildOptions, BuildResult, ScutProject } from './types';
-import { detectToolchain, peekToolchain, resetToolchainCache, runDoctor } from './toolchain';
+import { detectToolchain, peekToolchain, resetToolchainCache, runDoctor, setGlobalStorageDir } from './toolchain';
 import { createProjectFromTemplate, describeProject, detectProject, locatePicReadme, locateTemplateDir } from './project';
 import { build, disposeBuildOutputChannel, getBuildOutputChannel } from './build';
 import {
@@ -180,6 +180,14 @@ function dirExists(p: string): boolean {
 }
 
 export function activate(context: vscode.ExtensionContext): void {
+    // ---- 把 VS Code 官方给的存储目录注入工具链模块 ----
+    // ★ 为什么必须做：工具链模块原先手拼 <APPDATA>\Code\User\globalStorage\...
+    //   路径，于是 Insiders / VSCodium / Code - OSS 会落到错目录，
+    //   改扩展名后已下载的 165MB 还会失联。globalStorageUri 正是干这个的，
+    //   且 VS Code 保证它"按扩展隔离、升级时保留"—— 与我们要的语义一致。
+    //   （注入只在激活时做一次，探测函数的签名一个都不用改。）
+    setGlobalStorageDir(context.globalStorageUri.fsPath);
+
     // ---- 日志通道：所有「说人话」的诊断都往这里写一份，便于用户复制求助 ----
     const out = getBuildOutputChannel();
     const log = (line: string): void => {
@@ -281,6 +289,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('scut71.stop', () => commandStop(simView, log)),
         vscode.commands.registerCommand('scut71.prevPic', () => simView.prevPic()),
         vscode.commands.registerCommand('scut71.nextPic', () => simView.nextPic()),
+        vscode.commands.registerCommand('scut71.gotoPic', () => commandGotoPic(simView)),
         vscode.commands.registerCommand('scut71.openSettings', () => commandOpenSettings(context.extensionUri, log)),
         vscode.commands.registerCommand('scut71.selectVariables', () => commandSelectVariables(simView)),
         vscode.commands.registerCommand('scut71.setupProject', () => commandSetupProject(log)),
@@ -324,8 +333,13 @@ function buildOptions(projectRoot: string): BuildOptions {
     // ★ 0.9.4：配置只在 scut_project.json 里，读不到就用默认值，
     //   不再回落到 VS Code 设置 —— 回落到设置等于请回第二个真值。
     const { config } = readConfig(projectRoot);
+    const cfg = config ?? defaultConfig();
     return {
-        autoWatch: (config ?? defaultConfig()).toolchain.autoWatch,
+        autoWatch: cfg.toolchain.autoWatch,
+        // 变量发现的两个过滤器也走同一条路：插件读配置 → 进 argv。
+        // （脚本侧同样会读配置兜底，但显式传参让启动日志可追溯。）
+        watchExclude: cfg.toolchain.watchExclude,
+        watchMaxElems: cfg.toolchain.watchMaxElems,
     };
 }
 
@@ -600,6 +614,42 @@ async function commandDebug(simView: SimViewProvider, log: (line: string) => voi
 async function commandStop(simView: SimViewProvider, log: (line: string) => void): Promise<void> {
     log('[命令] 停止仿真。');
     await simView.stop();
+}
+
+/**
+ * 跳到指定编号的测试图。
+ *
+ * ★ 为什么要有这个命令（一个"功能做了但用不到"的补齐）：
+ *   后端一直实现了 `g<N>` 命令（含边界钳位），协议注释里也写着，
+ *   但插件【从不发送它】—— 用户在 60 多张图的工程里只能一张张点
+ *   「下一张」，没法跳转。这里补上唯一缺的入口。
+ *
+ * ★ 与「上一张/下一张」完全同一条通道：只换输入图，不重启进程，
+ *   算法内部状态（环形缓冲、状态机、丢线计数）全部保留。
+ *   理由见 simview.nudgePic 的长注释。
+ *
+ * ★ 编号怎么填：用输入框而不是下拉列表 —— 图集可能有几百张，
+ *   下拉列表反而更难选；而"我知道我要第几张"是最直接的表达。
+ *   真正越界了也不用担心：后端会把编号夹到合法区间，
+ *   并把实际用的那张随帧 JSON 报回来（界面状态栏会显示）。
+ */
+async function commandGotoPic(simView: SimViewProvider): Promise<void> {
+    const raw = await vscode.window.showInputBox({
+        title: 'SCUT-71：跳到第几张图',
+        prompt: '填图集里的编号（0 起的图集就填 0 开始的号）',
+        placeHolder: '例如 12',
+        validateInput: (v) => {
+            const t = v.trim();
+            if (t.length === 0) {
+                return '请填一个编号';
+            }
+            return /^\d+$/.test(t) ? undefined : '请填一个非负整数';
+        },
+    });
+    if (raw === undefined) {
+        return;                    // 用户取消
+    }
+    await simView.gotoPic(Number(raw.trim()));
 }
 
 /**

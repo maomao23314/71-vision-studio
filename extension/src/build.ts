@@ -570,6 +570,15 @@ async function runBuildScript(
     if (!options.autoWatch) {
         args.push('--no-watch');
     }
+    // 变量发现的两个过滤器（可选）。
+    // ★ 只有非空才传：空串/0 传给脚本等于"没指定"，
+    //   但显式传一个空 --exclude 会让日志里出现一个误导性的参数。
+    if (options.watchExclude && options.watchExclude.trim().length > 0) {
+        args.push('--exclude', options.watchExclude.trim());
+    }
+    if (options.watchMaxElems && options.watchMaxElems > 0) {
+        args.push('--max-elems', String(options.watchMaxElems));
+    }
 
     const attempts: Array<{ exe: string; prefix: string[] }> = [];
     if (tc.python) {

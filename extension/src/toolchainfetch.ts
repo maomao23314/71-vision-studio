@@ -49,8 +49,50 @@ export interface EnsureToolchainResult {
     downloaded: boolean;
 }
 
-const RELEASE_API = 'https://api.github.com/repos/mstorsjo/llvm-mingw/releases/latest';
+const DEFAULT_RELEASE_API = 'https://api.github.com/repos/mstorsjo/llvm-mingw/releases/latest';
 const RELEASES_PAGE = 'https://github.com/mstorsjo/llvm-mingw/releases';
+
+/**
+ * 查 release 的 API 地址，**可被环境变量覆盖**。
+ *
+ * ★★ 为什么要可配置（校园网的现实）★★
+ *   官方端点在校园网/国内网络下经常不可达，此时 autoDownload 形同虚设，
+ *   用户只能自己手动下载解压 —— 而插件并没有给他别的选择。
+ *   留一个环境变量出口，至少让有镜像的人（或 CI）能把它指过去，
+ *   而不必改插件源码。
+ *
+ * ★ 用环境变量而不是配置项：
+ *   "用哪个下载源"是**本机/本网络**的属性，不是工程的属性 ——
+ *   与 SCUT71_TOOLCHAIN / SCUT71_PYTHON 同一类，都走环境变量
+ *   （见 docs/架构设计.md §4.5 关于"本机环境不要进工程配置"的立场）。
+ *
+ * ★ 只接受 https：
+ *   这是个会下载并【执行】二进制的地址，允许 http 等于允许中间人
+ *   替换掉 clang.exe。宁可拒绝用户的 http 配置并说明原因，
+ *   也不要默默接受一个可被篡改的下载源。
+ */
+export function currentReleaseApi(): string {
+    const raw = readApiOverride();
+    if (!raw) {
+        return DEFAULT_RELEASE_API;
+    }
+    return /^https:\/\//i.test(raw) ? raw : DEFAULT_RELEASE_API;
+}
+
+function readApiOverride(): string {
+    return (process.env.SCUT71_TOOLCHAIN_API ?? '').trim().replace(/^"|"$/g, '');
+}
+
+/**
+ * 用户给了覆盖值、但因为不是 https 被拒（供上层给出一条明确提示）。
+ * ★ 静默退回官方是不行的：用户以为生效了，实际没有 —— 又是一次"配了没用"。
+ */
+export function toolchainApiOverrideRejected(): boolean {
+    const raw = readApiOverride();
+    return raw.length > 0 && !/^https:\/\//i.test(raw);
+}
+
+
 /** ★ 必须带 User-Agent：GitHub 对无 UA 的请求直接 403。 */
 const USER_AGENT = 'scut71-vision-studio';
 const ASSET_NAME_RE = /^llvm-mingw-.*-ucrt-x86_64\.zip$/;
@@ -184,7 +226,7 @@ interface ReleaseAsset { name: string; url: string; }
 
 /** 查最新 release，挑出 Windows x86_64 的 ucrt 包。 */
 async function resolveLatestAsset(): Promise<ReleaseAsset> {
-    const text = await fetchText(RELEASE_API);
+    const text = await fetchText(currentReleaseApi());
 
     let json: { assets?: unknown };
     try {

@@ -18,7 +18,8 @@ import * as path from 'path';
 import * as os from 'os';
 import { execFile } from 'child_process';
 import type { DoctorResult, Toolchain, ToolInfo } from './types';
-import { ensureToolchain, findInstalledToolchain } from './toolchainfetch';
+import { ensureToolchain, findInstalledToolchain, currentReleaseApi, toolchainApiOverrideRejected } from './toolchainfetch';
+import { pickStorageDir } from './storagedir';
 import { detectProject } from './project';
 import { defaultConfig, readConfig, writeConfig } from './projectconfig';
 
@@ -27,25 +28,67 @@ let cached: Toolchain | undefined = undefined;
 let inflight: Promise<Toolchain> | undefined = undefined;
 
 /**
- * 插件存放「自己下载的工具链」的目录。
- *
- * ★ 为什么不用 extensionUri：插件安装目录在升级时会被整体替换，
- *   下载进来的几百 MB 工具链会跟着消失，用户每次升级都要重下。
- *   globalStorage 按扩展隔离、且升级时保留，是这类"下载物"的正确位置。
- *
- * ★ 为什么不用 context.globalStorageUri：
- *   detectToolchain() 是模块级函数，签名里没有 context，
- *   而把它一路透传进来会污染十几个调用点。这里按 VS Code 的约定路径自行推导，
- *   等价且不引入耦合。取不到时返回临时目录下的一个固定名字 ——
- *   宁可下到临时目录（大不了重下），也不要因为拿不到路径就放弃"到手即用"。
+ * 由 activate() 注入的、VS Code 官方给的存储目录（context.globalStorageUri）。
+ * 未注入时为 undefined —— 此时回落到下面的路径推导，行为与旧版一致。
  */
-function globalStorageDir(): string {
+let injectedStorageDir: string | undefined;
+
+/**
+ * 注入插件存储目录。由 extension.ts 的 activate() 调一次。
+ *
+ * ★★ 为什么不直接用 context.globalStorageUri 而要走一层注入 ★★
+ *   本模块的探测函数是模块级的，签名里没有 context；而调用点散在
+ *   build.ts / debug.ts / extension.ts 多处。把 context 一路透传进来
+ *   会改十几个签名（这正是上一版注释里说的"污染调用点"）。
+ *   但那个理由不足以支撑"手拼路径"—— 因为手拼的代价更大（见下）。
+ *   注入只在 activate 里做一次，调用点一个都不用改。
+ *
+ * ★★ 手拼 APPDATA/Code/... 的三个真实问题（本函数修的就是它们）★★
+ *   ① 硬编码 'Code'：Insiders / VSCodium / Code - OSS 这些变体的
+ *      globalStorage 不在 <APPDATA>\Code\ 下 —— 落到错目录或不存在的目录。
+ *      而这些恰恰是学生常用的变体。
+ *   ② 硬编码扩展 ID：改 publisher 或改扩展名之后，路径随之变化，
+ *      用户【已下载的 165MB 工具链全部失联】，被迫重下。
+ *   ③ context.globalStorageUri 本来就是干这个的，且 VS Code 保证
+ *      "按扩展隔离、升级时保留"这两条性质 —— 与我们要的语义完全一致。
+ */
+export function setGlobalStorageDir(dir: string | undefined): void {
+    injectedStorageDir = (dir && dir.length > 0) ? dir : undefined;
+}
+
+/**
+ * 旧版的路径推导（手拼 APPDATA）。**只在激活时没拿到 context 时**才用。
+ *
+ * ★ 保留它而不是删掉：它是"注入失败"时的兜底 ——
+ *   宁可下到一个可能不理想但可用的目录，也不要因为拿不到路径就
+ *   放弃"到手即用"（与 detectToolchain 一贯的降级取向一致）。
+ */
+function legacyGlobalStorageDir(): string {
     const appData = process.env.APPDATA;
     if (appData) {
         return path.join(appData, 'Code', 'User', 'globalStorage',
                          'scut-racing.scut-71-vision-studio');
     }
     return path.join(os.tmpdir(), 'scut71-toolchain');
+}
+
+/**
+ * 实际使用的工具链存储目录。
+ *
+ * ★ 决策逻辑（三选一）抽在 storagedir.ts 的 pickStorageDir 里 ——
+ *   那个文件不 import 任何模块，所以三条分支能被普通 Node 测试覆盖
+ *   （见 tests/extension_smoke.js）。这里只负责把参数凑齐。
+ *
+ * ★★ 向后兼容（这条很重要，不然老用户要重下 165MB）★★
+ *   从"手拼路径"切到"官方目录"时，老用户已经下好的工具链在【旧】目录里，
+ *   所以 pickStorageDir 里有"旧目录里有就继续用"这一条。
+ */
+function effectiveStorageDir(): string {
+    return pickStorageDir({
+        injected: injectedStorageDir,
+        legacy: legacyGlobalStorageDir(),
+        hasToolchain: (dir) => findInstalledToolchain(dir) !== undefined,
+    });
 }
 
 /** 版本探测的超时。★ 必须有超时：任何一次 getWindowsDirectory 之类的系统调用
@@ -68,6 +111,25 @@ const PROBE_TIMEOUT_MS = 6000;
 async function promptToolchainMissing(): Promise<'pick' | 'download' | undefined> {
     const pick = '指定已有的工具链';
     const dl = '帮我下载一份（约 165MB，只需一次）';
+
+    /* ★★ 下载源必须【如实写出来】（诚实性要求，不是装饰）★★
+     *
+     *   这个动作会从网络取回一个二进制包并解压，其中的 clang.exe
+     *   随后会被用来编译用户代码 —— 等价于"执行从网上拿来的程序"。
+     *
+     *   而 llvm-mingw 官方 release **不发布校验和**，所以插件做不到
+     *   "下载后校验完整性"。既然无法用校验来保证，就必须让用户
+     *   【知道自己在信任谁】—— 至少他能看出源是不是被改过、
+     *   或者自己先去核对一次。
+     *
+     *   静默从某个 URL 下载几百 MB 并执行，是不可接受的默认行为。 */
+    let source = `下载源：${currentReleaseApi()}\n`;
+    if (toolchainApiOverrideRejected()) {
+        source = '★ 你设置了 SCUT71_TOOLCHAIN_API，但它不是 https 地址，'
+               + '出于安全已忽略（会从这里下载可执行文件）。\n'
+               + `实际下载源：${currentReleaseApi()}\n`;
+    }
+
     const choice = await vscode.window.showWarningMessage(
         '没有找到编译工具链（需要 LLVM-MinGW 的 clang）。',
         { modal: true, detail:
@@ -75,7 +137,10 @@ async function promptToolchainMissing(): Promise<'pick' | 'download' | undefined
             + '指定时选【里面含有 bin 子目录的那一层】，'
             + '也就是能直接看到 bin\\clang.exe 的上一级目录。\n\n'
             + '还没有？那可以帮你下载一份到插件目录，'
-            + '解压开就能用，全程只需要一次。' },
+            + '解压开就能用，全程只需要一次。\n\n'
+            + source
+            + '（上游 llvm-mingw 不发布校验和，插件无法校验下载内容；'
+            + '如需自定义源，设环境变量 SCUT71_TOOLCHAIN_API 为一个 https 地址。）' },
         pick,
         dl,
     );
@@ -525,7 +590,7 @@ function detectImpl(allowDownload: boolean): Promise<Toolchain> {
         if (envRoot) {
             roots.push({ root: envRoot, from: 'SCUT71_TOOLCHAIN 环境变量' });
         }
-        const fetched = findInstalledToolchain(globalStorageDir());
+        const fetched = findInstalledToolchain(effectiveStorageDir());
         if (fetched) {
             roots.push({ root: fetched, from: '插件自动下载（上次装好的）' });
         }
@@ -633,7 +698,7 @@ function detectImpl(allowDownload: boolean): Promise<Toolchain> {
                     }
                 }
             } else if (choice === 'download') {
-                const dl = await ensureToolchain(globalStorageDir(), () => { /* 进度已经在 withProgress 里显示 */ });
+                const dl = await ensureToolchain(effectiveStorageDir(), () => { /* 进度已经在 withProgress 里显示 */ });
                 if (dl.ok && dl.root) {
                     root = dl.root;
                     rootFrom = '插件自动下载';

@@ -433,14 +433,25 @@ def _copy_fn_text(out_array, variables):
         % (w, h, src, w, h))
 
 
-def _emit_wrapper(args, variables):
+def _emit_wrapper(args, variables, all_variables=None):
     """写出包装编译单元。
 
     ★ 这个文件承担两件事，都用同一个 #include 用户源码的技巧完成：
         1) 把用户代码里的全局变量（含 static）注册进观察表；
         2) 若配置指定了"结果图数组名"，且它就声明在本文件里，
            生成搬运函数（由环境接线单元调用）。
+
+    ★ 为什么要有 all_variables 这个参数（默认等于 variables）：
+      第 2) 件事需要看到结果图数组的【声明形状】，而它可能被
+      --exclude / --max-elems 从注册列表里滤掉了（见 main() 的说明）。
+      所以"注册用哪个列表"与"找数组形状用哪个列表"必须分开传：
+        variables     —— 过滤后，进注册表（用户在面板里看得到的）
+        all_variables —— 过滤前，只用来生成搬运函数
+      不分开的话，用户一排除结果图数组，搬运函数就没了，
+      构建随即报"数组找不到"（而它明明存在）。
     """
+    if all_variables is None:
+        all_variables = variables
     regs = []
     for v in variables:
         dim = len(v['dims']) if v['dims'] else 0
@@ -452,7 +463,7 @@ def _emit_wrapper(args, variables):
     fname = args.out_c.replace('\\', '/').split('/')[-1]
     body = HEADER.format(fname=fname, src=args.src, count=len(variables),
                          regs='\n'.join(regs) or '    /* (无全局变量) */',
-                         copy_fn=_copy_fn_text(args.output_array, variables))
+                         copy_fn=_copy_fn_text(args.output_array, all_variables))
     with open(args.out_c, 'w', encoding='utf-8-sig', newline='\r\n') as f:
         f.write(body)
 
@@ -619,6 +630,21 @@ def main():
 
     variables = collect_variables(parse_dwarf(r.stdout))
 
+    # ★★ 结果图数组要先单独留下来（豁免于下面两个过滤器）★★
+    #
+    # 为什么：本生成器除了注册变量，还要为 `--output-array` 生成搬运函数
+    # scut_env_copy_output()，而那个函数的形状（逐像素深拷贝 + 尺寸适配）
+    # 靠【看得见该数组的声明】推导出来。
+    # 若结果图数组被 --exclude 点名、或因元素数超过 --max-elems 被滤掉
+    # （而结果图恰恰通常是 22560 元素的大数组！），它就会消失 →
+    # 搬运函数不被生成 → 构建脚本随即报
+    #     "设置里指定的「结果图数组名」在 code/ 里找不到"
+    # 而那个数组明明存在。用户会去改配置里的数组名 —— 越改越错。
+    #
+    # ★ 留两份而不是"强行塞回注册列表"：
+    #   用户点名排除它，就是不想在面板里看到它（那是他的权利）。
+    #   所以只把它喂给搬运函数的生成逻辑，不注册进观察表。
+    all_vars = variables
     black = {s.strip() for s in args.exclude.split(',') if s.strip()}
     variables = [v for v in variables
                  if v['name'] not in black and not v['name'].startswith('_')]
@@ -627,7 +653,7 @@ def main():
     variables.sort(key=lambda v: v['name'])      # 稳定可复现
 
     try:
-        _emit_wrapper(args, variables)
+        _emit_wrapper(args, variables, all_vars)
     except CopyShapeError as exc:
         # 用户配置问题：把中文说明原样打到 stderr 并给出专用退出码，
         # 由 scut_build.py 转成构建错误（而不是让它冒成调用栈）。

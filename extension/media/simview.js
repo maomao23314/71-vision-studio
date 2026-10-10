@@ -677,9 +677,14 @@
   bind('btn-stop', function () { vscode.postMessage({ type: 'cmd', cmd: 'stop' }); });
   bind('btn-build', function () { vscode.postMessage({ type: 'cmd', cmd: 'build' }); });
 bind('btn-debug', function () { vscode.postMessage({ type: 'cmd', cmd: 'debug' }); });
-  // 图集翻页：上一张 / 下一张（走扩展的设置项，IDE 重启后仍停留原地）
+  // 图集翻页：上一张 / 下一张（走扩展侧，进程不重启、算法状态保留）
   bind('btn-prev', function () { vscode.postMessage({ type: 'cmd', cmd: 'prevPic' }); });
   bind('btn-next', function () { vscode.postMessage({ type: 'cmd', cmd: 'nextPic' }); });
+  // 跳到指定编号：图集很大时（实测工程 60+ 张）比一张张点快得多。
+  // ★ 后端一直实现了 g<N> 命令、协议注释里也写着，但插件从不发送它 ——
+  //   这里补上唯一缺的入口。走扩展主命令，让按钮/标题栏/命令面板
+  //   共用同一份实现（含输入框与校验）。
+  bind('btn-goto', function () { vscode.postMessage({ type: 'cmd', cmd: 'gotoPic' }); });
   // 测速：同一张图重复 N 次取平均（旧环境 R 键的做法）
   bind('btn-bench', function () { vscode.postMessage({ type: 'cmd', cmd: 'bench' }); });
   // 设置入口：直接跳到本插件的设置页（扩展侧会展开最常用的「工具链」子栏目）

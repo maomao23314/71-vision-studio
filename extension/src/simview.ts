@@ -183,10 +183,22 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
         return [...this.selected];
     }
 
-    /** 用户勾选变化：立即在宿主侧过滤，并记下供下次启动传给 --select。 */
+    /**
+     * 用户勾选变化。
+     *
+     * ★ 这里【只做宿主侧的显示过滤】，不通知仿真进程。
+     *   真实机制：变量快照每帧【全量】发（后端只在显式传了 --select 时
+     *   才过滤），所以勾选变化只影响"给 webview 看哪些"，
+     *   与仿真进程无关 —— 这正是 README 承诺的「勾选后不需要重新编译」。
+     *
+     * ★ 更正（原注释写错过）：这条注释原先写"并记下供下次启动传给 --select"，
+     *   但那个机制并不存在：既没有字段保存它，SimSession 侧也没有对应的
+     *   管线（setSelectedVariables 曾是空函数，已删除）。
+     *   如果哪天真要传 --select，代价是【改勾选必须重启进程】，
+     *   与上面那条承诺直接冲突 —— 所以那不是"补上就好"的事。
+     */
     public async selectVariables(names: string[]): Promise<void> {
         this.selected = new Set(names);
-        this.session?.setSelectedVariables([...this.selected]);
         this.deps.log(
             `[视图] 变量勾选已更新（${this.selected.size} 个）：${[...this.selected].join(', ') || '(无)'}`,
         );
@@ -261,6 +273,27 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
     /** 下一张图。 */
     public async nextPic(): Promise<void> {
         await this.nudgePic(+1);
+    }
+
+    /**
+     * 跳到指定编号的图（供「跳到第 N 张」用）。
+     *
+     * ★ 与 prevPic/nextPic 同样的语义：只换输入图，不重启进程、
+     *   不清算法状态（理由见 nudgePic 的长注释）。
+     * ★ 编号越界的处理交给后端（scut_pic_load 会夹到合法区间并把
+     *   实际用的那张随帧报回来）—— 插件侧不重复实现同一套边界规则。
+     * ★ 返回 undefined 表示会话起不来（与 nudgePic 一致），
+     *   调用方据此给出提示。
+     */
+    public async gotoPic(n: number): Promise<void> {
+        const s = await this.ensureSession();
+        if (!s) {
+            return;
+        }
+        this.deps.log(`[跳图] 跳到第 ${n} 张。`);
+        this.updateProduction();
+        this.sendStatus();
+        await s.gotoPic(n);
     }
 
     /**
@@ -382,7 +415,9 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
             exePath: exe,
             toolchainBin,
             picDir: this.deps.getPicDir(),
-            selected: [...this.selected],
+            /* ★ 这里原先传 selected: [...this.selected]（注释说是给 --select 用）。
+             *   那个选项从未被拼进 argv，已随 SimSessionOptions 一并删除。
+             *   勾选只影响宿主侧的显示过滤，不需要传给子进程。 */
             projectRoot: this.deps.projectRoot(),
         });
         // ★ 只交给 pushLog 一处分流：它内部决定去 webview / 输出通道 /
@@ -553,6 +588,11 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
                     void this.prevPic();
                 } else if (cmd === 'nextPic') {
                     void this.nextPic();
+                } else if (cmd === 'gotoPic') {
+                    /* 跳到指定编号。走扩展主命令 —— 这样 webview 按钮、
+                     * 视图标题栏图标、命令面板三条路共用同一份实现
+                     * （含输入框与校验），不会各自漂移。 */
+                    void vscode.commands.executeCommand('scut71.gotoPic');
                 } else if (cmd === 'settings') {
                     /* 设置入口。与「编译」一样走命令 —— 这样 webview 按钮、
                      * 命令面板、快捷键三条路共用同一份实现，不会各自漂移。 */
@@ -687,6 +727,7 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
       <span class="toolbar-sep"></span>
       <button id="btn-prev" class="primary" title="上一张图 (←)">◀ 上一张</button>
       <button id="btn-next" class="primary" title="下一张图 (→)">下一张 ▶</button>
+      <button id="btn-goto" title="跳到指定编号的图（图集很大时比一张张点快）">跳到…</button>
       <span class="toolbar-sep"></span>
       <button id="btn-bench" title="测速：同一张图重复 N 次取平均 cycles (F9)">测速</button>
       <button id="btn-stop" class="danger" title="停止仿真进程 (Shift+F5)">■ 停止</button>

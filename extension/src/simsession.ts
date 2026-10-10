@@ -29,8 +29,17 @@ export interface SimSessionOptions {
     picDir?: string;
     /** 帧图像（PPM/P6）输出目录（透传给 --out，默认放系统临时目录） */
     frameOutDir?: string;
-    /** 用户勾选的变量（透传给 --select，逗号分隔） */
-    selected?: string[];
+    /* ★ 这里【曾经】有一个 selected?: string[]，注释写着"透传给 --select"。
+     *   实际上它从未被拼进 argv（picArgsToArgv 只产 --frame/--repeat/--ext/--pic），
+     *   是一处「注释承诺了代码没做的事」。已删除。
+     *
+     *   ★ 为什么是"删选项"而不是"把 --select 接上"：
+     *     后端确实实现了 --select 过滤（scut_headless_main.c 的 var_selected），
+     *     但它是【命令行参数】—— 一旦真的传了，用户在面板里改勾选就必须
+     *     重启进程才生效。而 README 承诺的是「勾选后不需要重新编译」。
+     *     现在的做法（快照每帧全量发 + 宿主侧按勾选过滤）才是对的设计：
+     *     勾选只影响显示，与进程无关。所以修的是插件侧的假承诺，
+     *     后端的 --select 作为通用能力保留（CI / 命令行仍可用）。 */
     /**
      * 工程根目录。
      *
@@ -65,8 +74,10 @@ export class SimSessionImpl implements SimSession {
     private readonly logCbs: Array<(line: string) => void> = [];
     private readonly exitCbs: Array<(code: number | null) => void> = [];
 
-    /** 选中的变量名。变了要重启进程才能让 --select 生效（见 setSelectedVariables）。 */
-
+    /* ★ 这里原先有一行孤立的注释："选中的变量名。变了要重启进程才能让
+     *   --select 生效（见 setSelectedVariables）。" —— 它描述的是一个
+     *   不存在的机制（既没有这个字段，setSelectedVariables 也是空函数）。
+     *   已删除，避免读代码的人去找一个不存在的东西。 */
 
     /** 背压：只允许一帧在途。 */
     private inFlightFrame = -1;
@@ -314,6 +325,31 @@ export class SimSessionImpl implements SimSession {
     }
 
     /**
+     * 跳到第 n 张图（协议 "g<N>"，进程不重启，算法状态保留）。
+     *
+     * ★ 与 step()/nextPic() 走同一条 stdin 通道，所以：
+     *   · 进程不重启 → 算法的内部状态（环形缓冲、状态机、丢线计数）保留。
+     *     这对"前后帧关联"的巡线算法是硬需求，也是当初把翻页从
+     *     "重启进程"改成"发协议命令"的原因（见 nudgePic 的说明）。
+     *   · 不需要仿真程序支持运行期改图集 —— 它只是换一张输入图。
+     *
+     * ★ 编号语义：n 是【图集里的编号】（0 起图集就是 0..count-1）。
+     *   越界不用在这里钳：后端 scut_pic_load 自己会夹到合法区间，
+     *   并把实际用的那张记进 s_pic_index（随后随帧 JSON 的 "pic" 字段报回来）。
+     *   在插件侧再钳一次等于把同一套边界规则实现两遍 ——
+     *   两边一旦有差别，就会出现"报的号与实际用的图不一致"。
+     *
+     * ★ 为什么要有钳位下限：
+     *   负数对后端是无意义的（strtol 会得到负值，后端会夹成第一张），
+     *   但发一个明显非法的值过去不如在这里就挡住 —— 它一定是调用方写错了。
+     */
+    gotoPic(n: number): Promise<void> {
+        const idx = Math.max(0, Math.floor(n));
+        this.writeLine('g' + idx);
+        return Promise.resolve();
+    }
+
+    /**
      * 测速：当前这张图重复 N 次（协议 "b<N>"）。
      *
      * ★ 只跑【计时段】：后端收到 b<N> 后把 repeat 临时设为 N、
@@ -373,21 +409,17 @@ export class SimSessionImpl implements SimSession {
         }
     }
 
-    /**
-     * 用户勾选的变量发生变化。
+    /* ★ 这里原先有一个 setSelectedVariables(_names) 空函数，
+     *   注释说"快照每帧全量发，宿主侧按勾选过滤 —— 这里无事可做"，
+     *   但又声称"如果启动时带了 --select，则记录「需要重启才生效」"。
+     *   后者是不存在的功能（既不记录、也没有 UI 提示），已删除。
      *
-     * ★ 为什么不重启进程：
-     *   核心的 --select 是命令行参数，运行中改不了。但重启会让用户
-     *   丢掉当前帧位置与已累积的曲线。所以策略是：
-     *     · 只做【过滤】——变量快照本来每帧就全量发（除非命令行了 select），
-     *       我们在扩展宿主侧按当前勾选过滤后再发给 webview。
-     *     · 如果启动时带了 --select，则记录「需要重启才生效」，
-     *       由 UI 提示用户，而不是偷偷重启。
-     */
-    setSelectedVariables(_names: string[]): void {
-        // 快照每帧全量发，宿主侧按勾选过滤 —— 这里无事可做。
-        // （保留方法：SimSession 接口的一部分，未来若后端支持运行期 select 可复用。）
-    }
+     *   现在勾选变化的真实路径是：
+     *     simview.selectVariables()  → 更新 this.selected
+     *                                → sendCatalogToAll() + sendSnapshot()
+     *   也就是【纯宿主侧的显示过滤】，完全不碰仿真进程 —— 这正是
+     *   README 承诺的"勾选后不需要重新编译"。
+     *   SimSession 接口里的同名成员也一并删掉了（接口不该声明空实现）。 */
 
 
 

@@ -138,6 +138,18 @@ export interface BuildOptions {
      *   两者的选择是工程约定，不是"模式"。
      */
     autoWatch: boolean;
+    /**
+     * 变量名黑名单（逗号分隔，透传成 `--exclude`）。留空 = 不排除。
+     *
+     * ★ 为什么由插件传而不是让脚本自己读配置：
+     *   scut_build.py 确实也会读工程配置（命令行优先），
+     *   但插件是多进程并行构建场景下的唯一调度者 ——
+     *   把值显式放进 argv，日志里就能看到"这一次用的到底是什么"，
+     *   排查时不必再去翻工程 JSON。
+     */
+    watchExclude?: string;
+    /** 变量元素数上限（透传成 `--max-elems`，0 = 不限制）。 */
+    watchMaxElems?: number;
 }
 
 export interface BuildResult {
@@ -250,8 +262,20 @@ export interface SimSession {
     bench(n: number): Promise<void>;
     /** 运行 n 帧（连续发空行） */
     runFrames(n: number): Promise<void>;
-    /** 用户勾选的变量发生变化时通知核心 */
-    setSelectedVariables(names: string[]): void;
+    /**
+     * 跳到第 n 张测试图（协议 g<N>，进程不重启，算法状态保留）。
+     *
+     * ★ 为什么需要它：后端一直实现了 `g<N>` 命令（含边界钳位），
+     *   协议注释里也写着，但【插件从不发送它】—— 用户在 60 多张图的
+     *   工程里只能一张张点「下一张」，无法跳转。
+     *   跳图与翻页共用同一条 stdin 通道，所以不重启进程、状态保留。
+     */
+    gotoPic(n: number): Promise<void>;
+    /* ★ 这里原先有 setSelectedVariables(names: string[])。
+     *   它在实现侧是空函数，且没有任何真实用途 —— 勾选变化走的是
+     *   宿主侧的显示过滤（simview.selectVariables），完全不碰仿真进程。
+     *   接口不该声明空实现：那会让人以为"调用它就能改变变量收集"。
+     *   已连同实现一起删除。 */
     onFrame(cb: (f: FramePacket) => void): void;
     onVariables(cb: (v: VariableSnapshot[]) => void): void;
     onLog(cb: (line: string) => void): void;

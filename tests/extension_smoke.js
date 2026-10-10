@@ -248,7 +248,61 @@ console.log('\n=== 7. 图集参数共享（simargs.ts）—— 防"调试与运�
     }
 }
 
-console.log('\n=== 8. 真实进程输出端到端（协议一致性）===');
+console.log('\n=== 8. 工具链存储目录的选择（storagedir.ts）===');
+{
+    /* ★ 这条守的是"切换存储目录时不能把老用户的工具链弄丢"。
+     *
+     *   背景：插件原先手拼 <APPDATA>\Code\User\globalStorage\... 作为
+     *   工具链下载目录，于是 Insiders / VSCodium / Code-OSS 会落到错目录，
+     *   改扩展名后已下载的 165MB 还会失联。改成用官方的
+     *   context.globalStorageUri 之后，【老用户已经下好的那份在旧目录里】
+     *   —— 如果直接切过去，他们会被要求静默重下 165MB。
+     *
+     *   所以 pickStorageDir 有"旧目录里有就继续用"这一条，
+     *   下面四个场景把它钉死。 */
+    const sd = require(path.join(__dirname, '..', 'extension', 'out', 'storagedir.js'));
+    const LEGACY = 'C:/Users/x/AppData/Roaming/Code/User/globalStorage/scut-racing.scut-71-vision-studio';
+    const OFFICIAL = 'C:/Users/x/AppData/Roaming/Code - Insiders/User/globalStorage/scut-racing.scut-71-vision-studio';
+
+    const pick = (injected, have) => sd.pickStorageDir({
+        injected,
+        legacy: LEGACY,
+        hasToolchain: (d) => have.indexOf(d) >= 0,
+    });
+
+    // ① 新装用户：官方目录空 → 用官方目录（新下载放这里）
+    ok('官方目录空、旧目录空 → 用官方目录',
+        pick(OFFICIAL, []) === OFFICIAL, pick(OFFICIAL, []));
+
+    // ② 新装且已下过：官方目录有 → 用它
+    ok('官方目录已有 → 用官方目录',
+        pick(OFFICIAL, [OFFICIAL]) === OFFICIAL, pick(OFFICIAL, [OFFICIAL]));
+
+    // ③ ★ 老用户：官方目录空、旧目录有 → 继续用旧目录（不重下）
+    ok('★ 老用户（工具链在旧目录）→ 继续用旧目录，不重下',
+        pick(OFFICIAL, [LEGACY]) === LEGACY, pick(OFFICIAL, [LEGACY]));
+
+    // ④ 两个都有（例如先升级又重下过）→ 官方优先，保持"新位置"
+    ok('两处都有 → 官方目录优先',
+        pick(OFFICIAL, [OFFICIAL, LEGACY]) === OFFICIAL,
+        pick(OFFICIAL, [OFFICIAL, LEGACY]));
+
+    // ⑤ 没注入（老版本 / 拿不到 context）→ 回落旧推导目录，行为不变
+    ok('未注入 → 回落旧目录（行为与旧版一致）',
+        pick(undefined, []) === LEGACY, pick(undefined, []));
+    ok('未注入且旧目录有 → 仍是旧目录',
+        pick(undefined, [LEGACY]) === LEGACY, pick(undefined, [LEGACY]));
+
+    // ⑥ 注入为空串按"没注入"处理（防止把 fsPath 的空值当有效路径）
+    ok('注入空串 → 视为未注入',
+        pick('', []) === LEGACY, pick('', []));
+
+    // ⑦ 注入与旧推导恰好相同时不该出问题（仍返回该目录）
+    ok('注入值 == 旧目录时正常返回',
+        pick(LEGACY, []) === LEGACY, pick(LEGACY, []));
+}
+
+console.log('\n=== 9. 真实进程输出端到端（协议一致性）===');
 {
     const dir = process.argv[2];
     const sim = process.argv[3];

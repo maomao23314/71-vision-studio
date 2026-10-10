@@ -131,6 +131,24 @@ export interface ProjectConfig {
         autoDownload: boolean;
         /** 编译时自动发现全局变量（关闭可加快构建，但变量面板会是空的）。 */
         autoWatch: boolean;
+        /**
+         * 变量名黑名单（逗号分隔）。这些全局量不进变量面板。留空 = 不排除。
+         *
+         * ★ 用途：算法里常有体积大又不想看的缓冲（整幅中间图之类），
+         *   它们在面板里占位置、还容易被误勾选。
+         * ★ 与 watchMaxElems 的区别：本项按【名字】排除，
+         *   那一项按【元素数】排除。要两个都限就都配上。
+         */
+        watchExclude: string;
+        /**
+         * 只把元素数 ≤ N 的变量放进面板（0 = 不限制）。
+         *
+         * ★ 与 defaultSelected 的区别（别混）：
+         *   defaultSelected 是"默认不勾选"—— 变量仍在列表里，用户想看自己勾。
+         *   本项是"根本不出现在列表里"—— 从清单生成阶段就过滤掉。
+         *   所以它适合"我确定这些大缓冲这辈子都不看"的场景。
+         */
+        watchMaxElems: number;
     };
 }
 
@@ -143,7 +161,8 @@ export function defaultConfig(): ProjectConfig {
         hooks: { init: [], frame: [], post: [] },
         pic: { dir: '', ext: '', start: 1 },
         run: { processRepeat: 1, runFrames: 60, benchRepeat: 1000 },
-        toolchain: { path: '', pythonPath: '', autoDownload: true, autoWatch: true },
+        toolchain: { path: '', pythonPath: '', autoDownload: true, autoWatch: true,
+                     watchExclude: '', watchMaxElems: 0 },
     };
 }
 
@@ -227,6 +246,10 @@ export function normalizeConfig(raw: unknown): ProjectConfig {
             pythonPath: str(tc.pythonPath, ''),
             autoDownload: bool(tc.autoDownload, true),
             autoWatch: bool(tc.autoWatch, true),
+            // 黑名单：字符串原样留着（逗号分隔），空串 = 不排除。
+            watchExclude: str(tc.watchExclude, ''),
+            // 元素数上限：>=0 的整数；负数按 0 处理（0 = 不限制）。
+            watchMaxElems: Math.max(0, asInt(tc.watchMaxElems, 0)),
         },
     };
 }

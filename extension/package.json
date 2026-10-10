@@ -108,6 +108,12 @@
         "icon": "$(chevron-right)"
       },
       {
+        "command": "scut71.gotoPic",
+        "title": "跳到第 N 张图",
+        "category": "SCUT-71",
+        "icon": "$(go-to-file)"
+      },
+      {
         "command": "scut71.openSettings",
         "title": "打开设置",
         "category": "SCUT-71",
@@ -185,9 +191,14 @@
           "group": "navigation@6"
         },
         {
-          "command": "scut71.stop",
+          "command": "scut71.gotoPic",
           "when": "view == scut71.simview",
           "group": "navigation@7"
+        },
+        {
+          "command": "scut71.stop",
+          "when": "view == scut71.simview",
+          "group": "navigation@8"
         }
       ],
       "editor/title": [

@@ -937,7 +937,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # 留空 = 插件自动探测；机器上装了多个 Python 时建议写死一个，
     # 因为自动探测可能挑中旧版本（实测：py -3 反查到 3.6）。
     "toolchain": {"path": "", "pythonPath": "",
-                  "autoDownload": True, "autoWatch": True},
+                  "autoDownload": True, "autoWatch": True,
+                  # 变量发现的两个过滤器（见 --exclude / --max-elems）。
+                  # ★ 名字必须与 extension/src/projectconfig.ts 的
+                  #   ProjectConfig 逐字一致 —— tests/test_extension_settings.py
+                  #   的 D 段会在两边不一致时报红。
+                  "watchExclude": "", "watchMaxElems": 0},
 }
 
 
@@ -1984,15 +1989,12 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
         auto_watch = False
 
     # 变量发现的两个过滤器（透传给 scut_symbols.py）。
-    # ★ 用 getattr 兜底：这两个参数是本轮新增的，而 do_build 也可能被
-    #   测试脚本以手工构造的 Namespace 调用（那样就没有这两个属性）。
-    #   缺省 = 不启用，与"没传 --exclude / --max-elems"语义一致。
-    exclude_names = getattr(args, "exclude", "") or ""
-    max_elems = getattr(args, "max_elems", 0) or 0
-    if exclude_names:
-        reporter.human("  变量黑名单: %s" % exclude_names)
-    if max_elems > 0:
-        reporter.human("  变量元素上限: %d（超过的不进面板）" % max_elems)
+    # ★ 值来源见下面「配置读出来之后」那一段 —— CLI 优先、其次工程配置。
+    #   这里只取 CLI 的原始值（空/0 表示"用户没指定"）。
+    cli_exclude = getattr(args, "exclude", "") or ""
+    cli_max_elems = getattr(args, "max_elems", 0) or 0
+    exclude_names = cli_exclude
+    max_elems = cli_max_elems
 
     if auto_watch:
         reporter.human("  符号发现: %s" % tc.objdump)
@@ -2204,12 +2206,35 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
             #   放在这里而不是等用到时现算，是为了让两处消费者
             #   （那条警告 + do_clean 的图集统计）天然看到同一个值。
             apply_pic_dir(proj, cfg)
+
+            # ★ 变量发现的两个过滤器：CLI 优先，其次工程配置。
+            #   为什么 CLI 优先：命令行是"这一次构建"的显式覆盖，
+            #   与 --toolchain / --core-lib 等的取向一致
+            #   （显式的东西压过配置里的默认值）。
+            #   为什么要从配置里读：插件没有命令行，它只能改
+            #   scut_project.json —— 不读配置的话这两个开关就
+            #   永远只有手敲命令的人能用（那正是它们原先的状态）。
+            if not cli_exclude:
+                exclude_names = str(
+                    ((cfg.get("toolchain") or {}).get("watchExclude") or "")).strip()
+            if cli_max_elems <= 0:
+                try:
+                    max_elems = int(
+                        ((cfg.get("toolchain") or {}).get("watchMaxElems") or 0))
+                except (TypeError, ValueError):
+                    max_elems = 0
+                if max_elems < 0:
+                    max_elems = 0
         except ConfigParseError as exc:
             reporter.error(str(exc) + "\n    下一步：修好后重跑构建。")
             return finish(2)
 
         reporter.human("  配置来源: %s" % cfg_source)
         reporter.human("  图像尺寸: %d x %d" % (img_w, img_h))
+        if exclude_names:
+            reporter.human("  变量黑名单: %s" % exclude_names)
+        if max_elems > 0:
+            reporter.human("  变量元素上限: %d（超过的不进面板）" % max_elems)
 
         try:
             write_generated_config(proj.gen_dir, cfg)
