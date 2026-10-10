@@ -11,15 +11,13 @@
 
 #include "scut_sdk.h"
 #include "scut_internal.h"
+/* ★ 像素缓冲的访问器由 bind 单元提供。契约声明在 scut_bind.h 里，
+ *   本文件原先【手写 extern】这 4 个函数 —— 与后端那份重复，
+ *   且改签名不会有任何编译错误。已收口到单一头文件。 */
+#include "scut_bind.h"
 
 #include <stdio.h>
 #include <string.h>   /* memcpy —— 搬运结果图 */
-
-/* --- 由 bind 单元提供 --- */
-extern scut_u8 *scut_bind_input(void);
-extern scut_u8 *scut_bind_output(void);
-extern int      scut_bind_width(void);
-extern int      scut_bind_height(void);
 
 static scut_phase_t s_phase = SCUT_PHASE_IDLE;
 static int          s_violations = 0;   /* 在非法阶段访问输入图像的次数 */

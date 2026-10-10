@@ -35,6 +35,18 @@ extern "C" {
  * ★ 与 tools/scut_symbols.py 生成的 SCUT_T_xxx 字符串一一对应。
  *   改动这里必须同步改生成器，否则注册表里会出现未知类型。
  *   （tests/test_symbols.py 会捕获这类不一致。）
+ *
+ * ★★ 两类"不会被解引用"的类型：SCUT_T_PTR 与 SCUT_T_STR ★★
+ *   它们的值只渲染成地址。原因：表里存的指针完全不可控，
+ *   解引用可能指向已释放内存或任意地址 → 崩在变量面板的刷新路径上。
+ *   SCUT_T_STR 曾经是例外（当成字符串读），已改为与 PTR 一致；
+ *   详见 core/src/scut_watch.c 里该分支的说明。
+ *
+ *   ★ 顺带说明为什么 SCUT_T_STR 几乎用不到：
+ *     scut_symbols.py 对 DW_TAG_pointer_type 一律产出 SCUT_T_PTR，
+ *     【从不产出 SCUT_T_STR】。所以它只在手写 SCUT_Watch 时才可能出现。
+ *     保留这个枚举值是为了让"我想显示一个字符串"这件事有地方表达
+ *     （将来若要支持读字符串，正是在这里扩展）。
  * -------------------------------------------------------------------------- */
 typedef enum {
     SCUT_T_I8 = 0, SCUT_T_U8,

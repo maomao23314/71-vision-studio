@@ -48,6 +48,45 @@ static int       s_ovl_stride = 0;
 static int       s_rgb_stride = 0;
 
 /* --------------------------------------------------------------------------
+ *  「本帧是否已被算法写过输出图」标志
+ *
+ *  ★ 为什么需要它（一条真实的接口缺口）：
+ *    scut_sdk.h 明确把 SCUT_OutImageSet / SetRGB 宣传为"算法直接产出显示图"
+ *    的路径。但调度器每帧在 PROCESS 之后、DRAW 之前会调
+ *    scut_env_seed_output_from_input() 把输入图铺满输出图 ——
+ *    于是算法在 PROCESS 里用 SCUT_OutImageSet 画的像素，会被这一铺【全量冲掉】。
+ *    用户看到的是"我明明写了 OutImageSet，画面却还是原始灰度图"，
+ *    不报错、不崩溃，只是他写的东西没了。
+ *
+ *  ★ 修法为什么放在这里（拥有输出图的模块）而不是 scut_input.c：
+ *    "输出图有没有被写过"这件事，只有写它的人（本模块）知道。
+ *    让 scut_input.c 去问 scut_draw.c，是调用方向正确的依赖；
+ *    反过来（让 draw 去改 seed 的行为）会把帧序逻辑摊到两个模块里。
+ *    由调度器读这个标志再决定要不要 seed —— 帧序仍然只有调度器说了算。
+ *
+ *  ★ 语义：只在 SCUT_OutImageSet / SetRGB 真正【写入了一个像素】时置 1。
+ *    越界调用不算（它什么都没写）。
+ *    由调度器在每帧开头清零（见 scut_sched.c 的 run_one_frame）。
+ *
+ *  ★ 为什么不是"清零 + 检查"分散在各处：
+ *    散着写就要求每个写入点都记得置位，漏一个就是一次静默失效 ——
+ *    所以两个写入函数都置位，且只有调度器清零，职责单一。
+ * -------------------------------------------------------------------------- */
+static int s_out_written = 0;
+
+/* 本帧是否已被算法直接写过输出图。供调度器决定"要不要铺默认底图"。 */
+int scut_draw_output_written(void)
+{
+    return s_out_written;
+}
+
+/* 由调度器在每帧开头调用，开始新一帧的记账。 */
+void scut_draw_clear_output_written(void)
+{
+    s_out_written = 0;
+}
+
+/* --------------------------------------------------------------------------
  *  8x8 点阵字体（ASCII 32..126，共 95 个字形）
  *
  *  位序约定（★ 关键，改渲染代码前必须先看这里）：
@@ -567,6 +606,11 @@ void SCUT_OutImageSet(int x, int y, scut_u8 value)
     p[0] = value;   /* R */
     p[1] = value;   /* G */
     p[2] = value;   /* B —— 灰度值写成等值三通道即为"灰" */
+
+    /* ★ 记账：本帧算法已经直接写过输出图了。
+     *   调度器据此【跳过】"铺默认底图"那一步，否则这里写的东西
+     *   会在同一帧稍后被整幅输入图覆盖掉（详见 s_out_written 的说明）。 */
+    s_out_written = 1;
 }
 
 void SCUT_OutImageSetRGB(int x, int y, scut_u8 r, scut_u8 g, scut_u8 b)
@@ -582,6 +626,8 @@ void SCUT_OutImageSetRGB(int x, int y, scut_u8 r, scut_u8 g, scut_u8 b)
     p[0] = r;
     p[1] = g;
     p[2] = b;
+
+    s_out_written = 1;   /* 同上：见 SCUT_OutImageSet 的说明 */
 }
 
 scut_u8 SCUT_OutImageGet(int x, int y)

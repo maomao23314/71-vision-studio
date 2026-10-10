@@ -349,6 +349,13 @@ static void run_one_frame(void)
 
     frame_begin = scut_tick_now();
 
+    /* 新的一帧：清掉"算法是否直接写过输出图"的记账。
+     * ★ 必须在 PROCESS 之前清 —— 这一帧的 PROCESS 里如果调用了
+     *   SCUT_OutImageSet，下面第 2b 步就会据此跳过"铺默认底图"。
+     *   放在帧开头（而不是 PROCESS 之后）是为了让"每帧恰好清一次"
+     *   这件事与其它每帧状态一样，有一个明确的、单一的位置。 */
+    scut_draw_clear_output_written();
+
     /* --- 1. PROCESS（重复 repeat 次） ---
      * 复杂度测试时把 repeat 调大，观察 process_us 是否随规模线性增长。
      * 因此这里报的是【每次调用的平均值】：repeat 变大时这个数字应当
@@ -387,8 +394,24 @@ static void run_one_frame(void)
      *
      * ★ 位置同样有语义：必须在 PROCESS 之后（此时输入图已由后端填好）、
      *   在 DRAW 之前（DRAW 里若配了结果图数组会覆盖它，覆盖层再叠上去）。
-     *   这一拷贝不受 --repeat 影响 —— 它是"呈现"的事，不是算法的事。 */
-    scut_env_seed_output_from_input();
+     *   这一拷贝不受 --repeat 影响 —— 它是"呈现"的事，不是算法的事。
+     *
+     * ★★ 但若算法【本帧已经自己写过输出图】，就必须跳过这一步 ★★
+     *   scut_sdk.h 把 SCUT_OutImageSet / SetRGB 宣传为"算法直接产出显示图"
+     *   的路径。可那一铺默认底图是【全量】覆盖 —— 会把算法刚画的像素
+     *   整幅冲掉，用户看到的是"写了 OutImageSet 却还是原始灰度图"，
+     *   不报错、不崩溃，只是他写的东西没了。
+     *   所以这里改为：本帧有人写过就不铺，没人写才铺（保持默认行为）。
+     *
+     *   ★ 为什么这样判断是安全的：标志只由 SCUT_OutImageSet / SetRGB
+     *     的【成功写入】置位，越界调用不算。没配 outputArray 且没调
+     *     OutImageSet 的最常见路径 → 标志为 0 → 行为与改动前完全相同。
+     *     配了 outputArray 的路径 → 算法通常不调 OutImageSet，
+     *     标志为 0 → 仍铺底图，随后 glue 的 SCUT_EnvCopyOutput 照旧覆盖它，
+     *     语义也不变。 */
+    if (!scut_draw_output_written()) {
+        scut_env_seed_output_from_input();
+    }
 
     /* --- 3. DRAW（独立计时，绝不并入 process_us） ---
      *

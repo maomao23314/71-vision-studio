@@ -299,6 +299,28 @@ def check_source_shape():
     if "memcpy(buf + used, tmp, (size_t)wrote)" in src:
         bad.append("memcpy 仍在用未收窄的 wrote（越界读会回来）")
 
+    # ④ 指针类【一律不解引用】—— 含 SCUT_T_STR
+    #
+    # ★ 这条守的是一个真实的野指针风险：
+    #   SCUT_T_STR 原先写 snprintf("%s", *(char**)cursor)，
+    #   即把注册表里的指针当字符串解引用。那个指针完全不可控
+    #   （未初始化 / 指向已释放内存 / 用户误传），解引用就是崩在
+    #   变量面板的刷新路径上。而同一段代码的注释却写着"指针解引用
+    #   可能指向非法地址而崩溃"—— 只对 SCUT_T_PTR 做了防护，自相矛盾。
+    #
+    # ★ 判据同样是"整行精确匹配"，理由见本函数 docstring：
+    #   只搜 "SCUT_T_STR" 会连注释一起命中（本项目会在注释里
+    #   解释"它曾经怎样、为什么改"），必须落在真正做取值的那一行上。
+    bad_str_form = 'snprintf(tmp, sizeof(tmp), "%s", (*(char *const *)cursor)'
+    if bad_str_form in src:
+        bad.append("scut_watch.c 的 SCUT_T_STR 仍在解引用指针（野指针会崩溃）")
+    if 'case SCUT_T_STR:  wrote = snprintf(tmp, sizeof(tmp), "<str>%p"' not in src:
+        bad.append("scut_watch.c 的 SCUT_T_STR 没有改成只报地址")
+
+    # ⑤ SCUT_T_PTR 必须仍然只报地址（防有人"顺手"把它也改了）
+    if 'case SCUT_T_PTR:  wrote = snprintf(tmp, sizeof(tmp), "%p"' not in src:
+        bad.append("scut_watch.c 的 SCUT_T_PTR 不再只报地址了")
+
     return bad
 
 

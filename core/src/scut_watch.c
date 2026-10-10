@@ -121,11 +121,30 @@ int scut_watch_read(int index, char *buf, int buf_size,
         int   wrote;
         const char *cursor = (const char *)w->p + (size_t)i * (size_t)w->es;
 
-        /* 结构体与指针不做解引用：
+        /* 结构体与【所有指针类型】都不做解引用：
          *   · 结构体需要 DWARF 成员偏移才能逐字段解释
          *   · 指针解引用可能指向非法地址而崩溃
          * 只报告大小/地址。需要看字段时，建议在代码里把关心的
-         * 字段单独存成标量变量（自动发现会一并列出）。 */
+         * 字段单独存成标量变量（自动发现会一并列出）。
+         *
+         * ★★ SCUT_T_STR 曾经是例外，已改为与 SCUT_T_PTR 一致 ★★
+         *   它原先写 `snprintf("%s", *(char**)cursor)`，即把表里的指针
+         *   当字符串解引用。危险在于那个指针完全不可控：
+         *   未初始化的 .bss 指针是 NULL（还算安全，退化成 "(null)"），
+         *   但指向已释放内存、或用户误传的任意地址时就是野指针解引用 ——
+         *   直接崩在读值这一步，而崩的位置在变量面板的刷新路径上，
+         *   离用户真正写错的地方很远。
+         *
+         *   而且这段代码【只对 SCUT_T_PTR 做了防护】，
+         *   与上面那句"指针解引用可能指向非法地址而崩溃"自相矛盾。
+         *   现在两种指针类型一视同仁：只报地址，绝不解引用。
+         *
+         *   代价（诚实记录）：手动注册 char* 时看不到字符串内容。
+         *   但自动发现路径【从不产出 SCUT_T_STR】——
+         *   tools/scut_symbols.py 对 DW_TAG_pointer_type 一律返回 SCUT_T_PTR，
+         *   所以这个代价在实际使用中几乎不存在。
+         *   真要看字符串内容，请在算法里把它拷进一个定长 char 数组，
+         *   用 SCUT_WATCH_ARRAY 注册（那是一段确定可读的内存）。 */
         switch (w->t) {
         case SCUT_T_I8:   wrote = snprintf(tmp, sizeof(tmp), "%d",  (int)(*(const signed char *)cursor)); break;
         case SCUT_T_U8:   wrote = snprintf(tmp, sizeof(tmp), "%u",  (unsigned)(*(const unsigned char *)cursor)); break;
@@ -148,7 +167,10 @@ int scut_watch_read(int index, char *buf, int buf_size,
         case SCUT_T_F64:  wrote = snprintf(tmp, sizeof(tmp), "%.6g", *(const double *)cursor); break;
         case SCUT_T_BOOL: wrote = snprintf(tmp, sizeof(tmp), "%s", (*(const unsigned char *)cursor) ? "true" : "false"); break;
         case SCUT_T_PTR:  wrote = snprintf(tmp, sizeof(tmp), "%p", *(void *const *)cursor); break;
-        case SCUT_T_STR:  wrote = snprintf(tmp, sizeof(tmp), "%s", (*(char *const *)cursor) ? *(char *const *)cursor : "(null)"); break;
+        /* ★ 与 SCUT_T_PTR 同一处理：只报地址，不解引用。
+         *   加 "<str>" 前缀是为了让用户一眼看出"这个变量是字符串类型、
+         *   但我们刻意不读它的内容"，而不是误以为它是普通指针。 */
+        case SCUT_T_STR:  wrote = snprintf(tmp, sizeof(tmp), "<str>%p", *(void *const *)cursor); break;
         case SCUT_T_ENUM: wrote = snprintf(tmp, sizeof(tmp), "%d", *(const int *)cursor); break;
         case SCUT_T_STRUCT:
         default:

@@ -91,6 +91,27 @@ void scut_draw_clear_overlay(void);
  * -------------------------------------------------------------------------- */
 void scut_draw_get_target(scut_u8 **gray, scut_u32 **overlay, int *w, int *h);
 
+/* --------------------------------------------------------------------------
+ *  「本帧算法是否已直接写过输出图」记账
+ *
+ *  ★ 解决的缺口：SCUT_OutImageSet / SetRGB 是"算法直接产出显示图"的路径
+ *    （见 scut_sdk.h 的说明），但调度器每帧在 PROCESS 之后会把输入图
+ *    铺满输出图当默认底图 —— 那一铺会把算法刚写的像素【全量冲掉】。
+ *    用户的现象是"我写了 OutImageSet，画面却还是原始灰度图"，不报错。
+ *
+ *  用法（调度器）：
+ *      每帧开头  scut_draw_clear_output_written();
+ *      PROCESS 之后、铺底图之前：
+ *          if (!scut_draw_output_written()) { scut_env_seed_output_from_input(); }
+ *
+ *  ★ 为什么判断权交给调度器，而不是让本模块自己决定：
+ *    帧内顺序是调度器的契约（哪一步在前、哪一步在后），
+ *    "默认底图该不该铺"属于顺序问题，所以由调度器读标志、自己决定。
+ *    本模块只负责如实记录"有没有人写过"。
+ * -------------------------------------------------------------------------- */
+int  scut_draw_output_written(void);
+void scut_draw_clear_output_written(void);
+
 #ifdef __cplusplus
 }
 #endif

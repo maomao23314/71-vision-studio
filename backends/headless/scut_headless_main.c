@@ -103,13 +103,11 @@
 #  include <sys/types.h>
 #endif
 
-/* --- 由 bind 单元提供（它是唯一知道编译期尺寸的地方） --- */
-extern void    scut_bind_apply(void);
-extern scut_u8 *scut_bind_input(void);
-extern scut_u8 *scut_bind_output(void);
-extern scut_u32 *scut_bind_overlay(void);
-extern int      scut_bind_width(void);
-extern int      scut_bind_height(void);
+/* --- 由 bind 单元提供（它是唯一知道编译期尺寸的地方） ---
+ * ★ 契约声明统一在 core/include/scut_bind.h 里，本文件原先【手写 extern】，
+ *   与 core/src/scut_input.c 那份重复 —— 两份手写意味着改签名不会报错。
+ *   已收口到单一头文件（详见 scut_bind.h 顶部的说明）。 */
+#include "scut_bind.h"
 
 /* --------------------------------------------------------------------------
  *  建目录（可移植，不经 shell）
