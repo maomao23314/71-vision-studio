@@ -301,21 +301,29 @@ def main():
 
     # ★ 先证明这个场景【真的抛了】。若 driver 显示"没抛"，
     #   说明桩没走到那一步 —— 此时下面那条断言是假绿色，必须报失败。
-    really_threw = 'TOUCHED true' in out and 'boom-from-stub' in out
-    check('该场景确实让 renderVariables 抛错了（否则本项是假绿色）',
-          really_threw, out)
+    #
+    # ★★ 判据只能是 TOUCHED，不能用 'boom-from-stub' 出现在 stdout 里 ★★
+    #   TOUCHED 由 textContent 的 setter 置位，只有 renderVariables
+    #   真的执行到那一行才会为 true。
+    #   而报错文字【在修好之后就永远打不出来了】—— 它被 simview.js
+    #   自己的 try/catch 吃掉，不会冒到桩的顶层。
+    #   拿报错文字当判据会造成"修好后反而红"，
+    #   于是测试逼着人把兜底拆掉才能变绿 —— 又是一种假信号。
+    really_threw = 'TOUCHED true' in out
+    check(really_threw,
+          '该场景确实让 renderVariables 抛错了（否则本项是假绿色）', out)
 
     # ★ 再断言"异常被兜住"：没有逃出 message 处理器。
     #   VARS_ESCAPED 为空 = 脚本自己 catch 住了 = 有兜底。
     #   非空 = 一路抛到桩顶层 = 没有 try/catch，缺陷存在。
-    check('异常没有逃出 message 处理器（有 try/catch 兜底）',
-          really_threw and 'VARS_ESCAPED ""' in out,
+    check(really_threw and 'VARS_ESCAPED ""' in out,
+          '异常没有逃出 message 处理器（有 try/catch 兜底）',
           'rc=%s out=%s' % (rc, out))
 
     # ★ 最后断言"抛过之后还能继续工作"—— 这是 (b) 的真正价值：
     #   没有兜底时，一次抛错会让后续所有消息都走不到。
-    check('抛错后仍能处理后续消息（不会永久停摆）',
-          'AFTER_STATUS ok' in out, out)
+    check('AFTER_STATUS ok' in out,
+          '抛错后仍能处理后续消息（不会永久停摆）', out)
 
     # ---- 场景 2：点「展开字段」按钮 ----
     print('\n[2] 点击「展开字段」按钮（B1a 的真实触发路径）')
@@ -326,9 +334,8 @@ def main():
     if 'NO_BUTTON' in out:
         print('    SKIP  没有渲染出展开按钮（变量清单为空？）')
     else:
-        check('点击「展开字段」不抛 ReferenceError',
-              'CLICK_CAUGHT ""' in out or 'CLICK_CAUGHT null' in out,
-              out)
+        check('CLICK_CAUGHT ""' in out or 'CLICK_CAUGHT null' in out,
+              '点击「展开字段」不抛 ReferenceError', out)
 
     print('\n' + '=' * 60)
     if failures:

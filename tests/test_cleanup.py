@@ -400,6 +400,88 @@ if _vars_branch:
 else:
     ok("case 'vars' 分支存在", False)
 
+print('\n=== 14. 用户可见文档不得教已删除/已改名的注册宏 ===')
+# ★ 这条守的是【发给用户的文档】，不是内部设计文档。
+#   内部文档（docs/架构设计.md 等）讲历史与现状，写 SCUT_REGISTER 无妨；
+#   但 templates/ 与 tools/README.md 会直接进用户视野，
+#   教一个既已改名（SCUT_REGISTER → ENV_REGISTER）
+#   又【只给生成代码用、用户代码不该碰】的宏，是实打实的误导。
+#
+#   ★ 注意 tools/scut_build.py 里生成接线单元时确实要写 ENV_REGISTER，
+#   所以断言只针对"面向用户的散文"，不做全树禁用 ——
+#   否则会把正确的那两处也判成违规。
+USER_DOCS = ('templates/README-pic.txt', 'templates/starter/code/camera.c',
+             'tools/README.md')
+for rel in USER_DOCS:
+    body = strip_comments(read(rel))
+    ok('%s 不教用户用 SCUT_REGISTER（已改名且仅供生成代码）' % rel,
+       'SCUT_REGISTER' not in body)
+    ok('%s 不教用户用 ENV_REGISTER（那是接线单元的内部宏）' % rel,
+       'ENV_REGISTER' not in body)
+
+# 零注册是核心设计理念，正向断言它被写出来了 ——
+# 防止哪天有人"好心"把注册说明加回用户文档。
+#
+# ★★ 这里【必须读原文，不能 strip_comments】★★
+#   camera.c 整个文件几乎全是注释：它是"给学生的说明书"，
+#   而说明书本身就是注释。剥掉注释等于把要检查的内容全删了，
+#   判据会恒假。
+#   上面 §14 的判据要的是"别教已删的宏"——那是【不该出现】的内容，
+#   剥注释是对的；而这条要的是"该讲的讲了"——内容就在注释里，
+#   剥掉就什么也看不见。
+#   两种方向的判据，用的文本必须相反，否则必然有一边恒假。
+for rel in ('templates/starter/code/camera.c',):
+    body = read(rel)          # ← 原文，不剥注释
+    ok('%s 说明了函数名由配置指定（零注册设计）' % rel,
+       ('钩子函数' in body or 'hooks' in body)
+       and 'scut_project.json' in body)
+
+# 图集说明里的过时配置路径（第 12 轮复核发现）：
+#   README-pic.txt 有三处让用户去改 config.h 的宏，但模板里【已经没有
+#   config.h 这个文件】了，配置早已搬进 scut_project.json；
+#   照着改的用户会找不到文件。新工程一律用 scut_project.json。
+_pic = read('templates/README-pic.txt')
+ok('README-pic.txt 不再让用户改 config.h 的宏', 'config.h' not in _pic)
+ok('README-pic.txt 指向 scut_project.json',
+   'scut_project.json' in _pic)
+# ★ 但 SCUT_IMAGE_H 作为【算法可用的宏】必须留着 ——
+#   它确实还在生成物里（scut_config.h），删掉才是真的破坏功能。
+ok('README-pic.txt 保留算法可用的 SCUT_IMAGE_H 说明',
+   'SCUT_IMAGE_H' in _pic)
+# 格式支持：不能说"仅 BMP"——真实工程里就在用 .png。
+ok('README-pic.txt 说明了 PNG 也支持',
+   'PNG' in _pic or 'png' in _pic)
+ok('README-pic.txt 不再说"目前仅此一种"',
+   '仅此一种' not in _pic)
+ok('README-pic.txt 说明扩展名由 pic.ext 决定',
+   '"ext"' in _pic or 'ext' in _pic)
+
+# ---------------------------------------------------------------------------
+# 15. 变量详情区不得显示它拿不到的字段
+# ---------------------------------------------------------------------------
+# N1（第 12 轮复核发现）：renderStructDetail 曾显示 v.elemBytes，
+# 而 renderVariables 传给它的 picked 对象【没有】这个字段
+# （simview.js 的 picked.push 只带 name/dims/kind/isStatic/total/manual），
+# 于是恒为 undefined → 用户看到「整体大小（0 字节）」——
+# 一个看起来像 bug 的错误数字，比不显示更糟。
+#
+# ★ 判据是"别去读拿不到的字段"，而不是"必须显示字节数"：
+#   大小本来就显示在值栏里（C 侧渲染成 "<104B>"），
+#   详情区再说一遍是冗余。这条守住的是"别引入假数据"。
+sv2 = read('extension/media/simview.js')
+_picked = re.search(r'picked\.push\(\{(.*?)\}\)', sv2, re.S)
+ok('renderVariables 传入的 picked 对象存在（判据前提）', _picked is not None)
+if _picked:
+    _has_eb = 'elemBytes' in _picked.group(1)
+    # 两条路都允许：要么不读 elemBytes，要么真的把它带上。
+    # 只禁止"既不传、又去读"。
+    _detail = re.search(r'function renderStructDetail.*?\n  \}', sv2, re.S)
+    _reads_eb = bool(_detail and 'elemBytes' in
+                     re.sub(r'^\s*\*.*$', '', _detail.group(0), flags=re.M))
+    ok('renderStructDetail 不读一个没被传进来的字段',
+       (not _reads_eb) or _has_eb,
+       'picked 里没有 elemBytes，但 renderStructDetail 读了它')
+
 print('\n' + '=' * 60)
 if FAIL == 0:
     print('全部 %d 项通过' % PASS)

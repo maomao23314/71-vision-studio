@@ -100,7 +100,7 @@ static void scut_autoreg(void)
 
 > **诚实边界**：只有**被使用过**的变量才会出现在变量面板里。一个从未被任何代码引用的 `static`，编译器有权把它整个删除——这时它在目标文件里根本不存在。这与调试器的行为一致。
 >
-> **另一个边界**：`code/` 里**不要写 `main()`**——`main` 由呈现后端提供（`backends/headless/` 等），你写一个会撞车（`duplicate symbol: main`）。你只需要用 `SCUT_REGISTER` 注册回调。
+> **另一个边界**：`code/` 里**不要写 `main()`**——`main` 由呈现后端提供（`backends/headless/` 等），你写一个会撞车（`duplicate symbol: main`）。你也**不需要**（也不应该）写任何注册宏：环境调用哪几个函数由 `scut_project.json` 的 `hooks` 指定，构建时自动生成接线单元。这是本项目的核心设计——用户代码零注册、可原样拷进车载工程。
 
 ### 3. 自动发现失败**不会**让构建失败
 
@@ -195,7 +195,7 @@ python tools\scut_build.py doctor --project .
 |---|---|---|
 | `找不到环境核心静态库` | 环境核心还没构建/没放对位置 | 把 `libscut_core.a` 放到 `<工程>/.scut/lib/`，或 `--core-lib <路径>` |
 | 变量面板**空的**，但构建成功 | `objdump` 不是 binutils 版本 | 跑 `doctor` 看第 `[1/3]` 节；装上 MinGW-w64 或把 binutils 加进 PATH |
-| `duplicate symbol: main` | `code/` 里写了 `main()` | 删掉它。`main` 由呈现后端提供，你只用 `SCUT_REGISTER` 注册回调 |
+| `duplicate symbol: main` | `code/` 里写了 `main()` | 删掉它。`main` 由呈现后端提供；你只需在 `scut_project.json` 的 `hooks` 里填函数名 |
 
 ---
 

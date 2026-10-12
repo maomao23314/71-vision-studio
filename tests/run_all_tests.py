@@ -216,11 +216,31 @@ def main():
     #     · vars 消息分支没有 try/catch（一次抛错让变量面板永久停更）
     #   它用最小 DOM 桩把 simview.js 【真的跑起来】，所以断言的是
     #   "用户点了会发生什么"，而不是"读代码看起来缺不缺"。
+    #
+    # ★ 这条自己抓到过【测试自己假绿】的坑（第 12 轮复核）：
+    #   check(cond, msg) 的四个调用点曾把参数写反（描述文字传给了 cond），
+    #   于是 cond 恒真、failures 永不追加 —— 测试永远不会失败。
+    #   判据里那些"这条测试真的在守吗"的自查，必须用【注入缺陷】来验，
+    #   不能靠"跑绿了"来说明。
     run("webview-js", [PY, os.path.join(HERE, "test_webview_js.py")])
 
-    banner("6/15  自动符号发现（35 变量 × gcc + clang）")
+    # ★★ primary 必须是 clang，gcc 降为 --also（第 12 轮复核修正）★★
+    #
+    #   以前 primary 是 gcc、clang 走 --also。看上去"两个都测了"，
+    #   但实际上：插件【分发】的工具链是 llvm-mingw（clang），
+    #   而 B2（数组 typedef 维度被覆盖）恰恰【只在 clang 上触发】——
+    #   gcc 会把 typedef 拍平，旧写法在 gcc 上一直是"对的"。
+    #   于是 B2 在 primary 里一直是绿的，只有 --also 那一轮才红，
+    #   而 --also 的结果很容易被当成"次要/可选"。
+    #
+    #   这就是"测试环境与分发环境不一致"——
+    #   一个结构性原因，胜过"没人触发"这种解释。
+    #
+    #   ★ 两边都保留：gcc 侧继续验证"解析逻辑对两种编译器都成立"，
+    #     这是 scut_symbols.py 的跨工具链承诺，不能因为主用 clang 就丢掉。
+    banner("6/15  自动符号发现（38 变量 × clang 主 + gcc 副）")
     run("symbols", [PY, os.path.join(HERE, "test_symbols.py"),
-                    "--cc", "gcc", "--also", CLANG])
+                    "--cc", CLANG, "--also", "gcc"])
 
     banner("7/15  JSON 协议合法性（插件依赖它）")
     run("json", [PY, os.path.join(HERE, "check_json_protocol.py")])

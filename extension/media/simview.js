@@ -663,10 +663,10 @@
    *
    *   ★ 想看具体字段的正确做法（也是环境文档推荐的做法）：
    *     在算法里把关心的字段单独存成标量变量，或用
-   *     SCUT_WATCH_SCALAR 主动注册 —— 那样它就会正常出现在面板里。
+   *     SCUT_Watch 主动注册 —— 那样它就会正常出现在面板里。
    *
    * @param node  承载详情的容器元素
-   * @param v     该变量的元信息（kind/dims/elemBytes/name…）
+   * @param v     该变量的元信息（kind/dims/name…）
    */
   function renderStructDetail(node, v) {
     // 每次都重建内容：快照文本每帧会变。
@@ -676,18 +676,26 @@
     line1.className = 'struct-note';
 
     if (v.kind === 'SCUT_T_PTR') {
-      line1.textContent = '指针类型：为安全起见不解引用，只显示它自身。';
+      line1.textContent = '指针类型：为安全起见不解引用，只显示它自身'
+        + '（上面那行就是它的地址）。';
     } else {
-      var size = (v.elemBytes != null) ? v.elemBytes : 0;
+      /* ★ 这里【刻意不显示字节数】——
+       *   一、显示不了：renderVariables 传给本函数的是它自己拼的 picked 对象
+       *      （见上面 picked.push），里面没有 elemBytes 字段，
+       *      所以 v.elemBytes 恒为 undefined。曾经写成"（0 字节）"，
+       *      是个看起来像 bug 的错误数字 —— 比不显示更糟。
+       *   二、也不需要：大小已经显示在上面的值栏里了 ——
+       *      C 侧把 SCUT_T_STRUCT 渲染成 "<104B>"（core/src/scut_watch.c），
+       *      指针则是 "%p" 地址。在这儿再说一遍是冗余。 */
       line1.textContent = '结构体：当前环境不解析成员表，'
-        + '因此只能显示整体大小（' + size + ' 字节）。';
+        + '所以只显示整体大小，不显示各字段。';
     }
     node.appendChild(line1);
 
     var line2 = document.createElement('div');
     line2.className = 'struct-note dim';
     line2.textContent = '想看具体字段？在算法里把关心的字段存成标量变量，'
-      + '或用 SCUT_WATCH_SCALAR 主动注册，它就会正常显示。';
+      + '或用 SCUT_Watch 主动注册，它就会正常显示。';
     node.appendChild(line2);
   }
 
