@@ -455,9 +455,38 @@ void SCUT_DrawLine(int x0, int y0, int x1, int y1, scut_u32 color)
      *            代码量和出错概率都明显上升，收益却接近零；
      *        (3) 依赖单一判定点（DrawPoint）比「两处各自判断」
      *            更不容易出现不一致。
-     *      注意：因此本函数要求坐标量级正常（非 INT_MIN/INT_MAX 级别，
-     *      否则 dx/dy/err 可能溢出）。对图像坐标而言这是合理前提。
+     *
+     *  ★★ 但"不裁剪"必须配一个【入口量级守卫】（2026-10-12 补）★★
+     *      Bresenham 的退出条件是"走到端点"，而端点能否走到依赖
+     *      |dx| / |dy| 计算正确。若任一坐标是 INT_MIN/INT_MAX 量级，
+     *      `x1 - x0` 会【有符号溢出】成负数：
+     *          dx = INT_MAX/2 - (INT_MIN/2)  →  负数
+     *      于是 err = dx - dy 的初值、sx/sy 的方向全部错乱，
+     *      主循环可能永远走不到端点 —— 【无限循环】。
+     *
+     *      后果不是崩溃，而是整个 IDE 会话 CPU 100% 挂死，
+     *      用户只能强杀插件宿主。而触发条件不需要改环境、不需要
+     *      特殊配置：算法里一处坐标算错（除零得 INT_MIN、检测框
+     *      算错、未初始化变量）就够。
+     *
+     *      这也让本函数符合 scut_draw.h 对整个绘制家族的承诺：
+     *      "坐标越界【自动忽略】，用户不需要自己判断"。
+     *      此前只在端点判界，违背了该承诺。
+     *
+     *      阈值取 1<<20（约 105 万）而不是 INT_MAX：图像坐标
+     *      本来就在千级，105 万已留有巨额余量；而它又远小于
+     *      INT_MAX/2，能保证 dx/dy 的减法绝不溢出。
      * ------------------------------------------------------------------ */
+
+    /* ★ 入口守卫：必须在 dx/dy 计算【之前】—— 溢出发生后再比较就晚了。
+     *   越界量级按"静默忽略"处理，与 DrawPoint 的越界语义一致。 */
+    if (x0 < -SCUT_DRAW_COORD_LIMIT || x0 > SCUT_DRAW_COORD_LIMIT ||
+        y0 < -SCUT_DRAW_COORD_LIMIT || y0 > SCUT_DRAW_COORD_LIMIT ||
+        x1 < -SCUT_DRAW_COORD_LIMIT || x1 > SCUT_DRAW_COORD_LIMIT ||
+        y1 < -SCUT_DRAW_COORD_LIMIT || y1 > SCUT_DRAW_COORD_LIMIT) {
+        return;
+    }
+
     int dx = (x1 > x0) ? (x1 - x0) : (x0 - x1);   /* |dx| */
     int dy = (y1 > y0) ? (y1 - y0) : (y0 - y1);   /* |dy| */
     int sx = (x0 < x1) ? 1 : -1;                  /* x 步进方向 */

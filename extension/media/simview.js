@@ -639,6 +639,58 @@
     return k + ' · ' + dims + (v.isStatic ? ' · static' : '');
   }
 
+  /**
+   * 渲染「结构体/指针」的详情区。
+   *
+   * ★★ 为什么需要这个函数（它曾被调用但【从未定义】）★★
+   *
+   *   第 12 轮评审发现：上面 618 行调用了 renderStructDetail，
+   *   而整个仓库没有任何地方定义它 —— 用户点「展开字段」就是一次
+   *   ReferenceError。集成工程没踩到只是因为它的全局量以标量/数组为主，
+   *   "这套代码恰好避开"，不是环境防住了。
+   *   而车载算法里指针/结构体全局量极常见（逆透视指针表、环形缓冲索引），
+   *   任意一个即可触发 —— 直接违反"适应用户各种奇葩代码"这条设计理念。
+   *
+   * ★★ 为什么内容只是"地址 + 一句说明"，而不是字段列表 ★★
+   *
+   *   后端目前【不解析 DWARF 成员表】—— `SCUT_T_STRUCT` 的值在 C 侧
+   *   就只是 `"<%dB>"`（见 core/src/scut_watch.c 的 default 分支），
+   *   指针类更是只报地址不解引用（防野指针）。
+   *   也就是说"字段名"这个信息【从来没送到前端】。
+   *
+   *   所以这里如实显示"能显示的部分"，并告诉用户下一步怎么办，
+   *   而不是给一个点开是空的折叠区 —— 那是另一种形式的骗人。
+   *
+   *   ★ 想看具体字段的正确做法（也是环境文档推荐的做法）：
+   *     在算法里把关心的字段单独存成标量变量，或用
+   *     SCUT_WATCH_SCALAR 主动注册 —— 那样它就会正常出现在面板里。
+   *
+   * @param node  承载详情的容器元素
+   * @param v     该变量的元信息（kind/dims/elemBytes/name…）
+   */
+  function renderStructDetail(node, v) {
+    // 每次都重建内容：快照文本每帧会变。
+    node.textContent = '';
+
+    var line1 = document.createElement('div');
+    line1.className = 'struct-note';
+
+    if (v.kind === 'SCUT_T_PTR') {
+      line1.textContent = '指针类型：为安全起见不解引用，只显示它自身。';
+    } else {
+      var size = (v.elemBytes != null) ? v.elemBytes : 0;
+      line1.textContent = '结构体：当前环境不解析成员表，'
+        + '因此只能显示整体大小（' + size + ' 字节）。';
+    }
+    node.appendChild(line1);
+
+    var line2 = document.createElement('div');
+    line2.className = 'struct-note dim';
+    line2.textContent = '想看具体字段？在算法里把关心的字段存成标量变量，'
+      + '或用 SCUT_WATCH_SCALAR 主动注册，它就会正常显示。';
+    node.appendChild(line2);
+  }
+
   function snapshotOf(name) {
     for (var i = 0; i < snapshots.length; i++) {
       if (snapshots[i].name === name) { return snapshots[i]; }
@@ -872,7 +924,23 @@ bind('btn-debug', function () { vscode.postMessage({ type: 'cmd', cmd: 'debug' }
         if (msg.timing) {
           showTiming(msg.timing, msg.frame);
         }
-        renderVariables();
+        /* ★★ try/catch 是必需的（第 12 轮评审修复）★★
+         *
+         *   vars 是【每帧】都会走的高频路径。此前这里没有兜底，
+         *   一旦 renderVariables 因任何原因抛错（畸形数据、类型不符、
+         *   未来改渲染逻辑时引入的 bug），异常会逃出 message 监听器 ——
+         *   webview 的后续消息全部丢失，变量面板【永久停更】，
+         *   而画面还在动。用户看到的是"数值不动了"，不报任何错。
+         *
+         *   ★ 为什么不像 frame 分支那样只包一层：frame 分支早有 try，
+         *     但 vars/catalog/status/log 四个分支都没有。这次补齐 ——
+         *     失败时保留上一次的内容 + 往日志区报一条，而不是静默。 */
+        try {
+          renderVariables();
+        } catch (e) {
+          log('[视图] 变量刷新失败（保留上次内容）：'
+              + (e && e.message ? e.message : e));
+        }
         return;
       }
 
@@ -890,21 +958,36 @@ bind('btn-debug', function () { vscode.postMessage({ type: 'cmd', cmd: 'debug' }
           selectedInitialised = true;
           persist();
         }
-        renderVariables();
+        try {
+          renderVariables();
+        } catch (e) {
+          // ★ 渲染失败不能让整个视图停摆：变量面板是"附加信息"，
+          //   算法本身还在跑。失败时保留上一次的内容，并说清发生了什么。
+          log('[视图] 变量清单渲染失败：' + (e && e.message ? e.message : e));
+        }
         return;
       }
 
       case 'status': {
-        if (el.status) {
-          el.status.textContent = msg.running
-            ? ('运行中' + (msg.exePath ? ' · ' + msg.exePath : ''))
-            : ('未运行' + (msg.exePath ? ' · 可执行：' + msg.exePath : ' · 尚未编译'));
+        try {
+          if (el.status) {
+            el.status.textContent = msg.running
+              ? ('运行中' + (msg.exePath ? ' · ' + msg.exePath : ''))
+              : ('未运行' + (msg.exePath ? ' · 可执行：' + msg.exePath : ' · 尚未编译'));
+          }
+        } catch (e) {
+          log('[视图] 状态更新失败：' + (e && e.message ? e.message : e));
         }
         return;
       }
 
       case 'log': {
-        log(msg.line === '' ? '——' : msg.line);
+        try {
+          log(msg.line === '' ? '——' : msg.line);
+        } catch (e) {
+          // 日志区本身失败时无处可报，只能静默 —— 但不能让它冒出去
+          // 把整个 message 监听器打断（后续消息会全部丢失）。
+        }
         return;
       }
 

@@ -38,6 +38,32 @@ float    a_2d_float[3][3];
 /* --- 三维数组 --- */
 int      a_3d[2][3][4];
 
+/* --- ★ 数组 typedef（第 12 轮评审发现的测试盲区） ---
+ *
+ *   这一类不在 EXPECT 里，导致一个真实缺陷【对现有测试结构性不可见】：
+ *   scut_symbols.py 用 `out['dims'] = dims` 【覆盖】了内层类型的 dims，
+ *   而不是拼接。于是：
+ *       typedef uint8_t Row[188];  → 内层解析出 dims=[188]
+ *       Row g_row[120];            → 外层拿到 dims=[120] 后覆盖 → 只剩 [120]
+ *                                   → total 算成 120（应为 22560）
+ *   下游 `len(dims)==1` 分支据此认定"这是一行"，
+ *   若它被填进「结果图数组名」→ 生成 SCUT_EnvCopyOutput(ptr, 120, 1)
+ *   → 画面只搬 1 行，【静默、无报错】。
+ *
+ *   ★ 两种形态都要覆盖：
+ *       td_row     一维 typedef 再包一层数组（dims=[120,188]）
+ *       td_img     二维 typedef 直接用（dims 就是 [120,188]）
+ *     前者走"外层覆盖"路径，后者走"直接解析"路径，错误表现不同。
+ *
+ *   ★ 命名刻意不用 '_' 开头：会被生成器的黑名单顺带过滤掉，
+ *     导致这些探针失去意义（同 fixture_local_static 的理由）。 */
+typedef uint8_t Row[188];
+typedef uint8_t Img[120][188];
+
+Row td_row[120];        /* 期望 dims=[120,188] total=22560 */
+Img td_img;             /* 期望 dims=[120,188] total=22560 */
+Row td_row_small[4];    /* 期望 dims=[4,188]   total=752    */
+
 /* --- 结构体、嵌套结构体、结构体数组 --- */
 typedef struct { int x, y; } point_t;
 typedef struct {

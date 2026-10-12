@@ -23,6 +23,7 @@ test_cleanup.py -- 第二轮清理的回归测试（死代码 / 过时注释 / �
 """
 import io
 import os
+import re
 import sys
 
 try:
@@ -267,6 +268,137 @@ ok('decode_output 的注释里说明了为什么去掉 latin-1',
    'latin-1' in _dc_body)
 ok('DWARF 规范化处的 latin-1 用法【保留】（那是正当的）',
    'raw.decode("latin-1")' in src)
+
+print('\n=== 12. 面向用户的产物里不得出现"设置界面"（G1） ===')
+
+# ★★ 为什么这条断言是"最高杠杆"的一条 ★★
+#
+#   项目自己在 docs/架构设计.md §7.3 立了规矩：凡会写进用户工程 / 生成物的
+#   字符串，一律指向「插件配置面板」或 scut_project.json，
+#   不得出现"设置界面"/"settings.json" —— 因为那个设置区 0.9.4 就删了。
+#
+#   而实测：templates/starter/code/camera.c 有两处、
+#   templates/README-pic.txt 有三处、tools/scut_build.py 有四处仍在这么写。
+#   它们长期残留的根因就是【没有任何测试守着】。
+#
+#   ★ 判据刻意区分两类位置，因为危害不同：
+#       · templates/  + GLUE_HEAD  → 会随每个新工程 / 每次构建发到用户眼前
+#       · tools/ 其它                 → 只影响控制台输出，危害小
+#     所以前者从严（零容忍），后者允许但记录。
+for rel, must in (
+        ('templates/starter/code/camera.c', True),
+        ('templates/README-pic.txt', True),
+        ('tools/scut_build.py', False)):
+    body = read(rel)
+    hits = []
+    for i, line in enumerate(body.split('\n'), 1):
+        if line.strip().startswith('#'):      # Python 注释不算产物
+            continue
+        if '设置界面' in line or 'settings.json' in line:
+            hits.append('%s:%d' % (rel, i))
+    if must:
+        ok('%s 里没有"设置界面/settings.json"（会发到用户眼前）' % rel,
+           not hits, '; '.join(hits))
+    else:
+        # 只记录不判失败：它不进用户工程，属可控范围
+        print('  NOTE  %s 有 %d 处（仅控制台输出，不阻断）' % (rel, len(hits)))
+
+print('\n=== 13. webview 前端静态自检（G7） ===')
+
+# ★★ 为什么需要这一条 ★★
+#
+#   实测踩过的坑（第 12 轮评审发现）：simview.js 里 renderStructDetail
+#   被调用但【全仓零定义】。后果是用户点「展开字段」就 ReferenceError。
+#   而这个问题【现有测试体系完全看不见】—— 因为：
+#     · 它是纯前端缺陷，Node 侧测试加载不了 webview 沙箱；
+#     · 集成工程恰好没踩到（全局量以标量/数组为主）；
+#     · 功能测试要真跑一遍 GUI，成本高。
+#
+#   而"被调用但未定义"这类缺陷是【可静态检查】的：
+#   提取全部函数/变量声明，与全部被调用标识符做差集即可。
+#   加这一条之后，未来任何"调用了不存在的函数"都会在 CI 当场暴露。
+
+def js_declared_names(text):
+    """提取 JS 里声明的函数名与 var/let/const 名。"""
+    names = set()
+    # function foo(  /  function foo (
+    for m in re.finditer(r'\bfunction\s+([A-Za-z_$][\w$]*)\s*\(', text):
+        names.add(m.group(1))
+    # var foo = / let foo = / const foo =
+    for m in re.finditer(r'\b(?:var|let|const)\s+([A-Za-z_$][\w$]*)', text):
+        names.add(m.group(1))
+    # 函数参数（形参名也占命名空间，误报会很多，但这里只取少见的）
+    for m in re.finditer(r'function\s*[A-Za-z_$\w]*\s*\(([^)]*)\)', text):
+        for p in m.group(1).split(','):
+            p = p.strip()
+            if re.fullmatch(r'[A-Za-z_$][\w$]*', p or ''):
+                names.add(p)
+    return names
+
+
+def js_called_names(text):
+    """提取 JS 里被【调用】的【裸】标识符（foo( 形式）。
+
+    ★ 必须排除【成员调用】`obj.foo(`：
+      那些是对象方法（`arr.push(`、`el.appendChild(`、`str.trim(`），
+      不是本文件需要定义的函数。第一版没排除，报了 28 个假缺失
+      （add/appendChild/push/trim…）—— 又是"判据比事实更宽"。
+    """
+    called = set()
+    # 剥掉注释，避免把注释里提到的名字当调用
+    t = re.sub(r'/\*[\s\S]*?\*/', ' ', text)
+    t = re.sub(r'//[^\n]*', ' ', t)
+    # 剥掉字符串字面量（'xxx' / "xxx"），里面的 ( 不算调用
+    t = re.sub(r"'(?:\\.|[^'\\])*'", "''", t)
+    t = re.sub(r'"(?:\\.|[^"\\])*"', '""', t)
+    # 逐个字符扫，只看"前面不是 . 也不是标识符字符"的调用
+    for m in re.finditer(r'([A-Za-z_$][\w$]*)\s*\(', t):
+        start = m.start(1)
+        prev = t[start - 1] if start > 0 else ''
+        if prev == '.':
+            continue                      # 成员调用，跳过
+        called.add(m.group(1))
+    return called
+
+
+# 浏览器/vscode 内建与常见全局 —— 不是本文件缺失
+JS_BUILTINS = {
+    'if', 'for', 'while', 'switch', 'catch', 'return', 'function', 'typeof',
+    'require', 'acquireVsCodeApi', 'getState', 'setState', 'postMessage',
+    'String', 'Number', 'Boolean', 'Array', 'Object', 'Math', 'JSON', 'Date',
+    'isFinite', 'isNaN', 'parseInt', 'parseFloat', 'setTimeout', 'clearTimeout',
+    'setInterval', 'clearInterval', 'addEventListener', 'removeEventListener',
+    'createElement', 'createImageData', 'getContext', 'querySelector',
+    'ResizeObserver', 'Uint8Array', 'Uint8ClampedArray', 'ArrayBuffer',
+    'Error', 'RegExp', 'Map', 'Set', 'Promise', 'console', 'document',
+    'window', 'navigator', 'process', 'vscode', 'log',
+}
+
+for rel in ('extension/media/simview.js', 'extension/media/settingsview.js'):
+    body = read(rel)
+    declared = js_declared_names(body)
+    called = js_called_names(body)
+    missing = sorted(n for n in (called - declared)
+                     if n not in JS_BUILTINS
+                     and not re.match(r'^(?:el|document|window|vscode)\.', n))
+    ok('%s 没有被调用但未定义的函数' % os.path.basename(rel),
+       not missing, '缺失: ' + ', '.join(missing))
+
+# renderVariables 的调用点都必须在 try 保护下（否则一次抛错停更整个变量区）
+sv = read('extension/media/simview.js')
+# 调用点数量（不含函数定义行本身）。报告里写的是 5 个，
+# 后来新增按钮/折叠交互后变成 7 个 —— 这个数字只用于"发现新增裸调用"，
+# 不是硬契约，所以用 >= 而不是 ==。
+_render_calls = len(re.findall(r'(?<![\w.])renderVariables\(\)', sv)) - 1
+ok('renderVariables() 有多个调用点（每处都该被 try 保护）',
+   _render_calls >= 5, '实际 %d 个' % _render_calls)
+# vars 消息分支必须包 try/catch —— 它是每帧都会走的高频路径
+_vars_branch = re.search(r"case 'vars'\s*:\s*\{(.*?)\n      \}", sv, re.S)
+if _vars_branch:
+    ok("case 'vars' 分支有 try/catch 兜底",
+       'try {' in _vars_branch.group(1))
+else:
+    ok("case 'vars' 分支存在", False)
 
 print('\n' + '=' * 60)
 if FAIL == 0:

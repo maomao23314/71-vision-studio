@@ -65,6 +65,19 @@ EXPECT = {
     'a_2d_small': ('SCUT_T_I32', [4, 8],     32),
     'a_2d_float': ('SCUT_T_F32', [3, 3],     9),
     'a_3d':       ('SCUT_T_I32', [2, 3, 4],  24),
+    # ★ 数组 typedef（第 12 轮评审补的盲区）
+    #   dims 必须是【外层 + 内层拼接】，total 按乘积算。
+    #   ⚠️ 这条【只有 clang 会触发】—— 实测确认：
+    #     · gcc 会把 typedef 拍平，DWARF 里看不到 DW_TAG_typedef，
+    #       所以 gcc 跑这条是绿的很正常（不构成"已修好"的证据）；
+    #     · llvm-mingw 的 clang 原样发出
+    #          array_type[120] → DW_TAG_typedef(Row) → array_type[188]
+    #       于是外层 _collect_dims 用 [120] 【覆盖】内层的 [188]
+    #       → dims=[120] total=120。
+    #     本项目的编译器固定是 clang，所以这才是真实路径。
+    'td_row':       ('SCUT_T_U8', [120, 188], 22560),
+    'td_img':       ('SCUT_T_U8', [120, 188], 22560),
+    'td_row_small': ('SCUT_T_U8', [4, 188],   752),
     # 聚合类型
     's_point':     ('SCUT_T_STRUCT', [], 1),
     's_track':     ('SCUT_T_STRUCT', [], 1),

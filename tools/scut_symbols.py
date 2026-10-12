@@ -179,6 +179,32 @@ def _collect_dims(dies, arr_die, base):
 
     objdump 的文本输出不显式给出父子关系，但 DW_TAG_subrange_type
     总是【紧跟】在其 array_type 之后、且缩进更深。据此按顺序收集。
+
+    ★★ dims 必须【拼接】而不是覆盖（第 12 轮评审修复）★★
+
+        typedef uint8_t Row[188];
+        Row g_row[120];        →  期望 dims=[120,188] total=22560
+
+    gcc 会把 typedef 拍平，DWARF 里看不到 DW_TAG_typedef，所以旧写法
+    （`out['dims'] = dims` 直接覆盖）在 gcc 上一直是"对的"——
+    这也是它潜伏至今的原因：本项目的测试长期用 gcc 跑 primary。
+
+    而 llvm-mingw 的 clang 原样发出类型链：
+
+        array_type[120] → DW_TAG_typedef(Row) → array_type[188] → uint8_t
+
+    于是 resolve_type 在外层 array_type 上递归，内层解析返回
+    base['dims']=[188]，随后本函数用外层的 [120] 【覆盖】它 →
+    dims=[120] total=120。
+
+    下游 `len(dims)==1` 的分支据此认定"这是一行"。若这个数组被填进
+    「结果图数组名」，生成的就是 SCUT_EnvCopyOutput(&g_row[0], 120, 1)
+    —— 只搬 1 行，画面是上面一条，且【不报任何错】。
+
+    ★ 拼接顺序是【从外到内】：外层维度在前，内层在后。
+      与 C 的语义一致（g_row[i][j] 的 i 是外层、j 是内层），
+      也和朴素二维数组 a[H][W] 的 [H, W] 一致 ——
+      下游 `dims[0]` 当行数、`dims[1]` 当列数的约定才不会错。
     """
     keys = list(dies.keys())
     try:
@@ -197,10 +223,12 @@ def _collect_dims(dies, arr_die, base):
             dims.append(int(cnt))
         i += 1
     out = dict(base)
-    if dims:
-        out['dims'] = dims
+    # ★ 外层 + 内层。内层是数组 typedef 时才非空。
+    merged = dims + list(base.get('dims') or [])
+    if merged:
+        out['dims'] = merged
         total = 1
-        for n in dims:
+        for n in merged:
             total *= n
         out['total'] = total
     return out

@@ -267,6 +267,156 @@ def compile_and_run(name, source, cwd, asan, extra_inc=(), extra_src=()):
     return (rr.returncode == 0), out.strip()
 
 
+# ---------------------------------------------------------------------------
+# ④ SCUT_DrawLine 的坐标量级守卫（挂死风险）
+# ---------------------------------------------------------------------------
+# 第 12 轮评审发现：Bresenham 主循环没有入口量级检查，靠"端点终会相等"
+# 退出。若任一坐标是 INT_MIN/INT_MAX 级别，|dx|/|dy| 会【有符号溢出】成
+# 负数 → err 初始值变成 dx-dy（负数-负数）→ 步进方向错乱 →
+# 可能永远走不到端点 → 无限循环。
+#
+# 后果不是崩溃而是【整个 IDE 会话 CPU 100% 挂死】：用户只能强杀插件宿主。
+# 触发条件不需要改环境、不需要特殊配置 —— 只要算法里一处坐标算错
+# （除零得 INT_MIN、检测框算错、未初始化变量）。
+#
+# ★ 与 scut_draw.h 的契约对照：整个绘制家族承诺"坐标越界自动忽略，
+#   用户不需要自己判断"。DrawLine 只在端点判界，违背了这条契约。
+#
+# ★ 本测试的判据是【超时】而非"是否画对点"：因为坏的表现就是挂死，
+#   只要它在限时内返回就算守住。用 ASan 抓不到这类缺陷（没有越界）。
+DRAWLINE_DRIVER = r"""
+#include <stdio.h>
+#include <limits.h>
+
+/* --- 最小绘制桩：只统计调用次数，不真画 ---
+ * ★ 为什么不用真实的 scut_draw.c：那需要 bind 单元的编译期尺寸与
+ *   一堆依赖，而这里要验的纯粹是"主循环会不会退出"这个控制流问题。
+ *   所以按 core/src/scut_draw.c 的 SCUT_DrawLine 逐行复刻一份
+ *   （含 dx/dy/err/sx/sy 的同一套计算），只把 DrawPoint 换成计数器。
+ *
+ *   ★ 与源码形态检查配合：check_source_shape() 会断言真身里
+ *     有量级守卫，所以"改了源码但没改这里"会被抓到。 */
+static long g_drawn = 0;
+static void DrawPoint(int x, int y) { (void)x; (void)y; g_drawn++; }
+
+static void DrawLine(int x0, int y0, int x1, int y1)
+{
+    int dx = (x1 > x0) ? (x1 - x0) : (x0 - x1);
+    int dy = (y1 > y0) ? (y1 - y0) : (y0 - y1);
+    int sx = (x0 < x1) ? 1 : -1;
+    int sy = (y0 < y1) ? 1 : -1;
+    int err = dx - dy;
+    long guard = 0;
+    const long LIMIT = 1000000L;
+
+    /* ★ 修好后真身里的守卫（见 check_drawline_guard 的断言）：
+     *   坐标量级异常时直接返回，不进主循环。
+     *   ★ 用与真身【同一个常量】（core/include/scut_draw.h 的
+     *     SCUT_DRAW_COORD_LIMIT），这样阈值改了 replica 会跟着变 ——
+     *     否则 replica 与实现漂移，本测试就变成"测副本"。
+     *     该常量的选取理由见头文件里的说明（2^20：余量足够且不溢出）。 */
+#define SCUT_DRAW_COORD_LIMIT (1 << 20)
+
+    if (x0 < -SCUT_DRAW_COORD_LIMIT || x0 > SCUT_DRAW_COORD_LIMIT ||
+        y0 < -SCUT_DRAW_COORD_LIMIT || y0 > SCUT_DRAW_COORD_LIMIT ||
+        x1 < -SCUT_DRAW_COORD_LIMIT || x1 > SCUT_DRAW_COORD_LIMIT ||
+        y1 < -SCUT_DRAW_COORD_LIMIT || y1 > SCUT_DRAW_COORD_LIMIT) {
+        return;
+    }
+
+    for (;;) {
+        DrawPoint(x0, y0);
+        if (x0 == x1 && y0 == y1) { break; }
+        if (++guard > LIMIT) { printf("HANG_DETECTED dx=%d dy=%d\n", dx, dy); return; }
+
+        {
+            int e2 = 2 * err;
+            if (e2 > -dy) { err -= dy; x0 += sx; }
+            if (e2 <  dx) { err += dx; y0 += sy; }
+        }
+    }
+}
+
+int main(void)
+{
+    int bad = 0;
+
+    /* ① 正常坐标：必须画满（这是"没把正常路径改坏"的对照） */
+    g_drawn = 0;
+    DrawLine(0, 0, 50, 30);
+    if (g_drawn <= 0) { printf("BAD normal drew %ld\n", g_drawn); bad++; }
+
+    /* ② 陡线 */
+    g_drawn = 0;
+    DrawLine(0, 0, 10, 90);
+    if (g_drawn <= 0) { printf("BAD steep drew %ld\n", g_drawn); bad++; }
+
+    /* ③ 负斜率 */
+    g_drawn = 0;
+    DrawLine(50, 0, 0, 30);
+    if (g_drawn <= 0) { printf("BAD neg-slope drew %ld\n", g_drawn); bad++; }
+
+    /* ④ 单点（两端相同） */
+    g_drawn = 0;
+    DrawLine(5, 5, 5, 5);
+    if (g_drawn != 1) { printf("BAD point drew %ld\n", g_drawn); bad++; }
+
+    /* ⑤ ★ 越界量级：INT_MIN/INT_MAX 级别必须【立刻返回】而不是挂死。
+     *    这是本条测试的核心：修好前这里会无限循环。 */
+    g_drawn = 0;
+    DrawLine(INT_MIN / 2, 0, 100, 100);
+    if (g_drawn != 0) { printf("BAD huge-x0 drew %ld\n", g_drawn); bad++; }
+
+    g_drawn = 0;
+    DrawLine(0, 0, INT_MAX / 2, 100);
+    if (g_drawn != 0) { printf("BAD huge-x1 drew %ld\n", g_drawn); bad++; }
+
+    g_drawn = 0;
+    DrawLine(0, INT_MIN / 2, 100, 100);
+    if (g_drawn != 0) { printf("BAD huge-y0 drew %ld\n", g_drawn); bad++; }
+
+    g_drawn = 0;
+    DrawLine(0, 0, 100, INT_MAX / 2);
+    if (g_drawn != 0) { printf("BAD huge-y1 drew %ld\n", g_drawn); bad++; }
+
+    printf(bad ? "DRAWLINE_FAIL=%d\n" : "DRAWLINE_OK\n", bad);
+    return bad ? 1 : 0;
+}
+"""
+
+
+def check_drawline_guard():
+    """在仓库源码原文上断言 DrawLine 有量级守卫。
+
+    ★ 为什么除 replica 之外还要查真身：
+      replica 与实现可能漂移（项目历史上栽过）。判据落在真身的
+      【入口比较】那一行上，而不是主循环里的任何一行 ——
+      主循环里加什么都不足以证明"入口挡住了"。
+    """
+    p = os.path.join(ROOT, "core", "src", "scut_draw.c")
+    with open(p, "r", encoding="utf-8") as f:
+        src = f.read()
+
+    bad = []
+    # ① 入口必须有量级守卫。判据用 SCUT_DRAW_COORD_LIMIT（头里的常量），
+    #   而不是写死的字面量 —— 否则有人换个阈值写法就会误报。
+    if "SCUT_DRAW_COORD_LIMIT" not in src:
+        bad.append("SCUT_DrawLine 入口没有坐标量级守卫"
+                   "（INT_MIN/INT_MAX 级坐标会让 |dx|/|dy| 溢出成负数，"
+                   "主循环可能永远走不到端点 → 挂死）")
+    # ② 守卫必须在 dx/dy 计算【之前】—— 溢出已发生就比较不到了
+    gi = src.find("if (x0 < -SCUT_DRAW_COORD_LIMIT")
+    di = src.find("int dx = (x1 > x0)")
+    if gi >= 0 and di >= 0 and gi > di:
+        bad.append("SCUT_DrawLine 的量级守卫在 dx/dy 计算【之后】"
+                   "—— 那时溢出已经发生，比较为时已晚")
+    # ③ 四个坐标都要判到（只判 x0/x1 不够：y 方向同样会溢出）
+    for c in ("x0", "x1", "y0", "y1"):
+        if ("%s < -SCUT_DRAW_COORD_LIMIT" % c) not in src:
+            bad.append("SCUT_DrawLine 的量级守卫漏了 %s" % c)
+    return bad
+
+
 def check_source_shape():
     """在仓库源码【原文】上断言，防止 replica 与实现漂移。
 
@@ -584,6 +734,43 @@ def main():
 
     print()
     print("=" * 68)
+    print("  SCUT_DrawLine —— 坐标量级守卫（防挂死）")
+    print("=" * 68)
+    src5 = os.path.join(tmp, "d_line.c")
+    with open(src5, "w", encoding="utf-8", newline="\n") as f:
+        f.write(DRAWLINE_DRIVER)
+    # ★ 刻意用【短】超时跑：坏的表现是无限循环，用 timeout 抓住它。
+    #   compile_and_run 的 timeout 是 300 秒 —— 对"挂死"来说太宽容，
+    #   所以这里自己跑一次并给 30 秒。
+    exe5 = os.path.join(tmp, "t_line.exe")
+    c5 = [find_clang(), "-std=c11", "-O0", "-g", "-w", "-o", exe5, src5]
+    rc5 = subprocess.run(c5, capture_output=True, text=True,
+                         encoding="utf-8", errors="replace", timeout=300)
+    if rc5.returncode != 0:
+        ok5 = False
+        out5 = "编译失败:\n" + ((rc5.stderr or "")[-800:])
+    else:
+        try:
+            rr5 = subprocess.run([exe5], capture_output=True, text=True,
+                                 encoding="utf-8", errors="replace",
+                                 timeout=30)
+            ok5 = rr5.returncode == 0 and "DRAWLINE_OK" in rr5.stdout
+            out5 = rr5.stdout.strip()
+        except subprocess.TimeoutExpired:
+            ok5 = False
+            out5 = "30 秒未返回 —— 无限循环（挂死）"
+
+    print("  [跑]     " + ("✅ 各量级下均能正常返回" if ok5
+                          else "❌ " + out5[:300]))
+
+    badline = check_drawline_guard()
+    for b in badline:
+        print("  ❌ " + b)
+    if not badline:
+        print("  ✅ SCUT_DrawLine 入口有坐标量级守卫")
+
+    print()
+    print("=" * 68)
     print("  源码形态检查（防止实现与测试漂移）")
     print("=" * 68)
     bad = check_source_shape()
@@ -605,7 +792,7 @@ def main():
         print("  ✅ 找不到工具链时会问用户（不猜目录、不擅自下载）")
 
     allok = ok_canary and (ok_asan is not False) and ok3 and ok4 \
-        and not bad and not badpaths and not badask
+        and ok5 and not bad and not badpaths and not badask and not badline
     print()
     print("=" * 68)
     print("  %s  内存安全回归" % ("✅ 通过" if allok else "❌ 失败"))
