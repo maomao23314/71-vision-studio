@@ -220,10 +220,10 @@ static void usage(void)
         "  --repeat N      PROCESS 角色每帧重复 N 次 (默认 1)\n"
         "  --list-vars     列出自动发现的变量后退出\n"
         "  --select A,B    只输出这些变量的数值\n"
-        "  --pic DIR       测试图集目录 (默认取自 config.h 的 SCUT_PIC_DIR)\n"
+        "  --pic DIR       测试图集目录 (默认 pic/1)\n"
         "                  相对路径会依次在 exe 上一级 / exe 上两级 / 当前目录下查找，\n"
         "                  取第一个真的有 1.<ext> 的位置；绝对路径则直接使用。\n"
-        "  --ext EXTS      测试图扩展名，逗号分隔 (默认取自 SCUT_PIC_EXT)\n"
+        "  --ext EXTS      测试图扩展名，逗号分隔 (默认 .bmp)\n"
         "  --frame N       从第 N 张图开始 (默认 = 图集第一张)\n"
         "                  ★ 编号基准随图集自动探测：目录里存在 0.<ext> 时\n"
         "                  图集按 0 起编号 (N=0 即第一张)，否则按旧约定 1 起。\n"
@@ -405,7 +405,7 @@ static const char *scut_pic_path(void)  { return s_pic_path; }
  *  ★★ 这一段是「黑屏跑到底」这个 bug 的根因修复，也是本文件里最需要
  *     讲清"为什么"的一段。★★
  *
- *  问题：测试图目录（--pic 或 config.h 的 SCUT_PIC_DIR，默认 "pic/1"）
+ *  问题：测试图目录（--pic，或老工程 config.h 里的 SCUT_PIC_DIR，默认 "pic/1"）
  *        是【相对路径】，而相对路径是按【进程当前工作目录（CWD）】
  *        解析的。CWD 是启动者决定的，不是工程决定的：
  *          · 用户在工程根目录敲命令  → CWD = 工程根 → pic/1 找得到
@@ -1095,8 +1095,13 @@ static int pic_detect_first_index(const char *dir)
 /* --------------------------------------------------------------------------
  *  探测图集：确定目录、确定总数、夹取起始编号
  *
- *  目录优先级：--pic DIR > config.h 的 SCUT_PIC_DIR > "pic/1"
- *  扩展名优先级：--ext > config.h 的 SCUT_PIC_EXT > ".bmp"
+ *  目录优先级：--pic DIR > 老工程 config.h 里的 SCUT_PIC_DIR > "pic/1"
+ *  扩展名优先级：--ext > 老工程 config.h 里的 SCUT_PIC_EXT > ".bmp"
+ *
+ *  ★ 注意 SCUT_PIC_DIR / SCUT_PIC_EXT 只对【手写 config.h 的老工程】有效：
+ *    新工程的 scut_config.h 由 scut_build.py 按 scut_project.json 生成，
+ *    里面【只有】SCUT_IMAGE_W/H 与 SCUT_INPUT_ARRAY，不含图集配置
+ *    （图集是运行期参数，走 --pic / --ext，改完不需要重编译）。
  *
  *  ★ 目录【怎么解析】是本函数的核心，规则如下（顺序即优先级）：
  *
@@ -1392,8 +1397,8 @@ static void resolve_pic_set(const options_t *o)
             "      搜索目录: %s\n"
             "      期望文件名: <目录>/0%s, <目录>/1%s, ...（0.<ext> 存在则从 0 起编号；\n"
             "                  否则按旧约定 1%s, 2%s, ... 从 1 起）\n"
-            "      配置来源: 目录取自 --pic，未指定时取 config.h 的 SCUT_PIC_DIR（当前 \"%s\"）；\n"
-            "                扩展名取自 --ext，未指定时取 config.h 的 SCUT_PIC_EXT（当前 \"%s\"）。\n"
+            "      配置来源: 目录取自 --pic，未指定时用默认 \"pic/1\"（当前 \"%s\"）；\n"
+            "                扩展名取自 --ext，未指定时用默认 \".bmp\"（当前 \"%s\"）。\n"
             "      已尝试的位置（按优先级，越靠前越优先，第一个真的含起始编号那张的会被采用）:\n",
             s_pic_dir, s_pic_ext, s_pic_ext, s_pic_ext, s_pic_ext,
             SCUT_PIC_DIR, SCUT_PIC_EXT);
@@ -1430,7 +1435,7 @@ static void resolve_pic_set(const options_t *o)
             "        1) 对着上面的清单一处处看一眼：把图集放到其中某一处，\n"
             "           文件名按上面的模式命名（多数工程的正确位置是第 2 条）；\n"
             "        2) 用 --pic 指定图集目录（推荐用绝对路径，避免工作目录歧义）；\n"
-            "        3) 修改 config.h 里的 SCUT_PIC_DIR / SCUT_PIC_EXT 指到已有的图集。\n"
+            "        3) 用 --ext 指定你在用的扩展名（例如 --ext .png）。\n"
             "      另注: 当前版本的解码器支持 BMP（24 位与 8 位调色板）与 PNG\n"
             "            （8 位灰度/真彩/调色板，非交织）；JPEG 请先转成上述格式。\n",
             s_pic_ext, s_pic_ext, s_pic_ext, s_pic_ext);
@@ -1594,7 +1599,7 @@ static int scut_pic_load(int index)
             why  = "这个格式的图片【目前还不支持】：解码器当前认 BMP 与 PNG"
                    "（8 位灰度/真彩/调色板）。";
             next = "请先用画图/PS/Python(PIL) 等工具把它转成 24 位 .bmp 或 .png，"
-                   "或把 config.h 的 SCUT_PIC_EXT 改成已有的格式。";
+                   "或在配置面板里把「图集后缀」改成你实际在用的格式。";
             break;
         case SCUT_FRAME_ERR_NOT_BMP:
             why  = "文件扩展名像是 BMP，但内容不是 BMP（文件头缺少 \"BM\" 标记）。"
@@ -2279,8 +2284,18 @@ static void on_frame(void *user)
      *  ★★ 「单步 / 运行」的语义（本轮逐条核对过，结论：正确，不要改） ★★
      *
      *  插件（simsession）启动进程时用的参数是
-     *      --json --step --frames 0 --advance
-     *  然后【每帧喂一个换行】。于是两个按钮的行为是：
+     *      --json --step --frames 0
+     *  然后【每帧喂一个换行】。
+     *
+     *  ★★ 注意：启动参数里【不带 --advance】（0.7.1 起）★★
+     *    下面几行原先写着带 --advance，那是旧实现的写法。
+     *    现在图集推进【完全走运行期协议】：
+     *        空行 = 重跑当前这张图；n / p / g<N> = 换图
+     *    这样「运行」「上一张」「下一张」才是三个不同的动作，
+     *    而不是同一个"前进一帧"。--advance 仍支持（批跑整组图用），
+     *    只是插件不用它。
+     *
+     *  于是插件侧的动作是：
      *
      *    · 单步：喂一个 '\n'
      *        → 本函数（第 N 帧的 sink）走完 → 推进到 N+1 并预载
@@ -2492,8 +2507,12 @@ int main(int argc, char **argv)
     scut_bind_apply();
 
     /* ★ 运行期覆盖 PROCESS 重复次数（--repeat）。
-     *   bind 里给的是编译期默认值（SCUT_PROCESS_REPEAT），
-     *   这里用命令行/设置给的值覆盖它。
+     *
+     * ★ 更正：这里原先写着"bind 里给的是编译期默认值（SCUT_PROCESS_REPEAT）"——
+     *   那个宏【从来不存在】，bind 给的是写死的 1
+     *   （见 bind/scut_bind.c 的 scut_bind_apply）。
+     *   用户要改次数请用配置面板的「每帧重复次数」（运行期，立即生效），
+     *   或用 --repeat / b<N>。
      *   旧实现解析了 --repeat 却从未应用，属于"设置项是死的"那类缺陷。 */
     if (o.repeat >= 1) {
         scut_sched_set_repeat(o.repeat);
@@ -2591,10 +2610,19 @@ int main(int argc, char **argv)
         scut_run_until_quit();
     }
 
-    /* --- 6) 每帧变量快照（放在最后输出一次，避免刷屏） --- */
-    if (o.json) {
-        emit_variables(&o);
-    }
+    /* ★ 这里原先有一段 `if (o.json) { emit_variables(&o); }`，已删除。
+     *
+     *   它是一段【不可达代码】+ 一处协议污染，两件事叠在一起：
+     *     · 不可达：--list-vars 在上面（本轮改动的 45 行之前）已经
+     *       emit 过一次并 return 了，所以"退出前再报一次"永远轮不到。
+     *     · 协议污染：它判的是 o.json（会话模式插件用的正是这个），
+     *       于是真正的效果是在【每帧一行帧 JSON】之外多吐一行只有
+     *       "vars" 的裸 JSON —— 用户点「停止」就会触发。
+     *       插件侧按"有没有 frame 字段"分流，这行会被无害消化（所以不炸），
+     *       但它不该出现在会话协议里：一旦有人按"每行都是帧"改解析器，
+     *       症状会是"偶尔多一条数据"，极难归因。
+     *
+     *   变量快照的唯一出口是上面 --list-vars 那一段。 */
 
     scut_frame_free();
     scut_core_shutdown();

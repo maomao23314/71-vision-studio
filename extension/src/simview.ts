@@ -6,7 +6,7 @@
  *   · 上手即用     → 图像 + 计时 + 变量勾选都在一个面板里，不用来回切
  *   · 适应任意代码 → 变量列表【完全】来自自动发现的结果，插件不硬编码任何符号名
  *
- * ★ 本文件严格遵守 docs/插件技术要点.md 里实测过的三条约束：
+ * ★ 本文件严格遵守 VS Code Webview 的三条实测约束：
  *   1) registerWebviewViewProvider 的选项【只】接受 retainContextWhenHidden，
  *      enableScripts / localResourceRoots 必须写在 resolveWebviewView 里。
  *      我们干脆不传第三个参数，改用 getState/setState 做持久化。
@@ -24,11 +24,17 @@ import { defaultConfig, readConfig } from './projectconfig';
 /** 视图 id（必须与 package.json 的 contributes.views 一致）。 */
 export const SIM_VIEW_ID = 'scut71.simview';
 
-/** 视图种类：'sim' 会接收帧画面，'vars' 只显示变量面板（避免两处重复收帧）。 */
-type ViewKind = 'sim' | 'vars';
+/* ★ 这里原先有一个 `type ViewKind = 'sim' | 'vars'`（用于"两个视图共用
+ *   一份脚本，靠 kind 分辨收不收帧"）。现在【只注册了一个视图】，
+ *   于是 'vars' 那条分支永远不可能命中 —— 已整条删除：
+ *     · AttachedView.kind 字段、resolveWebviewView 里的三元判断、
+ *     · html() 的 kind 形参与 <body data-kind>、onFrame 的 v.kind !== 'sim' 判据、
+ *     · 以及 media/simview.js 里读 data-kind 的那行（那个 KIND 变量零引用）。
+ *   留着的代价是让读代码的人去找"第二个视图在哪"。
+ *   将来若真加第二个视图，请一并把"谁收帧"这件事重新设计，
+ *   而不是靠恢复这个字段。 */
 
 interface AttachedView {
-    kind: ViewKind;
     /** 把消息写进这个 webview */
     post: (msg: unknown) => void;
     /** webview 当前是否可见（隐藏时不产帧） */
@@ -94,14 +100,12 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
         context: vscode.WebviewViewResolveContext,
         _token: vscode.CancellationToken,
     ): void {
-        const kind: ViewKind = view.viewType === SIM_VIEW_ID ? 'sim' : 'vars';
         view.webview.options = {
             enableScripts: true,
             localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'media')],
         };
-        view.webview.html = this.html(view.webview, kind);
+        view.webview.html = this.html(view.webview);
         const attached: AttachedView = {
-            kind,
             post: (msg: unknown) => {
                 void view.webview.postMessage(msg);
             },
@@ -227,16 +231,19 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
         }
         this.updateProduction();
         this.sendStatus();
-        await s.bench(n);       // 协议命令 b<N>：同图 N 次，只跑计时段
+        // ★ 用 bench() 返回的那一帧，而不是 this.lastTiming 缓存：
+        //   命令是异步生效的，缓存里此刻还是【测速之前】那一帧的数字。
+        //   详见 SimSession.bench 的说明。
+        const frame = await s.bench(n);
 
-        const t = this.lastTiming;
         // ★ 文案以【周期数】为主（用户要求三遍）：µs 是墙钟时间，
         //   每台电脑主频不同，没有横向可比性；周期数才是"做了多少工作"。
+        const t = frame?.timing;
         const cyc = t && t.cyclesValid ? t.processCycles : 0;
         const msg = t
             ? `测速完成：同一张图重复 ${n} 次 → 平均 ${cyc.toLocaleString()} 周期/次`
               + (cyc ? '' : '（周期数不可用，本机耗时仅供参考）')
-            : '测速未得到计时数据（可能没编译或没跑起来）。';
+            : '测速未得到计时数据（可能没编译或没跑起来，也可能是那帧超时未返回）。';
         this.deps.log('[测速] ' + msg);
         void vscode.window.showInformationMessage('SCUT-71 ' + msg);
     }
@@ -493,11 +500,11 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
 
         let delivered = false;
         for (const v of this.views) {
-            if (v.kind !== 'sim' || !v.visible()) {
+            if (!v.visible()) {
                 continue;
             }
             // ★ 直接 post Uint8Array。engines.vscode >= 1.57 时走结构化克隆快路径，
-            //   比 base64 快 10–20 倍（实测数据见 docs/插件技术要点.md 坑 2）。
+            //   比 base64 快 10–20 倍（VS Code 维护者给的实测数字）。
             v.post({
                 type: 'frame',
                 index: f.index,
@@ -673,7 +680,7 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
 
     /* ------------------------------------------------------------ HTML */
 
-    private html(webview: vscode.Webview, kind: ViewKind): string {
+    private html(webview: vscode.Webview): string {
         const nonce = crypto.randomBytes(16).toString('base64');
         const mediaRoot = vscode.Uri.joinPath(this.extensionUri, 'media');
         const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaRoot, 'simview.js'));
@@ -689,8 +696,6 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
             `font-src ${webview.cspSource}`,
         ].join('; ');
 
-        // 视图种类用 data 属性告诉脚本 —— 两个视图共用一份脚本，
-        // 由脚本自己决定隐藏掉哪一块。
         return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -700,7 +705,7 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
 <link rel="stylesheet" href="${styleUri}">
 <title>SCUT-71 仿真视图</title>
 </head>
-<body data-kind="${kind}">
+<body>
   <div id="app">
     <section id="screen-section">
       <div id="screen-wrap">

@@ -84,6 +84,53 @@
 
 ---
 
+## 画调试标注
+
+标注画在覆盖层上，由调度器合成进输出图，所以是彩色的。
+把绘图调用放在「每帧后处理函数」里 —— 它**不计入**处理时间
+（车上没有屏幕，绘图算进算法耗时会让你去优化一段车上根本不存在的代码）。
+
+### 四个绘图函数
+
+| 函数 | 作用 |
+|---|---|
+| `SCUT_DrawPoint(x, y, color)` | 画一个像素 |
+| `SCUT_DrawLine(x0, y0, x1, y1, color)` | 画直线 |
+| `SCUT_DrawRect(x0, y0, x1, y1, color)` | 画空心矩形（四条边） |
+| `SCUT_DrawText(x, y, color, fmt, ...)` | 画 ASCII 文字，用法同 `printf` |
+
+坐标越界会自动忽略，不用自己判断。
+
+`SCUT_DrawText` 只支持 ASCII（内置 8×8 字库）。别拿它显示读数，
+要看数值请用 `SCUT_Log` 或变量面板。
+
+### 预定义颜色（11 个）
+
+```
+SCUT_COLOR_BLACK    SCUT_COLOR_WHITE     SCUT_COLOR_RED      SCUT_COLOR_GREEN
+SCUT_COLOR_BLUE     SCUT_COLOR_YELLOW    SCUT_COLOR_CYAN     SCUT_COLOR_MAGENTA
+SCUT_COLOR_ORANGE   SCUT_COLOR_GRAY      SCUT_COLOR_LIGHTGRAY
+```
+
+挑几个高对比、彼此好区分的就够。
+
+### 自建颜色
+
+用 `SCUT_RGB(r, g, b)`，每个分量 0..255：
+
+```c
+scut_u32 my_orange = SCUT_RGB(255, 128, 0);
+SCUT_DrawLine(0, 0, 10, 10, my_orange);
+
+SCUT_DrawPoint(x, y, SCUT_RGB(g, g, g));   /* 灰度也用同一个宏 */
+```
+
+不要手写十六进制字面量。颜色内部是 `0x00BBGGRR`（跟 Windows `COLORREF` 一致，
+方便老代码迁移），所以 `0xFF0000` 是**蓝色**不是红色，极容易记错。
+一律用 `SCUT_RGB(r,g,b)` 或预定义名。
+
+---
+
 ## 配置放在哪
 
 **只有一个地方**：工程根目录的 **`scut_project.json`**。

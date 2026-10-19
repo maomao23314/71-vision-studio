@@ -29,9 +29,9 @@ scut_symbols.py -- 从 DWARF 自动发现用户代码的全局变量，生成 Wa
     4) 链接
 
 ★ 上面写的是 clang 而不是 gcc：本环境的编译器固定为 clang（LLVM-MinGW），
-  它的 DWARF 输出与 binutils objdump 的组合是实测过的通路
-  （见 docs/实测证据.md 的 A-18/A-19）。这里原先写 gcc，
-  会让人以为换 gcc 也行 —— 而 objdump 对两者的间接字符串格式并不相同。
+  它的 DWARF 输出与 binutils objdump 的组合是实测过的通路。
+  这里原先写 gcc，会让人以为换 gcc 也行 ——
+  而 objdump 对两者的间接字符串格式并不相同。
 
 ★ 本脚本【不设版本闸门】：它只有 argparse/json/re/subprocess/sys/collections
   五个标准库 import，语法在 Python 3.6 上也能跑。

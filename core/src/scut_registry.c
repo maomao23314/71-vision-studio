@@ -54,7 +54,6 @@
  * -------------------------------------------------------------------------- */
 static scut_registry_entry_t g_entries[SCUT_REG_CAPACITY];
 static char                  g_names[SCUT_REG_CAPACITY][SCUT_REG_NAME_MAX];
-static int                   g_role_count[SCUT_ROLE_COUNT];
 static int                   g_count;   /* 当前条目数（含所有角色） */
 
 /* 该角色号是否合法。角色号可能由调用方从 int 强转而来，必须自己兜住。 */
@@ -193,7 +192,6 @@ void scut_register_internal(scut_role_t role, int priority,
     g_entries[g_count].name     = g_names[g_count];
     g_entries[g_count].fn       = fn;
 
-    g_role_count[(int)role]++;
     g_count++;
 }
 
@@ -231,8 +229,8 @@ void scut_registry_sort(void)
  *  执行
  *
  *  表在排序后是按 role 分块的（全局按 role 升序），所以同角色回调天然
- *  连续且已按 priority/name 排好。这里直接全表扫描而不是用
- *  g_role_count 算区间：省掉一处"计数与内容失配"的隐患，代价是
+ *  连续且已按 priority/name 排好。这里直接全表扫描而不是维护一份
+ *  "每个角色有多少条"的计数：省掉一处"计数与内容失配"的隐患，代价是
  *  O(总条目数) 而不是 O(该角色条目数)。上限 1024，每帧一次，可忽略。
  *
  *  零条目时循环体不执行，天然安全——不需要任何特判。
@@ -257,10 +255,22 @@ void scut_registry_invoke(scut_role_t role)
 
 int scut_registry_count(scut_role_t role)
 {
+    int i;
+    int n = 0;
+
     if (!role_valid(role)) {
         return 0;
     }
-    return g_role_count[(int)role];
+    /* ★ 现算，不读缓存的计数数组（2026-10-15 改）。
+     *   原先的 `g_role_count[]` 是写后不读的死状态：唯一读者是本函数，
+     *   而本函数零调用（invoke 刻意全表扫描）。每次注册白写一次，
+     *   reset 还要记得清零。本函数是低频排查入口，扫表代价可忽略。 */
+    for (i = 0; i < g_count; i++) {
+        if (g_entries[i].role == role) {
+            n++;
+        }
+    }
+    return n;
 }
 
 int scut_registry_size(void)
@@ -286,6 +296,5 @@ void scut_registry_reset(void)
 {
     memset(g_entries, 0, sizeof(g_entries));
     memset(g_names, 0, sizeof(g_names));
-    memset(g_role_count, 0, sizeof(g_role_count));
     g_count = 0;
 }

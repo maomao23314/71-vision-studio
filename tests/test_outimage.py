@@ -29,7 +29,7 @@ test_outimage.py -- SCUT_OutImageSet 与「默认底图」的相互作用。
   两条都过，才说明"该保留的保留、该修好的修好了"。
 
 用法:
-    python tests/test_outimage.py [--toolchain D:\\TOOLS\\llvm-mingw]
+    python tests/test_outimage.py [--toolchain <根目录>]
 退出码 0 = 全部通过。
 """
 import argparse
@@ -49,9 +49,12 @@ except (AttributeError, ValueError):
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
+sys.path.insert(0, HERE)
+import toolchain as tc  # noqa: E402
+
 BUILD = os.path.join(ROOT, 'tools', 'scut_build.py')
-PIC_SRC = os.path.join(os.path.dirname(ROOT), '集成仿真环境测试',
-                       'scut71-project', 'pic', '1')
+# 仓库内自带的测试图（原先借仓库外的集成工程 —— 别人 clone 下来没有）
+PIC_SRC = tc.fixture_pic_dir()
 
 checks = 0
 failures = []
@@ -158,9 +161,12 @@ void image_process(void)
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--toolchain', default=r'D:\TOOLS\llvm-mingw')
+    ap.add_argument('--toolchain', default='',
+                    help='工具链根目录（含 bin/clang.exe）。留空 = 自动探测')
     ap.add_argument('--keep', action='store_true')
     args = ap.parse_args()
+
+    args.toolchain = tc.require(args.toolchain)
 
     print('SCUT-71 SCUT_OutImageSet × 默认底图 测试')
     work = tempfile.mkdtemp(prefix='scut_outimg_')

@@ -22,7 +22,8 @@ python tools\scut_build.py doctor --project .
 python tools\scut_build.py clean --project .
 ```
 
-`--project` 指向你的工程目录（那个装着 `code/` 和 `config.h` 的目录）。
+`--project` 指向你的工程目录（那个装着 `code/` 与 `scut_project.json` 的目录）。
+老工程用 `config.h` 承载尺寸契约，也仍然支持。
 
 ### 全部选项
 
@@ -35,7 +36,11 @@ python tools\scut_build.py clean --project .
 | `--json` | 关 | 给 VS Code 插件用的机器可读输出，见第四节 |
 | `-v` / `--verbose` | 关 | 打印每一条实际执行的命令行（排查问题时很有用） |
 
-工具链探测顺序：`--toolchain` → 环境变量 `SCUT71_TOOLCHAIN` → `D:\TOOLS\llvm-mingw` → `PATH`。
+工具链探测顺序：`--toolchain` → 环境变量 `SCUT71_TOOLCHAIN` → `PATH` → 问用户。
+
+> **刻意【没有】内置的"常见安装位置"候选目录。** 每个人的安装位置都不一样，
+> 猜目录在本项目上被证伪过两次（详见 `docs/架构设计.md` §4.5）。
+> 找不到时就弹窗让用户选「指定已有的」或「帮我下载」，而不是替他决定。
 
 ---
 
@@ -201,6 +206,6 @@ python tools\scut_build.py doctor --project .
 
 ## 七、给维护者
 
-- 脚本只用 **Python 标准库**，目标 **Python 3.8+**（低于此版本会在启动时直接给人话提示，而不是抛语法错误）。
+- 脚本只用 **Python 标准库**，目标 **Python 3.7+**（低于此版本会在启动时直接给人话提示 + 一份 JSON，而不是抛语法错误）。
 - 非直观的地方都有**中文注释解释「为什么」**，改之前请先读文件头的设计说明。
 - `scut_symbols.py` 的回归测试在 `tests/test_symbols.py`，改动生成器后务必跑一遍。

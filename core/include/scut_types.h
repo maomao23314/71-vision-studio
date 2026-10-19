@@ -73,12 +73,13 @@ typedef struct {
     const char *name;      /* 来源名（如 "mt9v03x"），仅用于 UI 显示 */
 } scut_image_desc_t;
 
-/* 像素格式。当前仅灰度，保留 RGB565 等扩展位。 */
-typedef enum {
-    SCUT_PIXFMT_GRAY8 = 0,
-    SCUT_PIXFMT_RGB565,
-    SCUT_PIXFMT_RGB888
-} scut_pixfmt_t;
+/* ★ 这里原先有一个 scut_pixfmt_t（GRAY8/RGB565/RGB888），已删除：
+ *   它是没有实现、也没有消费点的空壳 —— 全树零引用，且
+ *   scut_image_desc_t 里没有像素格式字段、也没有任何函数收这个类型，
+ *   用户即使想用也无从下手。
+ *   与"零调用但保留"的接口（如 SCUT_OutImageSetRGB）不同：那些有实现。
+ *   将来要做多像素格式，先定 desc 字段与转换函数，再补这个枚举。
+ */
 
 #ifdef __cplusplus
 }

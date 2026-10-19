@@ -141,7 +141,7 @@ for _stream_name in ("stdout", "stderr"):
 # 常量
 # ===========================================================================
 
-# 生成物目录（相对工程根）。与 docs/项目计划书.md §6.1 一致。
+# 生成物目录（相对工程根）。
 SCUT_DIR = ".scut"
 
 EXE_NAME = "scut_sim.exe"
@@ -3018,7 +3018,7 @@ def build_parser() -> argparse.ArgumentParser:
                    choices=["build", "doctor", "clean"],
                    help="build（默认）/ doctor / clean")
     p.add_argument("--project", required=True,
-                   help="工程目录（含 code/ 与 config.h）")
+                   help="工程目录（含 code/ 与 scut_project.json；老工程用 config.h 也支持）")
     p.add_argument("--toolchain", default="",
                    help="工具链根目录。省略时按 SCUT71_TOOLCHAIN 环境变量、PATH 探测；"
                          "都找不到时插件会问你要（每个人的安装位置不同，不靠猜）")
@@ -3039,10 +3039,18 @@ def build_parser() -> argparse.ArgumentParser:
                         "此时所有人类可读进度都走 stderr")
     p.add_argument("-v", "--verbose", action="store_true",
                    help="打印每一条实际执行的命令行（排查构建问题时用）")
+    # ★ --backend 目前【只有一个合法取值】，这是有意为之，不是漏填。
+    #   它的作用是把"呈现后端是谁"这件事显式化：仓库里目前只有
+    #   backends/headless/ 一个后端，但这一层是刻意留出的接口 ——
+    #   将来加 GUI / 录制 / 别的宿主时，只需在这里补一个取值，
+    #   构建路径（下面按 sdk_backend 定位源码）不用改。
+    #   choices 限死一个值，是为了让"传了别的后端名"当场报错，
+    #   而不是静默退回 headless。
     p.add_argument("--backend", default="headless",
                    choices=["headless"],
                    help="呈现后端（谁提供 main）。headless = 由插件驱动的"
-                        "无窗口后端，帧经 stdout 协议交给 IDE（默认）")
+                        "无窗口后端，帧经 stdout 协议交给 IDE（默认）。"
+                        "目前只有这一个取值，这一层是为将来的其它后端预留的接口")
     return p
 
 

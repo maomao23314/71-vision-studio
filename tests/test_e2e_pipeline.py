@@ -20,7 +20,7 @@ test_e2e_pipeline.py -- 端到端验证「用户代码零注册 + 环境接管�
     9. 改「结果图数组名」后画面随之改变（配置真的生效）
 
 用法：
-    python tests/test_e2e_pipeline.py [--toolchain D:\\TOOLS\\llvm-mingw]
+    python tests/test_e2e_pipeline.py [--toolchain <根目录>]
 退出码 0 = 全部通过。
 """
 import argparse
@@ -40,11 +40,15 @@ except (AttributeError, ValueError):
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
+sys.path.insert(0, HERE)
+import toolchain as tc  # noqa: E402
+
 BUILD = os.path.join(ROOT, 'tools', 'scut_build.py')
 TEMPLATE = os.path.join(ROOT, 'templates', 'starter')
-# 测试图：借集成工程的图集（模板故意不带图）
-PIC_SRC = os.path.join(os.path.dirname(ROOT), '集成仿真环境测试',
-                       'scut71-project', 'pic', '1')
+# 测试图：用【仓库内自带的】tests/fixtures/pic/1（模板故意不带图）。
+# ★ 原先借仓库外的"集成仿真环境测试"工程 —— 别人 clone 下来没有那个目录，
+#   这部分会静默少跑（而不是报错）。
+PIC_SRC = tc.fixture_pic_dir()
 
 failures = []
 checks = 0
@@ -89,9 +93,13 @@ def read_ppm(path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--toolchain', default=r'D:\TOOLS\llvm-mingw')
+    ap.add_argument('--toolchain', default='',
+                    help='工具链根目录（含 bin/clang.exe）。'
+                         '留空 = 自动探测 %s / PATH' % tc.ENV_VAR)
     ap.add_argument('--keep', action='store_true', help='保留临时工程便于排查')
     args = ap.parse_args()
+
+    args.toolchain = tc.require(args.toolchain)
 
     work = tempfile.mkdtemp(prefix='scut_e2e_')
     proj = os.path.join(work, 'proj')

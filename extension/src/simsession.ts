@@ -85,6 +85,17 @@ export class SimSessionImpl implements SimSession {
     private ackWaiters: Array<() => void> = [];
     private ackTimer: NodeJS.Timeout | undefined;
 
+    /**
+     * 等待「下一帧抵达」的等待者。
+     *
+     * ★ 控制类命令（b<N> 测速、n/p/g 翻页）只往 stdin 写一行就返回，
+     *   效果要等后端跑完那帧回传才可见。调用方若紧接着读缓存的计时，
+     *   拿到的是【上一帧】的数字 —— 不报错，只是数字是错的。
+     *   这里给一条"等一帧"的正规通道，免得调用方用 setTimeout 猜时间
+     *   （猜时间等于把机器快慢变成正确性问题）。
+     */
+    private frameWaiters: Array<(f: FramePacket) => void> = [];
+
     /** 正在「运行 N 帧」时剩余要推的步数；0 表示不在连续运行。 */
     private pendingSteps = 0;
     private runGeneration = 0;
@@ -353,12 +364,18 @@ export class SimSessionImpl implements SimSession {
      * 测速：当前这张图重复 N 次（协议 "b<N>"）。
      *
      * ★ 只跑【计时段】：后端收到 b<N> 后把 repeat 临时设为 N、
-     *   跑一帧、再把 repeat 还原 —— 后处理（DRAW 阶段）与图集推进
-     *   都不参与，所以测的就是算法本体。进程不重启，状态保留。
+     *   跑一帧、再还原 —— 后处理（DRAW）与图集推进都不参与。
+     *   进程不重启，算法状态保留。
+     *
+     * ★ 返回【测速那一帧】的数据，不是上一帧（一条真实缺陷的修复）：
+     *   原先写完 stdin 就返回，调用方立刻读缓存 → 拿到测速【之前】那帧的
+     *   数字，而用户正拿它做性能决策。现在内部等那帧回来再交出去；
+     *   超时/进程退出返回 undefined。
      */
-    bench(n: number): Promise<void> {
+    async bench(n: number): Promise<FramePacket | undefined> {
+        const waited = this.waitFrame();
         this.writeLine('b' + Math.max(1, Math.floor(n)));
-        return Promise.resolve();
+        return waited;
     }
 
     /**
@@ -559,7 +576,7 @@ if (!rgb) {
     /**
      * 背压核心。
      *
-     * ★ 规则（照 docs/插件技术要点.md 第四节）：
+     * ★ 规则（背压 / 帧生命周期）：
      *   · 同一时刻只允许一帧在途；
      *   · 宁可【丢帧】也不要排队 —— 排队就是无界内存增长，
      *     而且仿真帧是派生状态，丢掉的下一帧会覆盖它。
@@ -579,6 +596,12 @@ if (!rgb) {
         for (const cb of this.frameCbs) {
             cb(packet);
         }
+        // 通知等待者：一帧已抵达（见 frameWaiters 的说明）。
+        // ★ 放在帧回调【之后】：等待者要看到的是"这一帧已经完整处理过"，
+        //   包括 pushSnapshot 一类由帧回调触发的状态更新。
+        for (const w of this.frameWaiters.splice(0)) {
+            w(packet);
+        }
         // 保险丝：webview 万一没回 ACK（崩了/被禁用），2 秒后自动放行，
         // 否则整个会话会永久卡住。这是「宁可丢帧也不要卡死」的落实。
         clearTimeout(this.ackTimer);
@@ -588,6 +611,36 @@ if (!rgb) {
                 this.completeAck();
             }
         }, 2000);
+    }
+
+    /**
+     * 等下一帧抵达（供控制类命令读"命令生效后"的结果）。
+     *
+     * 顺序不能反：先写命令、再等帧 —— bench() 内部已经是这个顺序。
+     * 超时返回 undefined（不抛异常）：这是诊断路径，拿不到数据显示
+     * 一条中文说明即可，不该让整个命令失败。
+     */
+    waitFrame(timeoutMs = 8000): Promise<FramePacket | undefined> {
+        return new Promise<FramePacket | undefined>((resolve) => {
+            let done = false;
+            const finish = (f: FramePacket | undefined): void => {
+                if (done) {
+                    return;
+                }
+                done = true;
+                clearTimeout(timer);
+                resolve(f);
+            };
+            const timer = setTimeout(() => {
+                const i = this.frameWaiters.indexOf(waiter);
+                if (i >= 0) {
+                    this.frameWaiters.splice(i, 1);
+                }
+                finish(undefined);
+            }, timeoutMs);
+            const waiter = (f: FramePacket): void => { finish(f); };
+            this.frameWaiters.push(waiter);
+        });
     }
 
     /** 呈现层确认收到并已显示第 index 帧。 */
@@ -633,9 +686,9 @@ if (!rgb) {
     /**
      * 视图可见性变化时调用。
      *
-     * ★ 为什么必须做这件事（docs/插件技术要点.md 第四节）：
-     *   webview 隐藏时 postMessage 的可用性在 .d.ts 里自相矛盾
-     *   （9995-9996 说可以，10071-10072 说不可以）。所以【设计上不依赖它】：
+     * ★ 为什么必须做这件事：
+     *   webview 隐藏时 postMessage 的可用性在 vscode.d.ts 里自相矛盾
+     *   （一处说可以，另一处说不可以）。所以【设计上不依赖它】：
      *   隐藏即停止产帧，可见即恢复。
      */
     setProductionPaused(paused: boolean): void {
@@ -654,60 +707,15 @@ if (!rgb) {
         return this.productionPaused;
     }
 
-    /* --------------------------------------------------------- 便利方法 */
-
-    /** 列出变量后退出（供变量面板初始化）—— 独立起一个短命进程，不干扰会话。 */
-    static async listVariables(exePath: string, toolchainBin?: string, picDir?: string): Promise<VariableSnapshot[]> {
-        if (!fs.existsSync(exePath)) {
-            throw new Error(`找不到仿真程序：${exePath}`);
-        }
-        const args = ['--json', '--list-vars'];
-        if (picDir) {
-            args.push('--pic', picDir);
-        }
-        const env: NodeJS.ProcessEnv = { ...process.env };
-        if (toolchainBin) {
-            env.PATH = toolchainBin + path.delimiter + (process.env.PATH ?? '');
-        }
-        return new Promise<VariableSnapshot[]>((resolve, reject) => {
-            const child = spawn(exePath, args, {
-                cwd: path.dirname(exePath), windowsHide: true, env,
-                stdio: ['ignore', 'pipe', 'pipe'],
-            });
-            const splitter = new LineSplitter();
-            let found: VariableSnapshot[] | undefined;
-            const timer = setTimeout(() => {
-                try {
-                    child.kill();
-                } catch {
-                    /* 已退出 */
-                }
-                reject(new Error('列出变量超时（10 秒）。下一步：手动运行仿真程序看是否卡住。'));
-            }, 10000);
-
-            child.stdout.on('data', (d: Buffer) => {
-                for (const line of splitter.push(d.toString('utf8'))) {
-                    const vars = parseVariablesLine(line);
-                    if (vars) {
-                        found = vars.map((v) => ({
-                            name: v.name,
-                            values: v.values.split(/\s+/).filter((s) => s.length > 0),
-                            truncated: v.truncated,
-                            total: v.total,
-                        }));
-                    }
-                }
-            });
-            child.on('error', (e: Error) => {
-                clearTimeout(timer);
-                reject(new Error(`启动仿真程序失败：${e.message}`));
-            });
-            child.on('close', () => {
-                clearTimeout(timer);
-                resolve(found ?? []);
-            });
-        });
-    }
+    /* ★ 这里原先有一个 static async listVariables()，注释写着"供变量面板
+     *   初始化"，但它是【真的死代码】，已删除。判据：
+     *     · 全树零调用点；也无人依赖它的返回值。
+     *     · 它声称的职责已有人做、且更完整：build.ts 的
+     *       augmentManifestFromRuntime() 用 spawnSync 起同一个
+     *       `--list-vars --json`，还额外做了"运行期注册表补全编译期清单"。
+     *     · 无任何测试覆盖。
+     *   留着就是"同一件事两份实现"：将来协议一改，build.ts 那份会报错，
+     *   这份没人调用、没测试，属于静默腐烂。 */
 }
 
 /** 暴露给上层做诊断：把一行 JSON 的原始形态修好后返回（供输出面板显示）。 */

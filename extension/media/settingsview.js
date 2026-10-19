@@ -153,7 +153,14 @@
             return box;
         }
 
-        if (f.kind === 'folder') {
+        // ★ 'file' 必须与 'folder' 合并判断（一条真实缺陷的修复）：
+        //   本函数的分支顺序是 bool → lines → number → folder → 兜底 text。
+        //   原先这里只判 'folder'，而 configfields.ts 里 pythonPath 的
+        //   kind 是 'file' —— 于是它永远落到 text 兜底，
+        //   下面两句针对 'file' 写的 placeholder / 按钮 title 成了不可达代码，
+        //   用户看到的是目录版的提示（"留空 = 自动探测"），
+        //   而宿主点开的是文件选择器。功能对、提示错。
+        if (f.kind === 'folder' || f.kind === 'file') {
             const box = document.createElement('div');
             box.className = 'row-inline';
             const inp = document.createElement('input');

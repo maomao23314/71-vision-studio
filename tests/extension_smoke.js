@@ -12,8 +12,8 @@
  * ★ 契约说明（本测试与实现对齐，勿凭直觉改）：
  *   · 解析失败一律返回 undefined，不是 null
  *     （null 在这套代码里表示"值就是空"，语义不同）
- *   · parseNumericValues 接收的是一条【已解析的变量条目】，
- *     它自己从 .values 字符串里拆数字
+ *   · 变量行的 kind 可能来自两个源：编译期清单是字符串，
+ *     运行期注册表是枚举数字 —— 两边都要能解析（见 build.ts 的 decodeWatchKind）
  */
 const path = require('path');
 const fs = require('fs');
@@ -87,17 +87,10 @@ console.log('\n=== 3. parseVariablesLine：变量协议 ===');
     ok('非变量行返回 undefined',
        protocol.parseVariablesLine('{"frame":1}') === undefined);
 
-    // ★ parseNumericValues 的入参是【空格分隔的字符串】（即 .values 字段本身），
-    //   不是变量条目对象。传对象会直接抛异常 —— 这条断言就是防止这个误用。
-    const nums = protocol.parseNumericValues(v[1].values);
-    ok('数值解析', nums.length === 3 && nums[0] === 0 && nums[2] === 2, nums.join(','));
-    // 结构体/指针这类非数值记号必须被跳过，而不是变成 NaN
-    const weird = protocol.parseNumericValues('<24 bytes>');
-    ok('非数值记号被跳过', weird.length === 0, JSON.stringify(weird));
-    // 空串不能抛异常（大数组被完全截断时会出现）
-    ok('空串安全', protocol.parseNumericValues('').length === 0);
-    // 指针的十六进制记号也不该被当成数字
-    ok('十六进制记号安全', protocol.parseNumericValues('0x4050b0').length === 0);
+    // ★ 这里原先有 5 条 parseNumericValues 的断言，随该函数一起删除。
+    //   它测的是一个"没有生产消费者"的函数（曲线板已删），
+    //   而那几条断言的存在会让人误以为"这个能力还在用"。
+    //   函数本身的删除理由见 extension/src/protocol.ts 的说明。
 }
 
 console.log('\n=== 4. parsePpm：真实仿真输出 ===');

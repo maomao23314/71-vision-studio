@@ -144,17 +144,27 @@ async function main() {
         const col = collector(s);
         await col.waitAtLeast(1);
         await new Promise((r) => setTimeout(r, 300));
-        const before = col.seen.length;
 
-        s.bench(50);
-        await col.waitAtLeast(before + 1, 8000);
+        // ★ 这里刻意【不用】col 收集，而是直接 await s.bench(50) 的返回值：
+        //   这正是本次修复的契约 —— bench() 必须返回【测速那一帧】，
+        //   而不是让调用方去读"上一帧"的缓存（那是修复前的真实缺陷）。
+        const beforeSeq = col.seen.length;
+        const bf = await s.bench(50);
+        await col.waitAtLeast(beforeSeq + 1, 8000);
         await new Promise((r) => setTimeout(r, 400));
-        const produced = col.seen.length - before;
+        const produced = col.seen.length - beforeSeq;
 
         ok('b<50> 只推进 1 帧（重复在帧内完成）', produced === 1, `实际 ${produced}`);
-        const last = col.seen[col.seen.length - 1];
-        ok('测速帧带有效计时', last && last.timing && last.timing.processUs > 0,
-            last && last.timing ? String(last.timing.processUs) : '无');
+        ok('bench() 返回测速那一帧（不是 undefined）', !!bf,
+            bf ? '帧 ' + bf.index : 'undefined');
+        ok('测速帧带有效计时', !!bf && bf.timing.processUs > 0,
+            bf ? String(bf.timing.processUs) : '无');
+        // ★ 关键断言：返回的帧必须与收集到的【最后那一帧】是同一帧。
+        //   若 bench() 没等而直接返回，这里会拿到上一帧的 index。
+        const lastSeen = col.seen[col.seen.length - 1];
+        ok('返回的帧就是这一帧（不是上一帧）',
+            !!bf && !!lastSeen && bf.index === lastSeen.index,
+            `bench=${bf && bf.index} last=${lastSeen && lastSeen.index}`);
         await s.stop();
     }
 

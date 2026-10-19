@@ -718,6 +718,40 @@ function tryJson(text: string): ScriptJson | undefined {
     return undefined;
 }
 
+/**
+ * 把后端的【数字】kind 反查成 SCUT_T_xxx 字符串。
+ *
+ * kind 有两个来源、两种类型：编译期清单（scut_symbols.py）给字符串，
+ * 运行期注册表（后端 printf 的 `"kind":%d`）给枚举数字。而运行期独有的
+ * 条目（DWARF 看不到的结构体成员）只有数字那一份。
+ *
+ * ★ 原先写的是 `typeof v.kind === 'string' ? v.kind : 'SCUT_T_I32'` ——
+ *   数字被静默当成 I32，于是结构体在面板上显示成 "I32 · 标量"
+ *   （错的类型，比不显示更误导），且 simview.js 的
+ *   `kind === 'SCUT_T_STRUCT'` 永不成立、「展开字段」按钮不出现。
+ *
+ * ★ 顺序必须与 core/include/scut_watch.h 的 scut_watch_type_t 一致。
+ */
+const WATCH_KIND_NAMES: readonly string[] = [
+    'SCUT_T_I8', 'SCUT_T_U8', 'SCUT_T_I16', 'SCUT_T_U16',
+    'SCUT_T_I32', 'SCUT_T_U32', 'SCUT_T_I64', 'SCUT_T_U64',
+    'SCUT_T_F32', 'SCUT_T_F64', 'SCUT_T_BOOL',
+    'SCUT_T_PTR', 'SCUT_T_STR', 'SCUT_T_ENUM', 'SCUT_T_STRUCT',
+];
+
+function decodeWatchKind(raw: unknown): string {
+    if (typeof raw === 'string' && raw.length > 0) {
+        return raw;
+    }
+    if (typeof raw === 'number' && Number.isInteger(raw)
+        && raw >= 0 && raw < WATCH_KIND_NAMES.length) {
+        return WATCH_KIND_NAMES[raw];
+    }
+    // 拿不到（老清单没有该字段 / 越界）→ I32。不退空串：
+    // 空串会让 varMeta 显示成 " · 标量"，比一个明确类型更难判断。
+    return 'SCUT_T_I32';
+}
+
 /** 把脚本给的 manifest 归一成 types.ts 的 VariableManifest（字段缺失就补默认值）。 */
 function normalizeManifest(raw: unknown): VariableManifest | undefined {
     if (typeof raw !== 'object' || raw === null) {
@@ -732,7 +766,7 @@ function normalizeManifest(raw: unknown): VariableManifest | undefined {
         .filter((v) => typeof v.name === 'string')
         .map((v) => ({
             name: v.name as string,
-            kind: typeof v.kind === 'string' ? v.kind : 'SCUT_T_I32',
+            kind: decodeWatchKind(v.kind),
             dims: Array.isArray(v.dims) ? v.dims.filter((n): n is number => typeof n === 'number') : [],
             total: typeof v.total === 'number' ? v.total : 1,
             elemBytes: typeof v.elemBytes === 'number' ? v.elemBytes : 4,

@@ -195,7 +195,7 @@ export interface FramePacket {
      *   现在颜色原样透传到 canvas，标注一眼可辨。
      *
      * ★ 历史契约变更记录（0.2.0）：更早的字段是 `grayBase64: string`，
-     *   后改为 `Uint8Array`。理由（见 docs/插件技术要点.md 坑 2）：
+     *   后改为 `Uint8Array`。理由是 Webview.postMessage 的传输特性：
      *     · `engines.vscode >= 1.57` 时，`Webview.postMessage` 对 ArrayBuffer/
      *       TypedArray 走「结构化克隆」快路径。VS Code 维护者给的实测数字是
      *       扩展宿主 → webview 约 10 s → 500 ms（10–20 倍）。
@@ -258,8 +258,15 @@ export interface SimSession {
     nextPic(): Promise<void>;
     /** 上一张图（协议 p，进程不重启，算法状态保留） */
     prevPic(): Promise<void>;
-    /** 测速：当前图重复 N 次（协议 b<N>，只跑计时段，后处理不参与） */
-    bench(n: number): Promise<void>;
+    /**
+     * 测速：当前图重复 N 次（协议 b<N>，只跑计时段，后处理不参与）。
+     *
+     * ★ 返回【测速那一帧】的数据。命令只是往 stdin 写一行，效果要等后端
+     *   跑完那一帧才可见；若不等就返回，调用方只能读到上一帧的计时 ——
+     *   那正是"测速结果是错的"这类静默缺陷的成因。
+     *   超时或进程已退出时返回 undefined。
+     */
+    bench(n: number): Promise<FramePacket | undefined>;
     /** 运行 n 帧（连续发空行） */
     runFrames(n: number): Promise<void>;
     /**

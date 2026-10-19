@@ -50,9 +50,26 @@ except (AttributeError, ValueError):
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
+sys.path.insert(0, HERE)
+import toolchain as tc  # noqa: E402
 
-CLANG = r"D:\TOOLS\llvm-mingw\bin\clang.exe"
-CLANG_ROOT = r"D:\TOOLS\llvm-mingw"
+# 当前命令行传入的工具链（由 main() 里的 --toolchain 设置）。
+# 用模块级变量而不是常量：本文件被 import 时不希望因为"没工具链"就炸
+# （有些检查是纯静态的，不需要 clang）。
+_ARG_TOOLCHAIN = ""
+
+
+def _clang():
+    return tc.clang(_ARG_TOOLCHAIN) or tc.clang()
+
+
+def _clang_root():
+    """工具链根目录（有 bin/clang.exe 的那一层）；找不到返回 ''。"""
+    exe = _clang()
+    if not exe:
+        return ""
+    # <root>/bin/clang(.exe) → <root>
+    return os.path.dirname(os.path.dirname(os.path.abspath(exe)))
 
 
 # --------------------------------------------------------------------------
@@ -188,9 +205,12 @@ int main(void)
 
 
 def find_clang():
-    if os.path.isfile(CLANG):
-        return CLANG
-    for cand in (r"C:\Program Files\LLVM\bin\clang.exe", "clang.exe", "clang"):
+    """找可用的 clang。定位逻辑收在 tests/toolchain.py（原先这里写死开发机路径）。"""
+    found = _clang()
+    if found:
+        return found
+    # 兜底：PATH 上的裸名（toolchain.py 也会查，这里是双保险）
+    for cand in ("clang.exe", "clang"):
         try:
             r = subprocess.run([cand, "--version"], capture_output=True,
                                text=True, timeout=30)
@@ -239,7 +259,10 @@ def compile_and_run(name, source, cwd, asan, extra_inc=(), extra_src=()):
 
     if asan:
         # 目标必须放在有 ASan 运行时的目录才能启动
-        exe = os.path.join(CLANG_ROOT, "bin", os.path.basename(exe))
+        asan_dir = _clang_root()
+        if not asan_dir:
+            return False, "ASan 需要工具链根目录，但没定位到"
+        exe = os.path.join(asan_dir, "bin", os.path.basename(exe))
         cmd[cmd.index("-o") + 1] = exe
 
     r = subprocess.run(cmd, capture_output=True, text=True,
@@ -251,7 +274,9 @@ def compile_and_run(name, source, cwd, asan, extra_inc=(), extra_src=()):
     #   ASan 运行时装不上（工具链 bin 不在 PATH）。这时"没有 ASan 报告"
     #   是假阴性，必须识别出来，否则会把"根本没跑"当成"通过了"。
     env = dict(os.environ)
-    env["PATH"] = CLANG_ROOT + r"\bin;" + env.get("PATH", "")
+    _root = _clang_root()
+    if _root:
+        env["PATH"] = os.path.join(_root, "bin") + os.pathsep + env.get("PATH", "")
     try:
         rr = subprocess.run([exe], capture_output=True, text=True,
                             encoding="utf-8", errors="replace",
@@ -666,8 +691,17 @@ def check_toolchain_asks_user():
 
 
 def main():
+    global _ARG_TOOLCHAIN
+    import argparse
+    ap = argparse.ArgumentParser(description="内存安全回归（ASan + 金丝雀）")
+    ap.add_argument("--toolchain", default="",
+                    help="工具链根目录（含 bin/clang.exe）。留空 = 自动探测")
+    _args, _unknown = ap.parse_known_args()
+    _ARG_TOOLCHAIN = _args.toolchain
+
     if find_clang() is None:
         print("⚠️  找不到 clang，跳过（需要 C 工具链）")
+        print("    下一步：--toolchain <根目录>，或设 %s 环境变量" % tc.ENV_VAR)
         return 0
 
     tmp = tempfile.mkdtemp(prefix="scut_memsafe_")

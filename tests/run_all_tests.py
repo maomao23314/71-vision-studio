@@ -35,12 +35,12 @@ except (AttributeError, ValueError):
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
+# 工具链定位：唯一入口在 tests/toolchain.py（命令行 → 环境变量 → PATH → 兜底）。
+# ★ 这里原先写死 D:\TOOLS\llvm-mingw —— 换台机器整套回归就跑不起来。
+sys.path.insert(0, HERE)
+import toolchain as tc  # noqa: E402
+
 PY = sys.executable
-CLANG = r"D:\TOOLS\llvm-mingw\bin\clang.exe"
-OBJDUMP_TOOLCHAIN = r"D:\TOOLS\llvm-mingw"
-# 工具链【根目录】（构建脚本要的是根，不是 bin 下的 clang.exe）
-CLANG_ROOT = r"D:\TOOLS\llvm-mingw"
-LLDB_DAP = r"D:\TOOLS\llvm-mingw\bin\lldb-dap.exe"
 
 results = []
 
@@ -75,7 +75,7 @@ def run(name, cmd, cwd=None, env=None):
     return ok, tail
 
 
-def bootstrap_project(root):
+def bootstrap_project(root, clang_root):
     """从模板建一个干净工程并构建，返回它的路径。
 
     ★ 为什么每次都重建，而不是复用 %TEMP% 里那个固定目录：
@@ -84,9 +84,13 @@ def bootstrap_project(root):
       而它 .scut/ 里的 exe 又还是旧构建产物。复用它等于让整套回归
       测一个用户根本跑不起来的东西，失败原因还完全看不懂。
       每次从模板重建，后面的每一条测试都作用在"刚构建、确定可用"的产物上。
+
+    ★ 测试图用【仓库内自带的】tests/fixtures/pic/1。
+      原先去仓库外的 "../集成仿真环境测试/scut71-project/pic/1" 拿 ——
+      那是开发机上恰好存在的目录，别人 clone 下来没有，
+      于是这部分测试会静默少跑（而不是报错），最难发现。
     """
-    src_pics = os.path.join(os.path.dirname(root), "集成仿真环境测试",
-                            "scut71-project", "pic", "1")
+    src_pics = tc.fixture_pic_dir()
     proj = tempfile.mkdtemp(prefix="scut_demo_")
     shutil.copytree(os.path.join(root, "templates", "starter"), proj,
                     dirs_exist_ok=True)
@@ -144,7 +148,7 @@ def bootstrap_project(root):
 
     r = subprocess.run(
         [sys.executable, os.path.join(root, "tools", "scut_build.py"),
-         "--project", proj, "--toolchain", CLANG_ROOT],
+         "--project", proj, "--toolchain", clang_root],
         capture_output=True, text=True, encoding="utf-8", errors="replace")
     if r.returncode != 0:
         print("  ⚠️  模板工程构建失败，后续组件测试可能失真：")
@@ -174,10 +178,21 @@ def main():
                     help="被测工程目录；留空 = 自动从模板新建一个干净的（推荐）")
     ap.add_argument("--also-cn", action="store_true",
                     help="在含中文与空格的工程路径上再跑一遍端到端")
+    ap.add_argument("--toolchain", default="",
+                    help="工具链根目录（含 bin/clang.exe 的那一层）。"
+                         "留空 = 依次探测 %s 环境变量 → PATH → 常见位置" % tc.ENV_VAR)
     args = ap.parse_args()
 
+    # ---- 工具链：缺了就没法测，给可执行的中文提示而不是后续一堆莫名报错 ----
+    clang_root = tc.require(args.toolchain)
+    clang_exe = tc.clang(args.toolchain)
+    lldb_dap = tc.lldb_dap(args.toolchain)
+    print("  工具链：%s" % clang_root)
+    if not lldb_dap:
+        print("  ! 没找到 lldb-dap —— 调试那条会跳过")
+
     banner("0/15  准备被测工程（从模板新建并构建）")
-    proj = args.project or bootstrap_project(ROOT)
+    proj = args.project or bootstrap_project(ROOT, clang_root)
 
     banner("1/15  端到端：模板工程 → 零注册用户代码 → 构建 → 运行")
     # ★ 这条排在第一位：它验证的是【设计理念本身】（用户代码零注册、
@@ -240,10 +255,12 @@ def main():
     #     这是 scut_symbols.py 的跨工具链承诺，不能因为主用 clang 就丢掉。
     banner("6/15  自动符号发现（38 变量 × clang 主 + gcc 副）")
     run("symbols", [PY, os.path.join(HERE, "test_symbols.py"),
-                    "--cc", CLANG, "--also", "gcc"])
+                    "--cc", clang_exe, "--also", "gcc"])
 
     banner("7/15  JSON 协议合法性（插件依赖它）")
-    run("json", [PY, os.path.join(HERE, "check_json_protocol.py")])
+    # ★ 显式传 --project：不传的话它只能去猜（旧版靠仓库外那个集成工程）。
+    run("json", [PY, os.path.join(HERE, "check_json_protocol.py"),
+                 "--project", proj])
 
     banner("8/15  内存安全（两处 snprintf 返回值误用 → 栈越界）")
     # ★ 这条盯的是"越界但不崩溃"的那类缺陷：静默、随机、只在特定输入下出现，
@@ -294,10 +311,16 @@ def main():
         candidate = os.path.join(code_dir, "main.c")
         user_c_src = candidate if os.path.isfile(candidate) else code_dir
         print("  ⚠️  code/ 下没找到 .c，断点位置退回：%s" % user_c_src)
-    run("dap", ["node", os.path.join(HERE, "dap_smoke.js"),
-                LLDB_DAP,
-                os.path.join(proj, ".scut", "bin", "scut_sim.exe"),
-                user_c_src])
+    if lldb_dap:
+        run("dap", ["node", os.path.join(HERE, "dap_smoke.js"),
+                    lldb_dap,
+                    os.path.join(proj, ".scut", "bin", "scut_sim.exe"),
+                    user_c_src])
+    else:
+        # lldb-dap 是可选件（随 LLVM-MinGW 发布）。缺了就【明确跳过】而不是
+        # 把整轮判失败 —— 否则"没装 lldb-dap"会被误读成"调试功能坏了"。
+        print("  SKIP  没找到 lldb-dap（可选件）：本机无法验证调试链路。")
+        print("        装 LLVM-MinGW 后重跑，或 --toolchain 指定它的根目录。")
 
     banner("14/15 Webview 渲染（真实 Chromium + 真实帧数据）")
     wv_out = os.path.join(tempfile.gettempdir(), "scut_wv_test")

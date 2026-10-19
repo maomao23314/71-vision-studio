@@ -36,7 +36,6 @@
   'use strict';
 
   var vscode = acquireVsCodeApi();
-  var KIND = document.body.getAttribute('data-kind') || 'sim';
 
   // ---- 持久化状态（替代 retainContextWhenHidden，见技术要点 §四）----
   var saved = vscode.getState() || {};
@@ -602,7 +601,17 @@
         val.textContent = snapshotText(cv.name);
         body.appendChild(val);
 
-        if (cv.kind === 'SCUT_T_STRUCT' || cv.kind === 'SCUT_T_PTR') {
+        // ★ 判据必须容得下【数字 kind】（一条真实缺陷的修复）：
+        //   后端 printf 的 kind 是枚举数字，而编译期清单给的是字符串。
+        //   宿主侧现在会把数字反查成字符串（build.ts 的 decodeWatchKind），
+        //   但运行期独有的条目仍可能走到这里带上 ''（不在 catalog 里时）。
+        //   原先只比字符串，于是那些结构体永远不渲染「展开字段」按钮，
+        //   而 varMeta 还会把它们显示成 "I32"（错的类型，比缺按钮更误导）。
+        //   这里同时认字符串名与枚举数值（STRUCT=14、PTR=11，
+        //   与 core/include/scut_watch.h 的 scut_watch_type_t 一致）。
+        var kk = cv.kind;
+        if (kk === 'SCUT_T_STRUCT' || kk === 'SCUT_T_PTR'
+            || kk === 14 || kk === 11) {
           var det = document.createElement('div');
           det.className = 'struct-detail';
           det.style.display = 'none';
@@ -675,7 +684,8 @@
     var line1 = document.createElement('div');
     line1.className = 'struct-note';
 
-    if (v.kind === 'SCUT_T_PTR') {
+    // 与上面渲染按钮的判据保持一致：字符串名或枚举数值都认（STRUCT=14、PTR=11）。
+    if (v.kind === 'SCUT_T_PTR' || v.kind === 11 || v.kind === 'SCUT_T_STR' || v.kind === 12) {
       line1.textContent = '指针类型：为安全起见不解引用，只显示它自身'
         + '（上面那行就是它的地址）。';
     } else {

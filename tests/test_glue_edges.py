@@ -13,7 +13,7 @@ test_glue_edges.py -- 接线单元的边界情况（三条 HIGH 缺陷的回归�
        （不报错、不崩溃，只是一张垃圾图）
 
 用法：
-    python tests/test_glue_edges.py [--toolchain D:\\TOOLS\\llvm-mingw]
+    python tests/test_glue_edges.py [--toolchain <根目录>]
 退出码 0 = 全部通过。
 """
 import argparse
@@ -32,6 +32,9 @@ except (AttributeError, ValueError):
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
+sys.path.insert(0, HERE)
+import toolchain as tc  # noqa: E402
+
 BUILD = os.path.join(ROOT, 'tools', 'scut_build.py')
 
 failures = []
@@ -95,9 +98,12 @@ def build(proj, tc, extra=None):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--toolchain', default=r'D:\TOOLS\llvm-mingw')
+    ap.add_argument('--toolchain', default='',
+                    help='工具链根目录（含 bin/clang.exe）。留空 = 自动探测')
     ap.add_argument('--keep', action='store_true')
     args = ap.parse_args()
+
+    args.toolchain = tc.require(args.toolchain)
 
     work = tempfile.mkdtemp(prefix='scut_glue_')
     print('SCUT-71 接线单元边界测试')

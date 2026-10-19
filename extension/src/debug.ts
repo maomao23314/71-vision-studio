@@ -6,7 +6,7 @@
  *   · 代码松耦合   → 调试器只负责「起 lldb-dap、把 exe 交给它」，
  *                    不关心构建怎么做
  *
- * ★ 机制（docs/插件技术要点.md §二，API 行号已核实）：
+ * ★ 机制（vscode.d.ts 里的 resolveDebugConfiguration 契约）：
  *   用户按 F5 且【没有】launch.json 时，VS Code 不会弹「创建 launch.json」，
  *   而是给已注册的 DebugConfigurationProvider 传一个只有
  *   {type, request, name} 的空壳配置，要求 resolveDebugConfiguration 补齐。

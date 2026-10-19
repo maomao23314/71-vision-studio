@@ -282,36 +282,23 @@ export function parseVariablesLine(line: string): VarLineEntry[] | undefined {
     return out;
 }
 
-/**
- * 把 scut_watch_read 输出的空格分隔文本拆成数字数组（供曲线板使用）。
- * 非数字的记号（如结构体的 `<24 bytes>`、指针的 0x…）一律跳过。
+/* ★ 这里原先有一个 export parseNumericValues(values) ——【真的死代码】，已删除。
  *
- * ★ 注意：media/simview.js 里有一份等价实现（webview 是纯 JS，无法 import TS）。
- *   两边必须同步改。这里保留一份是为了让纯逻辑可以在 Node 下被测试。
+ *   它的注释写着两件事，现在【两句都不成立】：
+ *     · "供曲线板使用" —— 查看变量下面的折线图已按用户要求删除
+ *       （见 docs/改动流水账.md 第 2 轮"删掉折线图"），
+ *       删除清单里覆盖了 simview.js / simview.css / 空态文案，
+ *       【唯独漏了这个函数】—— 所以它是被遗忘的，不是有意保留的。
+ *     · "simview.js 里有一份等价实现，两边必须同步改" ——
+ *       那份实现随折线图一起删了，simview.js 里已无任何 Number()/parseFloat。
+ *
+ *   它当时只靠 tests/extension_smoke.js 的 6 条断言活着 ——
+ *   "测试维持着一个没有生产消费者的函数存活"，是死代码最容易被忽视的形态。
+ *   测试里的那一段已一并删除。
+ *
+ *   ★ 将来若真要做曲线：重新实现时请一并决定"谁来消费"，
+ *     而不是先写一个解析函数放着。
  */
-export function parseNumericValues(values: string): number[] {
-    const out: number[] = [];
-    for (const tok of values.split(/\s+/)) {
-        if (tok.length === 0) {
-            continue;
-        }
-        /* ★ 必须显式排除十六进制记号。
-         *   指针型变量渲染出来是 "0x4050b0"，而 Number('0x4050b0') 在 JS 里
-         *   【是合法的】，会得到 4214960 —— 一个看起来煞有介事的数字。
-         *   若不过滤，曲线面板会给指针画出一条毫无意义的曲线，
-         *   而用户完全无从判断这个数字从哪来。
-         *   其它非数字形态（"<24 bytes>"、"(null)"）会被 Number() 判成 NaN，
-         *   本来就跳过了，不需要单独处理。 */
-        if (/^[+-]?0[xX]/.test(tok)) {
-            continue;
-        }
-        const n = Number(tok);
-        if (Number.isFinite(n)) {
-            out.push(n);
-        }
-    }
-    return out;
-}
 
 /* ==========================================================================
  *  PPM (P6) 解析
