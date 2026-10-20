@@ -1,5 +1,8 @@
 /**
- * run_frames.js —— 「运行 / 测速 / 翻页」三条会话路径的真实回归测试。
+ * run_frames.js —— 「单步 / 测速 / 翻页」三条会话路径的真实回归测试。
+ *
+ * ★ 文件名里的 run 是“跑帧”的意思，不是那个已删除的「运行 N 帧」按钮：
+ *   0.10.6 之后没有连续播放，一帧就是一帧（单步 / 测速 / 翻页）。
  *
  * ★ 为什么需要这一层：
  *   这三条路径都依赖【ACK 背压】：仿真进程每跑完一帧就停在 stdin 上，
@@ -63,7 +66,7 @@ function ok(name, cond, extra) {
  *   而背压断在哪一环，表现都是"画面停在第 1 帧"，不报错。
  *
  * 注意：--step 模式下进程【启动就先跑一帧】再停在 stdin 上，
- * 所以测「runFrames(N) 推进了几帧」必须先排掉那一帧，否则会算多。
+ * 所以测“推进了几帧”必须先排掉那一帧，否则会算多。
  */
 function collector(session) {
     const seen = [];
@@ -97,26 +100,33 @@ async function main() {
     const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'scut_run_'));
 
     // =====================================================================
-    console.log('=== 1. 运行：runFrames(N) 应恰好推进 N 帧（ACK 背压逐帧放行） ===');
+    console.log('=== 1. 单步：step() 每调一次推进恰好 1 帧（ACK 背压逐帧放行） ===');
     {
         const s = new SimSessionImpl({ exePath: exe, frameOutDir: outDir });
         await s.start();
 
         const col = collector(s);
-        await col.waitAtLeast(1);           // 排掉进程自己跑的第一帧
+        await col.waitAtLeast(1);           // 进程自己跑的启动帧
         await new Promise((r) => setTimeout(r, 300));
         const before = col.seen.length;
 
-        const N = 5;
-        s.runFrames(N);
-        const reached = await col.waitAtLeast(before + N, 8000);
-        // 再等一小会儿：如果多产出了帧，这里能看出来（下面的严格相等断言会失败）
-        await new Promise((r) => setTimeout(r, 400));
-        const produced = col.seen.length - before;
+        /* ★ 连续点三次"推进一步"（step：空行 = 重跑当前图）。
+         *   每次都要等上一帧被 ACK 之后再点 —— 这正是用户手点的节奏，
+         *   也是唯一能验证"一步只走一帧"的方式：
+         *   若背压多放行一次，计数就会多出来。 */
+        const N = 3;
+        for (let i = 0; i < N; i++) {
+            const want = before + i + 1;
+            s.step();
+            const reached = await col.waitAtLeast(want, 8000);
+            ok(`第 ${i + 1} 次 step 后推进到第 ${want} 帧`, reached,
+                `seen=${col.seen.length}`);
+            await new Promise((r) => setTimeout(r, 250));
+            // 多等一会儿：如果一步放行了不止一帧，这里能看出来
+            ok(`第 ${i + 1} 次 step 没有多跑（仍是 ${want} 帧）`,
+                col.seen.length === want, `实际 ${col.seen.length}`);
+        }
 
-        ok(`runFrames(${N}) 恰好推进 ${N} 帧`,
-            reached && produced === N,
-            `实际 ${produced}（${before} -> ${col.seen.length}）`);
         ok('帧号严格递增',
             col.seen.every((f, i) => i === 0 || f.index > col.seen[i - 1].index),
             col.seen.map((f) => f.index).join(','));
@@ -135,6 +145,7 @@ async function main() {
 
         await s.stop();
     }
+
 
     // =====================================================================
     console.log('\n=== 2. 测速：b<N> 重复在帧内完成，只推进一帧 ===');

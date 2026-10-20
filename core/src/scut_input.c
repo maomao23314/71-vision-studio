@@ -1,15 +1,22 @@
 /* ==========================================================================
- *  scut_input.c —— 输入图像访问器与阶段门控
+ *  scut_input.c —— 输入图像访问器、阶段门控、输出图写入
  *  --------------------------------------------------------------------------
  *  设计理念对照：
  *    · 模拟单片机   → 输入图像就是摄像头数组，车载工程可换成自己的
  *    · 适应任意代码 → 算法用自己的数组名直接访问即可；访问器是给
  *                     需要"不关心缓冲从哪来"的代码用的
  *
- *  ★ 本文件的核心职责：把「当前处在哪个阶段」告诉需要知道的人。
+ *  ★ 本文件的职责：
+ *    1) 把「当前处在哪个阶段」告诉需要知道的人；
+ *    2) 输出图的【写入/搬运】—— 两块图（图片1 / 图片2）共用一段代码，
+ *       由第一个参数选图。写「图片1」时还要告诉绘制模块"本帧被写过"，
+ *       那块记账决定调度器要不要铺默认底图。
+ *    （0.10.6 起写入收拢到这里：以前 SCUT_OutImageSet 在 scut_draw.c、
+ *      第二张图的一套在本文件，同一件"往输出图写一个像素"的事写了两遍。）
  * ========================================================================== */
 
 #include "scut_sdk.h"
+#include "scut_draw.h"     /* scut_draw_get_target / scut_draw_mark_output_written */
 #include "scut_internal.h"
 /* ★ 像素缓冲的访问器由 bind 单元提供。契约声明在 scut_bind.h 里，
  *   本文件原先【手写 extern】这 4 个函数 —— 与后端那份重复，
@@ -115,7 +122,116 @@ void scut_env_seed_output_from_input(void)
 }
 
 /* --------------------------------------------------------------------------
- *  把用户的结果图搬进环境输出图（由生成的接线单元调用）
+ *  输出图：选图、写入、搬运
+ *  --------------------------------------------------------------------------
+ *  两块输出图（SCUT_IMG_1 / SCUT_IMG_2）在这里收成【一条通路】：
+ *  由 out_buffer(img) 统一回答"哪一块"，下面每个函数都只写一遍。
+ *
+ *  ★ 为什么不是两套函数（Set / Set2、EnvCopyOutput / EnvCopyOutput2）：
+ *    两块图的语义完全一样 —— 同一套边界、同一种搬运、同一种颜色规则，
+ *    差别只有"画到哪一块"。两套名字会让每个调用点都要重新判断该用哪个，
+ *    而选错的表现是静默的（画到了没人看的那块）。一个参数把语义收在一处。
+ *
+ *  ★ 那为什么 scut_draw.c 里还单独持有最终画面那块？
+ *    因为「图片1」除了"能往里写"，还要参与【覆盖层合成】——合成要读写它、
+ *    要知道步长、要在绑定时清覆盖层。这些是 draw 模块的既有契约，
+ *    本文件不重复实现一份。所以：
+ *      · 图片1：draw 模块绑定的那块（绘制/合成用），这里通过
+ *               scut_draw_get_target() 拿；
+ *      · 图片2：bind 单元里的独立缓冲，不参与合成。
+ *    两块在"算法直接写入"这件事上的行为完全一致。
+ * -------------------------------------------------------------------------- */
+
+/* img → 缓冲首地址。非法编号返回 NULL（调用方一律当"什么都不做"处理）。 */
+static scut_u8 *out_buffer(int img)
+{
+    if (img == SCUT_IMG_1) {
+        scut_u8 *rgb = 0;
+        int      w = 0;
+        int      h = 0;
+        /* 输出参数都能安全传 NULL（见 scut_draw_get_target 的契约），
+         * 这里只要那块缓冲和尺寸，不要覆盖层。 */
+        scut_draw_get_target(&rgb, 0, &w, &h);
+        /* 未绑定（环境还没跑起来）时返回 NULL，后续按"静默忽略"处理。 */
+        return (rgb != 0 && w > 0 && h > 0) ? rgb : 0;
+    }
+    if (img == SCUT_IMG_2) {
+        return scut_bind_output2();
+    }
+    return 0;
+}
+
+/* 这一块是不是"最终画面"。只有它参与覆盖层合成、也只有它要记账
+ * 「本帧是否被算法直接写过」（那个记账用来决定要不要铺默认底图）。 */
+static int out_is_main(int img)
+{
+    return img == SCUT_IMG_1;
+}
+
+/* 写入一个像素。越界 / 未绑定一律静默忽略（与 DrawPoint 同一套约定）。 */
+static void out_store(int img, int x, int y, scut_u8 r, scut_u8 g, scut_u8 b)
+{
+    scut_u8 *dst = out_buffer(img);
+    int      w   = scut_bind_width();
+    int      h   = scut_bind_height();
+    scut_u8 *p;
+
+    if (dst == 0 || w <= 0 || h <= 0) {
+        return;
+    }
+    if (x < 0 || x >= w || y < 0 || y >= h) {
+        return;
+    }
+    p = dst + (size_t)y * (size_t)w * 3u + (size_t)x * 3u;
+    p[0] = r;
+    p[1] = g;
+    p[2] = b;
+
+    if (out_is_main(img)) {
+        /* 「本帧算法直接写过图片1」——调度器据此跳过铺默认底图，
+         * 否则这里写的东西会在同一帧稍后被整幅输入图覆盖掉。
+         * 记账只由 draw 模块做（它拥有那块缓冲），这里只是转告。 */
+        scut_draw_mark_output_written();
+    } else {
+        /* 「图片2 被用过」——后端据此决定要不要每帧多写一张 PPM。
+         * 只置位、从不清零：用过就是用过。 */
+        scut_bind_output2_mark();
+    }
+}
+
+void SCUT_OutImageSet(int img, int x, int y, scut_u8 value)
+{
+    /* 灰度值写成等值三通道即为"灰"。 */
+    out_store(img, x, y, value, value, value);
+}
+
+void SCUT_OutImageSetRGB(int img, int x, int y, scut_u8 r, scut_u8 g, scut_u8 b)
+{
+    out_store(img, x, y, r, g, b);
+}
+
+scut_u8 SCUT_OutImageGet(int img, int x, int y)
+{
+    const scut_u8 *dst = out_buffer(img);
+    int            w   = scut_bind_width();
+    int            h   = scut_bind_height();
+    const scut_u8 *p;
+
+    if (dst == 0 || w <= 0 || h <= 0) {
+        return 0;
+    }
+    if (x < 0 || x >= w || y < 0 || y >= h) {
+        return 0;   /* 越界读返回 0，不返回未定义值 */
+    }
+    p = dst + (size_t)y * (size_t)w * 3u + (size_t)x * 3u;
+    /* 灰度算法读取时给【亮度】（三通道不等时才有区别；
+       等值时就是它自己，所以绝大多数调用方察觉不到这个选择）。 */
+    return (scut_u8)(((scut_u32)p[0] * 299u + (scut_u32)p[1] * 587u
+                      + (scut_u32)p[2] * 114u + 500u) / 1000u);
+}
+
+/* --------------------------------------------------------------------------
+ *  把用户的结果图搬进环境输出图（图片1 由生成的接线单元调用，图片2 用户自己调）
  *
  *  ★★ 为什么是【逐像素深拷贝】而不是换个指针 ★★
  *
@@ -142,12 +258,17 @@ void scut_env_seed_output_from_input(void)
  *    用户数组尺寸来自它自己的宏，未必与本工程 config 完全一致。
  *    "少显示一部分"远好于"编译不过"或"越界写坏内存"。
  *
+ *  ★ 两块图走同一段代码：搬到图片1 要额外记账"本帧被写过"（决定要不要铺
+ *    默认底图），搬到图片2 要记账"这个功能被用过"（决定要不要多写一张图）。
+ *    除了这两行，其余完全一样 —— 所以不给图片2 再抄一份循环。
+ *
  *  参数：
- *      src   用户结果数组首地址（按 row-major，即 src[y*w + x]）
- *      src_w 源行宽（像素）；0 表示用环境的宽度
- *      src_h 源行数；0 表示用环境的高度
+ *      img    SCUT_IMG_1 / SCUT_IMG_2
+ *      src    用户结果数组首地址（按 row-major，即 src[y*w + x]）
+ *      src_w  源行宽（像素）；0 表示用环境的宽度
+ *      src_h  源行数；0 表示用环境的高度
  * -------------------------------------------------------------------------- */
-void SCUT_EnvCopyOutput(const scut_u8 *src, int src_w, int src_h)
+void SCUT_EnvCopyOutput(int img, const scut_u8 *src, int src_w, int src_h)
 {
     scut_u8 *dst;
     int w;
@@ -159,7 +280,7 @@ void SCUT_EnvCopyOutput(const scut_u8 *src, int src_w, int src_h)
         return;
     }
 
-    dst = scut_bind_output();
+    dst = out_buffer(img);
     w   = scut_bind_width();
     h   = scut_bind_height();
     if (dst == 0 || w <= 0 || h <= 0) {
@@ -190,130 +311,27 @@ void SCUT_EnvCopyOutput(const scut_u8 *src, int src_w, int src_h)
             dst_row[(size_t)x * 3u + 2] = 0;
         }
     }
+
+    /* 记账：搬进图片1 = 本帧算法直接写过最终画面（调度器据此不铺默认底图）；
+     *       搬进图片2 = 这个功能被用过（后端据此多写一张图）。
+     * ★ 搬运一定动了像素（哪怕只是填黑），所以两处都算"写过"。 */
+    if (out_is_main(img)) {
+        scut_draw_mark_output_written();
+    } else {
+        scut_bind_output2_mark();
+    }
 }
 
-/* ==========================================================================
- *  第二张图：写入、搬运、每帧清空
- *  --------------------------------------------------------------------------
- *  ★ 为什么这几个函数放在本文件，而不是和 SCUT_OutImageSet 一起放
- *    scut_draw.c：
- *      draw 模块绑定的那张图是【最终画面】——它和覆盖层、合成共用一套
- *      边界（谁在 DRAW 里先写、合成时谁盖谁）。第二张图不参与这套关系：
- *      没有覆盖层、不合成、不铺底图，它只是一块"算法自己往里画"的缓冲，
- *      与 SCUT_EnvCopyOutput 一样属于「像素搬运」这一层。
- *      放进本文件，就不必为了它给 draw 模块再加一个绑定参数。
- *      （对外 API 仍然都写在 scut_sdk.h 的同一个段落里，
- *        用的人不需要知道实现分在哪两个文件。）
+/* --------------------------------------------------------------------------
+ *  图片2 每帧清黑（调度器在帧开头调用）
  *
- *  ★ 为什么每帧要清黑（而不是像车载显示缓冲那样自己维护）：
+ *  ★ 为什么每帧要清（而不是像车载显示缓冲那样自己维护）：
  *      残留比空白更容易误导 —— 算法这一帧没画，画面却还留着上一帧的内容，
  *      看起来就像"这一帧也算出了同样的结果"。清黑之后，"黑"只有一个含义：
  *      这一帧什么都没写。
- * ========================================================================== */
-
-/* 一个像素写进第二张图。越界/未绑定一律静默忽略（与其它写入接口同约定）。 */
-static void out2_store(int x, int y, scut_u8 r, scut_u8 g, scut_u8 b)
-{
-    scut_u8 *dst = scut_bind_output2();
-    int      w   = scut_bind_width();
-    int      h   = scut_bind_height();
-    scut_u8 *p;
-
-    if (dst == 0 || w <= 0 || h <= 0) {
-        return;
-    }
-    if (x < 0 || x >= w || y < 0 || y >= h) {
-        return;
-    }
-    p = dst + (size_t)y * (size_t)w * 3u + (size_t)x * 3u;
-    p[0] = r;
-    p[1] = g;
-    p[2] = b;
-
-    /* 记账交给 bind：它拥有这块缓冲，由它回答"有没有被用过"。
-     * 后端据此决定要不要每帧多写一张图；从没用过的工程零开销。 */
-    scut_bind_output2_mark();
-}
-
-void SCUT_OutImage2Set(int x, int y, scut_u8 value)
-{
-    /* 灰度值写成等值三通道即为"灰"，与 SCUT_OutImageSet 一致。 */
-    out2_store(x, y, value, value, value);
-}
-
-void SCUT_OutImage2SetRGB(int x, int y, scut_u8 r, scut_u8 g, scut_u8 b)
-{
-    out2_store(x, y, r, g, b);
-}
-
-scut_u8 SCUT_OutImage2Get(int x, int y)
-{
-    const scut_u8 *dst = scut_bind_output2();
-    int            w   = scut_bind_width();
-    int            h   = scut_bind_height();
-    const scut_u8 *p;
-
-    if (dst == 0 || w <= 0 || h <= 0) {
-        return 0;
-    }
-    if (x < 0 || x >= w || y < 0 || y >= h) {
-        return 0;   /* 越界读返回 0，不返回未定义值 */
-    }
-    p = dst + (size_t)y * (size_t)w * 3u + (size_t)x * 3u;
-    return (scut_u8)(((scut_u32)p[0] * 299u + (scut_u32)p[1] * 587u
-                      + (scut_u32)p[2] * 114u + 500u) / 1000u);
-}
-
-/* 把用户数组搬进第二张图。逐像素深拷贝的理由与 SCUT_EnvCopyOutput 相同
- * （逆透视指针表不能被换掉目标），这里不再重复。 */
-void SCUT_EnvCopyOutput2(const scut_u8 *src, int src_w, int src_h)
-{
-    scut_u8 *dst;
-    int      w;
-    int      h;
-    int      cols;
-    int      x, y;
-
-    if (src == 0) {
-        return;
-    }
-
-    dst = scut_bind_output2();
-    w   = scut_bind_width();
-    h   = scut_bind_height();
-    if (dst == 0 || w <= 0 || h <= 0) {
-        return;
-    }
-
-    if (src_w <= 0) { src_w = w; }
-    if (src_h <= 0) { src_h = h; }
-
-    if (src_w < w) { cols = src_w; } else { cols = w; }
-    if (src_h < h) { h = src_h; }
-
-    for (y = 0; y < h; y++) {
-        const scut_u8 *src_row = src + (size_t)y * (size_t)src_w;
-        scut_u8       *dst_row = dst + (size_t)y * (size_t)w * 3u;
-        for (x = 0; x < cols; x++) {
-            scut_u8 v = src_row[x];
-            dst_row[(size_t)x * 3u + 0] = v;
-            dst_row[(size_t)x * 3u + 1] = v;
-            dst_row[(size_t)x * 3u + 2] = v;
-        }
-        for (x = cols; x < w; x++) {
-            dst_row[(size_t)x * 3u + 0] = 0;
-            dst_row[(size_t)x * 3u + 1] = 0;
-            dst_row[(size_t)x * 3u + 2] = 0;
-        }
-    }
-    scut_bind_output2_mark();
-}
-
-/* 每帧开头由调度器调用：把第二张图清黑。
- *
- * ★ 从没被写过的进程直接返回 —— 不必为一个用不到的功能每帧 memset 67 KB。
- *   一旦写过，之后每帧都清（"用过这项功能"不可逆，这与
- *   scut_bind_output2_used 的语义一致）。 */
+ *  ★ 从没被写过的进程直接返回 —— 不必为一个用不到的功能每帧 memset 67 KB。
+ *    一旦写过，之后每帧都清（"用过这项功能"不可逆）。
+ * -------------------------------------------------------------------------- */
 void scut_env_clear_second_output(void)
 {
     scut_u8 *dst;

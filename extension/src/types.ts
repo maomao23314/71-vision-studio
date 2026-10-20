@@ -270,8 +270,9 @@ export interface SimSession {
      *   超时或进程已退出时返回 undefined。
      */
     bench(n: number): Promise<FramePacket | undefined>;
-    /** 运行 n 帧（连续发空行） */
-    runFrames(n: number): Promise<void>;
+    /* ★ 这里原先还有一个 runFrames(n)：实现是"连续发空行"，
+     *   服务于已删除的「运行 N 帧」。它和那项功能一起删掉了 ——
+     *   否则声明还在，调用方会以为环境仍支持连续播放。 */
     /**
      * 跳到第 n 张测试图（协议 g<N>，进程不重启，算法状态保留）。
      *

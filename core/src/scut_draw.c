@@ -86,6 +86,15 @@ void scut_draw_clear_output_written(void)
     s_out_written = 0;
 }
 
+/* 由 scut_input.c 的写入通路在真正写入后调用（见 scut_draw.h 的说明）。
+ * ★ 0.10.6 起 SCUT_OutImageSet / SCUT_EnvCopyOutput 带"选哪块图"的参数，
+ *   写入代码统一收在 scut_input.c（两块图共用一段），所以置位也从那里转告，
+ *   本模块不再自己持有那两个函数 —— 记账点只有一个。 */
+void scut_draw_mark_output_written(void)
+{
+    s_out_written = 1;
+}
+
 /* --------------------------------------------------------------------------
  *  8x8 点阵字体（ASCII 32..126，共 95 个字形）
  *
@@ -611,66 +620,14 @@ void SCUT_DrawText(int x, int y, scut_u32 color, const char *fmt, ...)
 }
 
 /* ==========================================================================
- *  输出图像（RGB 三通道）
+ *  输出图像的写入在哪
  *
- *  ★ 输出缓冲现在是 RGB（见 bind/scut_bind.c 的说明），
- *    所以这里的行步长【必须乘 3】：s_stride 的单位是"字节"，
- *    而 s_w 是像素数。漏掉这个 ×3 是最自然的错误 ——
- *    症状是"每隔一个像素取一个"，画面看起来像稀疏噪点，
- *    而且不崩、不报错。
+ *  本模块只负责【绑定】那块缓冲、把覆盖层合成进去、以及记「本帧算法
+ *  有没有直接写过它」。真正的像素写入在 core/src/scut_input.c：
+ *  SCUT_OutImageSet / SetRGB / OutImageGet / EnvCopyOutput 都带一个
+ *  "选哪块图"的参数（SCUT_IMG_1 / SCUT_IMG_2），两块图共用一段代码。
+ *
+ *  ★ 为什么不在本文件再写一遍：那会变成两份边界检查、两份"步长 ×3"。
+ *    而"步长必须乘 3"这件事本文件已经吃过一次亏 ——
+ *    同一件事写两遍，就等于留着两次踩同一个坑的机会。
  * -------------------------------------------------------------------------- */
-
-void SCUT_OutImageSet(int x, int y, scut_u8 value)
-{
-    scut_u8 *p;
-    if (s_gray == NULL) {
-        return;   /* 未绑定：静默无效 */
-    }
-    /* 同样越界静默忽略，与 DrawPoint 保持一致的行为契约 ——
-     * 两个写入接口对越界的处理必须一样，否则用户要记两套规则。 */
-    if (x < 0 || x >= s_w || y < 0 || y >= s_h) {
-        return;
-    }
-    p = s_gray + (size_t)y * (size_t)s_rgb_stride + (size_t)x * 3u;
-    p[0] = value;   /* R */
-    p[1] = value;   /* G */
-    p[2] = value;   /* B —— 灰度值写成等值三通道即为"灰" */
-
-    /* ★ 记账：本帧算法已经直接写过输出图了。
-     *   调度器据此【跳过】"铺默认底图"那一步，否则这里写的东西
-     *   会在同一帧稍后被整幅输入图覆盖掉（详见 s_out_written 的说明）。 */
-    s_out_written = 1;
-}
-
-void SCUT_OutImageSetRGB(int x, int y, scut_u8 r, scut_u8 g, scut_u8 b)
-{
-    scut_u8 *p;
-    if (s_gray == NULL) {
-        return;
-    }
-    if (x < 0 || x >= s_w || y < 0 || y >= s_h) {
-        return;
-    }
-    p = s_gray + (size_t)y * (size_t)s_rgb_stride + (size_t)x * 3u;
-    p[0] = r;
-    p[1] = g;
-    p[2] = b;
-
-    s_out_written = 1;   /* 同上：见 SCUT_OutImageSet 的说明 */
-}
-
-scut_u8 SCUT_OutImageGet(int x, int y)
-{
-    const scut_u8 *p;
-    if (s_gray == NULL) {
-        return 0;
-    }
-    if (x < 0 || x >= s_w || y < 0 || y >= s_h) {
-        return 0;   /* 越界读返回 0，不返回未定义值 */
-    }
-    p = s_gray + (size_t)y * (size_t)s_rgb_stride + (size_t)x * 3u;
-    /* 灰度算法读取时给【亮度】（三通道不等时才有区别；
-       等值时就是它自己，所以绝大多数调用方察觉不到这个选择）。 */
-    return (scut_u8)(((scut_u32)p[0] * 299u + (scut_u32)p[1] * 587u
-                      + (scut_u32)p[2] * 114u + 500u) / 1000u);
-}

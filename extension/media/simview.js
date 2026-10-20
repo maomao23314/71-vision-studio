@@ -15,10 +15,10 @@
  *
  *    收到 {type:'frame',  index,width,height,rgb,rgb2?,timing,pic}
  *         ★ 曾漏写 pic（宿主 simview.ts 的 onFrame 会带它）。
- *         ★ rgb2 = 第二张图（算法用 SCUT_OutImage2Set 画的那张）。
- *           没有这个字段就是"本帧没有第二张图"，要么算法没画，
+ *         ★ rgb2 = 图片2（算法用 SCUT_OutImageSet(SCUT_IMG_2, …) 画的那张）。
+ *           没有这个字段就是"本帧没有图片2"，要么算法没画，
  *           要么配置里没开（宿主那边就不读它）。
- *    收到 {type:'display', secondImage}   ← 第二张图那一栏显不显示
+ *    收到 {type:'display', secondImage}   ← 图片2 那一栏显不显示
  *         ★ 开关的真值在工程配置（scut_project.json 的 display.secondImage），
  *           面板不自己判断 —— 否则"配置里关着、面板却还显示"会成为第二个真值。
  *    收到 {type:'vars',   snapshots:[{name,values[],truncated,total,
@@ -30,9 +30,9 @@
  *
  *    发出 {type:'ack',    index}          ← 背压：必须发，否则会话会卡住
  *    发出 {type:'cmd',    cmd:'stop'|'build'|'debug'|'bench'
- *                             |'prevPic'|'nextPic'|'settings', n?}
+ *                             |'prevPic'|'nextPic'|'gotoPic'|'settings', n?}
  *         ★ 曾写 'run'|'step'|'stop'|'clearLog' —— 四个里三个是错的：
- *           run/step 从未发出（「运行」走宿主侧的 runFrames），
+ *           run/step 从未发出（「运行」在 0.10.6 也删掉了），
  *           clearLog 是本地清空（见下方 btn-clear 的绑定，不发消息）。
  *           真实取值以 src/simview.ts 的 handleMessage switch 为准。
  *    发出 {type:'select', names:[...]}
@@ -58,24 +58,37 @@
    *
    * ★ 为什么分两块而不是一份共用：
    *   折叠状态、缩放、平移本来就是"这一块看什么"的事。
-   *   共用一份的话，用户在主画面上放大看细节，第二张图会跟着放大 ——
+   *   共用一份的话，用户在图片1上放大看细节，图片2会跟着放大 ——
    *   两张图尺寸相同但用途不同，跟着动纯属干扰。
    *
-   * ★ open 默认 true：画面本来就是面板的主内容，默认收起没有道理。
+   * ★ open 默认 **false（收起）** —— 用户明确要求"默认收起"。
+   *   两栏都只留标题，点一下展开；这样面板一打开先看到的是工具栏和变量，
+   *   而不是两张占满屏的图。记住的是【用户上次的选择】。
    */
   function newPaneState() {
-    return { open: true, zoom: 1, manual: false, panX: 0, panY: 0 };
+    return { open: false, zoom: 1, manual: false, panX: 0, panY: 0 };
   }
+
+  /**
+   * panes 状态的格式版本。
+   *
+   * ★ 为什么需要它：0.10.6 把两块画面的默认开合从"展开"翻成了"收起"。
+   *   setState 里存的是【用户上次的选择】，而老状态（open:true）是旧默认值
+   *   写进去的，不是用户真的选过 —— 直接读回来会让人以为"默认收起没生效"。
+   *   版本对不上就整块丢掉，退回新默认值。
+   *   以后再翻默认值，把这个数加一即可。
+   */
+  var PANES_VERSION = 2;
 
   function initPanes(from) {
     var out = {};
-    var list = (from && from.panes) || {};
+    var list = (from && from.panesV === PANES_VERSION && from.panes) || {};
     for (var i = 0; i < PANE_KEYS.length; i++) {
       var k = PANE_KEYS[i];
       var d = newPaneState();
       var s = list[k];
       if (s && typeof s === 'object') {
-        d.open = s.open !== false;
+        d.open = s.open === true;
         d.zoom = typeof s.zoom === 'number' ? s.zoom : 1;
         d.manual = s.manual === true;
         d.panX = typeof s.panX === 'number' ? s.panX : 0;
@@ -88,8 +101,10 @@
 
   var state = {
     selected: Array.isArray(saved.selected) ? saved.selected.slice() : null,
-    /** 两块画面（主画面 / 第二张图）的 UI 状态，见 newPaneState。 */
+    /** 两块画面（图片1 / 图片2）的 UI 状态，见 newPaneState。 */
     panes: initPanes(saved),
+    /** 上一次写的 panes 格式版本，用来丢弃语义已变的旧状态。 */
+    panesV: PANES_VERSION,
     timingOpen: saved.timingOpen === true,
     pickOpen: saved.pickOpen === true,
     varsOpen: saved.varsOpen !== false,   // 变量查看默认展开
@@ -99,6 +114,7 @@
     vscode.setState({
       selected: state.selected,
       panes: state.panes,
+      panesV: PANES_VERSION,
       timingOpen: state.timingOpen,
       pickOpen: state.pickOpen,
       varsOpen: state.varsOpen,
@@ -168,20 +184,20 @@
   }
 
   /* ==========================================================================
-   *  画面（两块：主画面 / 第二张图）
+   *  画面（两块：图片1 / 图片2）
    *  --------------------------------------------------------------------------
    *  两块画面是【同一个组件】的两个实例：画布、缩放、平移、自适应都只有
    *  一份实现（createPane），区别只在 DOM 编号和持久化键上。
    *
    *  ★ 为什么做成实例，而不是把第一块复制一遍：
-   *    复制出来的第二份一定会漂移 —— 以后修了主画面的缩放锚点，
-   *    第二张图那份忘了改，用户就会遇到"同一个手势在两块图上行为不同"。
+   *    复制出来的第二份一定会漂移 —— 以后修了图片1的缩放锚点，
+   *    图片2那份忘了改，用户就会遇到"同一个手势在两块图上行为不同"。
    *    这个文件里有过一次同源教训（四个折叠区块各写一份，有的记住状态、
    *    有的不记），统一成一份才不会再犯。
    *
    *  ★ 缩放/平移是【每块独立】的：
-   *    两块图尺寸相同但用途不同。共用一份缩放，用户在主画面上放大看细节，
-   *    第二张图会跟着放大 —— 那不是他想要的。
+   *    两块图尺寸相同但用途不同。共用一份缩放，用户在图片1上放大看细节，
+   *    图片2会跟着放大 —— 那不是他想要的。
    * ========================================================================== */
 
   /**
@@ -347,7 +363,7 @@
   }
 
   var panes = [createPane(0), createPane(1)];
-  /** 键盘缩放作用于哪一块：鼠标最后停留的那块（默认主画面）。 */
+  /** 键盘缩放作用于哪一块：鼠标最后停留的那块（默认图片1）。 */
   var activePane = 0;
 
   function paneOf(i) {
@@ -842,8 +858,15 @@
   }
 
   bind('btn-stop', function () { vscode.postMessage({ type: 'cmd', cmd: 'stop' }); });
+  /* ★ 「编译」按钮用播放图标：编译完就能点「下一张」看效果，
+   *   在用户眼里这就是"跑起来"的唯一入口。
+   *   （原来这里还有一个「运行（连续跑 N 帧）」，功能与「测速」重复、
+   *     又给不出结论，0.10.6 已删除 —— 见 simview.ts 里的说明。）
+   *   ★ 历史教训：不要再用 $(play) 去绑另一个命令。0.8 就曾把 F5 绑给
+   *     「运行」，结果在仿真视图里按 F5 触发的是它而不是调试，
+   *     用户报的是"调试打不开"。一个图标对一个命令。 */
   bind('btn-build', function () { vscode.postMessage({ type: 'cmd', cmd: 'build' }); });
-bind('btn-debug', function () { vscode.postMessage({ type: 'cmd', cmd: 'debug' }); });
+  bind('btn-debug', function () { vscode.postMessage({ type: 'cmd', cmd: 'debug' }); });
   // 图集翻页：上一张 / 下一张（走扩展侧，进程不重启、算法状态保留）
   bind('btn-prev', function () { vscode.postMessage({ type: 'cmd', cmd: 'prevPic' }); });
   bind('btn-next', function () { vscode.postMessage({ type: 'cmd', cmd: 'nextPic' }); });
@@ -1042,7 +1065,7 @@ bind('btn-debug', function () { vscode.postMessage({ type: 'cmd', cmd: 'debug' }
           }
           panes[0].draw(rgb, msg.width, msg.height);
 
-          /* ★ 第二张图：宿主管它叫 rgb2，没有这个字段就是"本帧没有"。
+          /* ★ 图片2：宿主管它叫 rgb2，没有这个字段就是"本帧没有"。
            *   有才画 —— 没画时保持上一帧的画面，而不是刷成黑的：
            *   闪烁的空白比"停在上一帧"更难读，何况后端只在真写过时
            *   才会带这个字段（配置关掉时宿主根本不读它）。 */
@@ -1074,7 +1097,7 @@ bind('btn-debug', function () { vscode.postMessage({ type: 'cmd', cmd: 'debug' }
       }
 
       case 'display': {
-        /* 第二张图那一栏显不显示。开关的真值在工程配置里，
+        /* 图片2 那一栏显不显示。开关的真值在工程配置里（默认开），
          * 面板只负责照着显示 —— 不在这里再判断一次"该不该显示"。 */
         try {
           var on = msg.secondImage === true;
@@ -1082,10 +1105,11 @@ bind('btn-debug', function () { vscode.postMessage({ type: 'cmd', cmd: 'debug' }
           if (sec) {
             sec.hidden = !on;
             // 从隐藏变可见时容器宽度才第一次有效，重新自适应一次
+            // （收起状态下 canvas 没有尺寸，apply 会自己跳过）
             if (on) { panes[1].apply(); }
           }
         } catch (e) {
-          log('[视图] 第二张图开关更新失败：' + (e && e.message ? e.message : e));
+          log('[视图] 图片2 开关更新失败：' + (e && e.message ? e.message : e));
         }
         return;
       }
@@ -1181,10 +1205,10 @@ bind('btn-debug', function () { vscode.postMessage({ type: 'cmd', cmd: 'debug' }
   panes[0].apply();
   panes[1].apply();
 
-  // ★ 第二张图那一栏的初始可见性等宿主下发 display 消息再定：
-  //   那件事的真值在工程配置里，面板不该自己猜一个默认值
-  //   （猜"显示"会让没配的工程多出一块黑画面；猜"不显示"则
-  //    配置开着却要等下一帧才出现）。HTML 里先 hidden，等消息。
+  // ★ 图片2那一栏的初始可见性仍然等宿主下发 display 消息再定：
+  //   那件事的真值在工程配置里（默认开），面板不该自己猜一个默认值。
+  //   HTML 里先按"显示"渲染，宿主若说关就把整个 section 藏起来 ——
+  //   这样默认配置下不会有一帧的闪烁。
 
   // ★ 刻意不往日志区写"视图已就绪"这类环境消息：
   //   那一区现在只放【用户算法 SCUT_Log 的输出】，混进环境噪声会让

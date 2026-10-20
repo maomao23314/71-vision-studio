@@ -572,15 +572,16 @@ ok('scut_symbols 从同目录导入 scut_dwarf',
 ok('scut_symbols 不再 import 已删掉的解析辅助',
    'from collections import OrderedDict' not in sym_src)
 
-print('\n=== 18. 第二张图：C → 帧 JSON → 插件 → 面板 的通路必须完整 ===')
+print('\n=== 18. 图片1 / 图片2：C → 帧 JSON → 插件 → 面板 的通路必须完整 ===')
 
 # ★ 守的是一类"每一段都对、拼起来不通"的缺陷：
 #   这个功能横跨六个文件（bind / input / sched / 后端 / 插件 / 前端）。
-#   少接一段的表现不是报错，而是"配置开了、代码也写了，面板上什么都没有"，
-#   而用户报告里只会写"第二张图不显示"，看不出断在哪一段。
+#   少接一段的表现不是报错，而是"代码写了，面板上什么都没有"，
+#   而用户报告里只会写"图片2不显示"，看不出断在哪一段。
 #   所以这里逐段断言，缺哪段就报哪段。
 bind_h = read('core/include/scut_bind.h')
 sdk_h = read('core/include/scut_sdk.h')
+draw_h = read('core/include/scut_draw.h')
 input_c = read('core/src/scut_input.c')
 sched_c = read('core/src/scut_sched.c')
 sv3 = read('extension/media/simview.js')
@@ -589,29 +590,43 @@ ok('bind 头文件声明了第二块输出图',
    'scut_bind_output2' in bind_h and 'scut_bind_output2_used' in bind_h)
 ok('bind 单元真的分配了第二块缓冲',
    'second_image' in bind_code and 'scut_bind_output2(void)' in bind_code)
-ok('sdk 头文件公开了四个第二张图接口',
-   all(n in sdk_h for n in ('SCUT_OutImage2Set', 'SCUT_OutImage2SetRGB',
-                            'SCUT_OutImage2Get', 'SCUT_EnvCopyOutput2')))
-ok('四个接口都有实现',
-   all(n in input_c for n in ('void SCUT_OutImage2Set(',
-                              'void SCUT_OutImage2SetRGB(',
-                              'scut_u8 SCUT_OutImage2Get(',
-                              'void SCUT_EnvCopyOutput2(')))
-ok('写入时会记账（否则后端永远不会多写那张图）',
-   'scut_bind_output2_mark()' in input_c)
-ok('调度器每帧清空第二张图',
+ok('sdk 头文件用"选图参数"统一了四个接口（不再有 *2 那套）',
+   all(n in sdk_h for n in ('SCUT_IMG_1', 'SCUT_IMG_2'))
+   and 'SCUT_OutImage2Set' not in sdk_h
+   and 'SCUT_EnvCopyOutput2' not in sdk_h)
+ok('四个接口的签名都带 img 参数',
+   re.search(r'void SCUT_OutImageSet\(int img,', sdk_h) is not None
+   and re.search(r'void SCUT_OutImageSetRGB\(int img,', sdk_h) is not None
+   and re.search(r'scut_u8 SCUT_OutImageGet\(int img,', sdk_h) is not None
+   and re.search(r'void SCUT_EnvCopyOutput\(int img,', sdk_h) is not None)
+ok('四个接口只有一处实现（不会再出现两份写入代码）',
+   input_c.count('void SCUT_OutImageSet(int img') == 1
+   and input_c.count('void SCUT_EnvCopyOutput(int img') == 1
+   and 'SCUT_OutImageSet(int x, int y' not in read('core/src/scut_draw.c'))
+ok('draw.h 不再重复声明输出图写入（声明只在 sdk.h 一处）',
+   'SCUT_OutImageSet(' not in draw_h.split('见 scut_sdk.h')[1])
+ok('写入时会记账（图片2 用过 / 图片1 本帧写过）',
+   'scut_bind_output2_mark()' in input_c
+   and 'scut_draw_mark_output_written()' in input_c)
+ok('调度器每帧清空图片2',
    'scut_env_clear_second_output();' in sched_c)
-ok('后端只在用过之后才写第二张图',
+ok('后端只在用过之后才写那张图',
    'scut_bind_output2_used()' in host_c)
 ok('后端的帧 JSON 带 img2 字段', '"img2"' in host_c)
-ok('第二张图落盘文件名带 _b 后缀', 'frame_%04d_b.ppm' in host_c)
+ok('图片2 落盘文件名带 _b 后缀', 'frame_%04d_b.ppm' in host_c)
+ok('生成的接线单元用 SCUT_IMG_1 搬运结果图',
+   'SCUT_EnvCopyOutput(SCUT_IMG_1,' in read('tools/scut_symbols.py')
+   and 'SCUT_EnvCopyOutput(SCUT_IMG_1,' in read('tools/scut_build.py'))
 
 # 插件侧：配置项 → 会话读取 → 宿主转发 → 前端渲染，四段都要在。
 ok('projectconfig.ts 有 display.secondImage',
    re.search(r'display:\s*\{[^}]*secondImage:\s*boolean', pc_ts, re.S) is not None)
+ok('secondImage 默认【开】（两栏并排看是常态）',
+   re.search(r'secondImage:\s*bool\(disp\.secondImage,\s*true\)', pc_ts) is not None
+   and re.search(r'"display": \{"secondImage": True\}', sb_src) is not None)
 ok('配置面板把 secondImage 列出来了',
    re.search(r"path:\s*\['display',\s*'secondImage'\]", cfg_ts) is not None)
-ok('会话按开关决定读不读第二张图',
+ok('会话按开关决定读不读图片2',
    'wantSecondImage' in read('extension/src/simsession.ts'))
 ok('宿主把 rgb2 转发给面板',
    re.search(r'if\s*\(f\.rgb2\)', read('extension/src/simview.ts')) is not None)
@@ -623,8 +638,53 @@ ok('前端把 rgb2 画到第二块画布',
    re.search(r'panes\[1\]\.draw\(rgb2', sv3) is not None)
 ok('两块画面的缩放各自独立（不是一份全局 zoom）',
    'state.zoom' not in sv3 and 'st.zoom' in sv3)
+ok('两块画面默认【收起】',
+   re.search(r'open:\s*false,\s*zoom: 1', sv3) is not None
+   and re.search(r'd\.open = s\.open === true', sv3) is not None)
+ok('两栏标题就是「图片1」「图片2」',
+   '>图片1<' in read('extension/src/simview.ts')
+   and '>图片2<' in read('extension/src/simview.ts'))
 ok('旧的单画面 id 已全部改名（防止半新半旧两套 DOM）',
    'screen-section' not in sv3)
+
+print('\n=== 19. 「运行 N 帧」已彻底删除（不留半截） ===')
+
+# ★ 为什么这条要单独守：删掉一个按钮最容易只删掉"看得见的那一半"——
+#   按钮没了，但命令还注册着、F8 还绑着、配置项还躺在面板里。
+#   用户看到的是一个按 F8 毫无反应的编辑器，而日志里什么都没有。
+pkg_json = read('extension/package.json')
+ext_ts = read('extension/src/extension.ts')
+sess_ts = read('extension/src/simsession.ts')
+for name, body, needle in [
+    ('package.json 没有 scut71.run 命令', pkg_json, '"scut71.run"'),
+    ('package.json 没有行为 runFrames 的配置项', pkg_json, '"runFrames"'),
+    ('extension.ts 不再注册 scut71.run', ext_ts, "'scut71.run'"),
+    ('simview.ts 不再有 run() 方法', read('extension/src/simview.ts'), 'async run()'),
+    ('simsession.ts 不再有 runFrames', sess_ts, 'runFrames('),
+    # ★ 判据要避开"说明为什么删掉"的注释 —— 本项目习惯把历史留在原地
+    #   （见 test_cleanup 文件头：只看代码，不看注释）。
+    ('types.ts 不再声明 runFrames', read('extension/src/types.ts'),
+     re.compile(r'runFrames\(n: number\):\s*Promise')),
+    ('configfields.ts 不再列 runFrames', cfg_ts, "['run', 'runFrames']"),
+    ('projectconfig.ts 不再有 runFrames 字段', pc_ts, 'runFrames: number'),
+    ('scut_build.py 的默认配置不再有 runFrames', sb_src, '"runFrames"'),
+    ('simsession.ts 不再有 pendingSteps（连续播放的计数器）', sess_ts,
+     re.compile(r'this\.pendingSteps')),
+]:
+    # ★ 判据可以是字符串（子串）或正则。用正则的那种是为了避开
+    #   "说明为什么删掉"的注释 —— 本项目习惯把历史留在原地，
+    #   拿裸子串去查会把正确的注释判成回潮（这条已踩过一次）。
+    hit = needle.search(body) if hasattr(needle, 'search') else (needle in body)
+    ok(name, not hit, '仍然出现：%s' % (
+        needle.pattern if hasattr(needle, 'pattern') else needle))
+
+# 播放图标归「编译」：一个图标只对一个命令。
+ok('「编译」命令用播放图标 $(play)', '"icon": "$(play)"' in pkg_json)
+ok('没有别的命令再用 $(play)',
+   pkg_json.count('"icon": "$(play)"') == 1)
+ok('仿真视图里的编译按钮带播放图标', '▶ 编译' in read('extension/src/simview.ts'))
+ok('F8 键位已删除（它绑的是被删掉的「运行」）',
+   '"f8"' not in pkg_json)
 
 print('\n' + '=' * 60)
 if FAIL == 0:

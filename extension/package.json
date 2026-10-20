@@ -39,7 +39,7 @@
         "command": "scut71.build",
         "title": "编译仿真程序",
         "category": "SCUT-71",
-        "icon": "$(tools)"
+        "icon": "$(play)"
       },
       {
         "command": "scut71.newProject",
@@ -70,12 +70,6 @@
         "title": "测速（同图重复 N 次取平均）",
         "category": "SCUT-71",
         "icon": "$(dashboard)"
-      },
-      {
-        "command": "scut71.run",
-        "title": "运行（连续跑 N 帧）",
-        "category": "SCUT-71",
-        "icon": "$(play)"
       },
       {
         "command": "scut71.debug",
@@ -150,12 +144,6 @@
         "key": "right",
         "mac": "right",
         "when": "view == scut71.simview"
-      },
-      {
-        "command": "scut71.run",
-        "key": "f8",
-        "mac": "f8",
-        "when": "view == scut71.simview && !inDebugMode"
       }
     ],
     "menus": {
@@ -171,34 +159,29 @@
           "group": "navigation@2"
         },
         {
-          "command": "scut71.run",
+          "command": "scut71.bench",
           "when": "view == scut71.simview",
           "group": "navigation@3"
         },
         {
-          "command": "scut71.bench",
+          "command": "scut71.prevPic",
           "when": "view == scut71.simview",
           "group": "navigation@4"
         },
         {
-          "command": "scut71.prevPic",
+          "command": "scut71.nextPic",
           "when": "view == scut71.simview",
           "group": "navigation@5"
         },
         {
-          "command": "scut71.nextPic",
+          "command": "scut71.gotoPic",
           "when": "view == scut71.simview",
           "group": "navigation@6"
         },
         {
-          "command": "scut71.gotoPic",
-          "when": "view == scut71.simview",
-          "group": "navigation@7"
-        },
-        {
           "command": "scut71.stop",
           "when": "view == scut71.simview",
-          "group": "navigation@8"
+          "group": "navigation@7"
         }
       ],
       "editor/title": [

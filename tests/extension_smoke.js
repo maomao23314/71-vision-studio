@@ -196,7 +196,7 @@ console.log('\n=== 7. 图集参数共享（simargs.ts）—— 防"调试与运�
         outputArray: '',
         hooks: { init: [], frame: [], post: [] },
         pic: { dir: '', ext: '', start: 1 },
-        run: { processRepeat: 1, runFrames: 60, benchRepeat: 1000 },
+        run: { processRepeat: 1, benchRepeat: 1000 },
         toolchain: { path: '', pythonPath: '', autoWatch: true },
     }, over);
 
@@ -224,7 +224,7 @@ console.log('\n=== 7. 图集参数共享（simargs.ts）—— 防"调试与运�
     {
         const a = simargs.picArgsFromConfig(mk({
             pic: { dir: 'pic', ext: '.png,.bmp', start: 7 },
-            run: { processRepeat: 3, runFrames: 60, benchRepeat: 1000 },
+            run: { processRepeat: 3, benchRepeat: 1000 },
         }), '/proj/pic');
         const v = simargs.picArgsToArgv(a);
         const s = v.join(' ');

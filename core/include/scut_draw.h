@@ -66,22 +66,16 @@ void SCUT_DrawLine(int x0, int y0, int x1, int y1, scut_u32 color);
 void SCUT_DrawRect(int x0, int y0, int x1, int y1, scut_u32 color);
 void SCUT_DrawText(int x, int y, scut_u32 color, const char *fmt, ...);
 
-/* --- 输出图像（RGB 三通道结果图，PROCESS 阶段写） ---
- * ★ 输出缓冲每像素 3 字节（R/G/B 紧凑排列，行步长 = 宽度 × 3）。
+/* --- 输出图像：见 scut_sdk.h ---
  *
- * ★ 这三个是"算法直接产出显示图"的路径（不配 outputArray 时用）。
- *   2026-10-11 修掉一个缺口：调度器原先每帧无条件把输入图铺满输出图当
- *   默认底图，会把这里写的像素整幅冲掉。现在只要本帧调过 Set/SetRGB，
- *   调度器就跳过铺底图（见 scut_draw_output_written）。
+ * ★ 这里原先声明了 SCUT_OutImageSet / SetRGB / OutImageGet。
+ *   0.10.6 起它们带一个"选哪块图"的参数（SCUT_IMG_1 / SCUT_IMG_2），
+ *   两块输出图共用一段写入代码，实现放在 core/src/scut_input.c，
+ *   声明只留在 scut_sdk.h 一处 —— 用户包含的头只有一个，
+ *   同一个函数却在两个头里各声明一遍，是改签名时最容易漏改的那种重复。
  *
- * ★ 为什么保留 SetRGB / Get（复核时它们零调用）：
- *   SetRGB 是"算法直接产【彩色】图"的唯一接口 —— 与 Set（灰度）成对，
- *   删掉等于砍掉一条已宣传的用法；
- *   Get 是调试用的读回接口，自定义呈现后端（车载 IPS 之外）可能需要它。
- *   两者都在公开头文件里，属于承诺的能力，不是内部死代码。 */
-void  SCUT_OutImageSet(int x, int y, scut_u8 value);
-void  SCUT_OutImageSetRGB(int x, int y, scut_u8 r, scut_u8 g, scut_u8 b);
-scut_u8 SCUT_OutImageGet(int x, int y);
+ *   本头文件现在只管：绘制（点在覆盖层上）、绑定、覆盖层合成、以及
+ *   「本帧算法有没有直接写过输出图」的记账（见文件末尾）。 */
 
 /* --- 覆盖层尺寸查询（供绘制代码做自适应） ---
  *
@@ -146,6 +140,17 @@ void scut_draw_get_target(scut_u8 **gray, scut_u32 **overlay, int *w, int *h);
  * -------------------------------------------------------------------------- */
 int  scut_draw_output_written(void);
 void scut_draw_clear_output_written(void);
+
+/* 标记"本帧算法已经直接写过输出图"（由 SCUT_OutImageSet / SCUT_EnvCopyOutput
+ * 在真正写入后调用；写的是「图片2」时不碰这里 —— 那是另一块缓冲）。
+ *
+ * ★ 为什么要有这个"对外置位"的入口：
+ *    SCUT_OutImageSet / SCUT_EnvCopyOutput 在 0.10.6 起带一个"选哪块图"的参数，
+ *    两块图共用同一段写入代码（见 scut_input.c 的 out_store）。
+ *    既然写入只有一处，记账也就该只有一处 —— 由那一处转告本模块，
+ *    而不是让 draw 和 input 各自维护一半。
+ * ★ 语义与原先一致：只有【真的写入了一个像素】才置位，越界调用不算。 */
+void scut_draw_mark_output_written(void);
 
 #ifdef __cplusplus
 }

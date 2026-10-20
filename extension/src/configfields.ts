@@ -136,20 +136,19 @@ export const FIELDS: FieldDef[] = [
         path: ['run', 'processRepeat'], label: '每帧重复次数', kind: 'number',
         hint: '大于 1 时每帧跑多遍取平均，结果更稳，耗时也成倍',
     },
-    {
-        path: ['run', 'runFrames'], label: '「运行」连跑帧数', kind: 'number',
-        hint: '点「运行」时按图集顺序连着跑几帧',
-    },
+    /* ★ 这里原先还有「运行」连跑帧数（run.runFrames）。
+     *   那个功能在 0.10.6 连同按钮一起删了（用户原话："这个功能没意义"），
+     *   字段自然也不该留在面板上 —— 留着就是"配了没用"。 */
     {
         path: ['run', 'benchRepeat'], label: '「测速」重复次数', kind: 'number',
         hint: '点「测速」时对同一张图重复几遍取平均周期数',
     },
     {
-        path: ['display', 'secondImage'], label: '显示第二张图', kind: 'bool',
-        hint: '打开后侧边栏多一栏画面，用来单独看你的中间结果'
-            + '（二值化图、逆透视俯视图之类）。'
-            + '代码里用 SCUT_OutImage2Set / SCUT_EnvCopyOutput2 往里画 —— '
-            + '不写就是黑的。★ 改完立即生效，不用重新编译，也不用重启仿真。',
+        path: ['display', 'secondImage'], label: '显示「图片2」', kind: 'bool',
+        hint: '侧边栏默认有「图片1」「图片2」两栏（都没展开）。'
+            + '图片2 用来单独看你的中间结果（二值化图、逆透视俯视图之类），'
+            + '代码里用 SCUT_EnvCopyOutput(2, ...) / SCUT_OutImageSet(2, ...) 往里画。'
+            + '★ 关掉只是不再读那张图，不影响算法。改完立即生效，不用重启仿真。',
     },
     // ★ 这里【故意】没有 view 段 ★
     //   初版加了 showTiming / showVariables / showLog / pickPersist 四个开关，

@@ -290,7 +290,9 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('scut71.newProject', () => commandNewProject(context)),
         vscode.commands.registerCommand('scut71.openSimView', () => commandOpenSimView()),
         vscode.commands.registerCommand('scut71.bench', () => simView.bench()),
-        vscode.commands.registerCommand('scut71.run', () => simView.run()),
+        /* ★ 这里原先还有 `scut71.run`（连续跑 N 帧）。
+         *   功能与「测速」重复却给不出结论，用户明确要求删掉，
+         *   连同 package.json 的命令 / 菜单 / F8 键位一起删了。 */
         // ★ 独立的「调试」入口：不再只靠 F5。
         //   F5 在没有 launch.json 时要靠 VS Code 自己挑调试器，
         //   旁边还装着 cpptools（也认 C 文件），用户很容易走错 ——

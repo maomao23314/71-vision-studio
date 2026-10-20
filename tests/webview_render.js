@@ -274,6 +274,10 @@ const feed = `
       // ★ 第二张图：先开那一栏（真实宿主也是先发 display 再发帧），
       //   再喂一帧带 rgb2 的。rgb2 刻意用"整幅偏红"的数据，
       //   这样能区分两块画布 —— 如果渲染串了，断言会指出来。
+      /* ★ 两栏默认【收起】（用户要求）。测试要验的是"画得对不对"，
+       *   所以先各点一次标题把它们展开 —— 顺便也验证了折叠能开。 */
+      document.getElementById('pane-0-head').click();
+      document.getElementById('pane-1-head').click();
       send({ type: 'display', secondImage: true });
       send({ type: 'frame', index: 2,
              width: ${img.width}, height: ${img.height},

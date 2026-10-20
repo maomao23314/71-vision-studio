@@ -95,8 +95,10 @@ export interface ProjectConfig {
     run: {
         /** 每帧把算法跑几遍取平均（>1 时结果更稳，耗时也成倍）。 */
         processRepeat: number;
-        /** 「运行」按钮连着跑几帧。 */
-        runFrames: number;
+        /* ★ 这里原先还有一个 runFrames（「运行」按钮连着跑几帧）。
+         *   那项功能在 0.10.6 删掉了 —— 见 simview.ts 的说明。
+         *   字段也跟着删：留着一个没人读的配置项，正是本项目最反感的那种
+         *   "配了没用"的死界面。 */
         /** 「测速」按钮对同一张图重复几遍取平均。 */
         benchRepeat: number;
     };
@@ -112,11 +114,14 @@ export interface ProjectConfig {
      */
     display: {
         /**
-         * 是否显示第二张图。
+         * 是否把第二张图（「图片2」那一栏）一起显示。
          *
          * 第二张图是算法用 SCUT_OutImage2Set / SCUT_EnvCopyOutput2 自己画的
-         * 中间结果（二值化、俯视图…）。关掉它的项目零开销：
-         * 后端发现没人写过就根本不生成那张图，插件也不会去读。
+         * 中间结果（二值化、俯视图…）。
+         *
+         * ★ 默认【开】：两栏并排看是常态需求，而没写过第二张图的工程
+         *   只是多一栏"还没有内容"的空态提示，不受任何影响。
+         * ★ 关掉时省下的不是渲染，是【读文件】—— 宿主不再去读那张 PPM。
          */
         secondImage: boolean;
     };
@@ -181,9 +186,10 @@ export function defaultConfig(): ProjectConfig {
         outputArray: '',
         hooks: { init: [], frame: [], post: [] },
         pic: { dir: '', ext: '', start: 1 },
-        run: { processRepeat: 1, runFrames: 60, benchRepeat: 1000 },
-        // ★ 默认关：没写第二张图的工程不该凭空多出一块黑画面。
-        display: { secondImage: false },
+        run: { processRepeat: 1, benchRepeat: 1000 },
+        // ★ 默认【开】：两栏并排看是常态；没写过第二张图的工程
+        //   只是多一栏"还没有内容"的提示，不受任何影响。
+        display: { secondImage: true },
         toolchain: { path: '', pythonPath: '', autoWatch: true,
                      watchExclude: '', watchMaxElems: 0 },
     };
@@ -261,12 +267,11 @@ export function normalizeConfig(raw: unknown): ProjectConfig {
         },
         run: {
             processRepeat: count(run.processRepeat, 1),
-            runFrames: count(run.runFrames, 60),
             benchRepeat: count(run.benchRepeat, 1000),
         },
-        // 显示开关：默认关（见接口里 display 段的说明）。
+        // 显示开关：默认【开】—— 两栏并排看是常态（见接口里 display 段的说明）。
         display: {
-            secondImage: bool(disp.secondImage, false),
+            secondImage: bool(disp.secondImage, true),
         },
         toolchain: {
             path: str(tc.path, ''),

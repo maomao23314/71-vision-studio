@@ -2105,8 +2105,8 @@ static void on_frame(void *user)
     /* ---- 第二张图：算法自己画的中间结果（可选） ----
      *
      * ★ 什么时候写：整个进程里【从没被写过】就整条跳过。
-     *   判断依据是 bind 单元的记账（SCUT_OutImage2Set / SCUT_EnvCopyOutput2
-     *   写像素时置位）。这样不用第二张图的工程，每帧不会多一次文件写 ——
+     *   判断依据是 bind 单元的记账（SCUT_OutImageSet(SCUT_IMG_2, …) /
+     *   SCUT_EnvCopyOutput(SCUT_IMG_2, …) 写像素时置位）。这样不用第二张图的工程，每帧不会多一次文件写 ——
      *   而"要不要显示"是插件那边的事，后端不需要知道配置。
      *
      * ★ 写盘失败不报错、只是不带 img2 字段：第二张图是附加信息，

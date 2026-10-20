@@ -68,79 +68,82 @@ const scut_u8 *SCUT_GetInputImage(int *w, int *h);
 
 /* 输出图像写入（结果图，RGB 三通道）。坐标越界自动忽略。
  *
- * ★ 一般【不需要】用它：把结果写进自己的数组，由接线单元搬运即可
- *   （见下面的 SCUT_EnvCopyOutput）。它只服务于"算法直接产出显示图"的场景。
+ * ★ 第一个参数 img 选【哪一块输出图】：
+ *       SCUT_IMG_1（=1）  图片1：最终画面（默认底图 + 你搬进来的结果图 + 彩色标注）
+ *       SCUT_IMG_2（=2）  图片2：给你自己放的中间结果（二值化、俯视图、掩码…）
+ *   传别的值 = 什么都不做（静默忽略，与坐标越界同一种约定）。
  *
- * ★ Set(value) 写的是灰度：value 同时作为 R/G/B 三通道，等价于灰色。
- *   要画彩色请用下面的 SetRGB。
+ * ★ 一般【不需要】用它：把结果写进自己的数组，由 SCUT_EnvCopyOutput 搬运即可。
+ *   它只服务于"算法直接产出显示图"的场景。
+ *
+ * ★ Set 写的是灰度：value 同时作为 R/G/B 三通道，等价于灰色。
+ *   要画彩色请用 SetRGB。
+ *
+ * ★ 为什么用"一个参数选图"而不是两套函数名：
+ *   两块输出图的语义完全一样（同一套边界、同一种搬运、同一种颜色规则），
+ *   差别只有"画到哪一块"。两套名字（Set / Set2、EnvCopyOutput / EnvCopyOutput2）
+ *   会让每个调用点都要重新判断"该用哪个"，而选错的表现还是静默的。
+ *   一个参数把语义收在一处，也省掉了以后加第三块时的命名问题。
  *
  * ★ 输出图是真彩色。车载 IPS 是灰度屏，但那是【显示层】的属性；
  *   算法读到的输入图始终是灰度（与车载完全一致），
  *   而"显示"这一层恰恰最需要看清彩色标注 ——
  *   曾把颜色按亮度折算成单通道，结果红/绿/青在暗底图上无法分辨，
  *   表现为「绘制明明是彩色的，画面却变成灰度了」。 */
-void SCUT_OutImageSet(int x, int y, scut_u8 value);
-void SCUT_OutImageSetRGB(int x, int y, scut_u8 r, scut_u8 g, scut_u8 b);
+#define SCUT_IMG_1 1   /* 图片1：最终画面 */
+#define SCUT_IMG_2 2   /* 图片2：算法自己的中间结果 */
+#define SCUT_IMG_COUNT 2
 
-/* 读取输出图像（调试用）：返回该像素的亮度（BT.601）。 */
-scut_u8 SCUT_OutImageGet(int x, int y);
+void SCUT_OutImageSet(int img, int x, int y, scut_u8 value);
+void SCUT_OutImageSetRGB(int img, int x, int y, scut_u8 r, scut_u8 g, scut_u8 b);
+
+/* 读取输出图像（调试用）：返回该像素的亮度（BT.601）。越界返回 0。 */
+scut_u8 SCUT_OutImageGet(int img, int x, int y);
 
 /* --------------------------------------------------------------------------
- *  把结果图搬进环境输出图（★ 由构建时生成的接线单元调用，用户不必手写）
+ *  把用户的结果图搬进环境输出图
  *
+ *  img   : SCUT_IMG_1 / SCUT_IMG_2（见上）
  *  src   : 用户结果数组首地址（row-major，即 src[y*src_w + x]）
  *  src_w : 源行宽（像素）；传 0 = 用环境宽度
  *  src_h : 源行数；传 0 = 用环境高度
+ *
+ *  ★ 图片1 的那条调用【由构建时生成的接线单元自动生成】，用户不必手写；
+ *    图片2 要自己调（画什么由你决定，环境不猜）。
  *
  *  ★ 逐像素深拷贝，不换指针 —— 因为算法里可能有逆透视指针表指向原图，
  *    换指针会让它们集体悬空（详见 core/src/scut_input.c 的说明）。
  *
  *  ★ 只能在绘制/后处理阶段调用。
  *    ★★ 更正：本条曾写着"算法阶段调用会被忽略"，但实现里【并没有】阶段门控 ——
- *       docstring 承诺了一件代码没做的事（2026-10-10 代码评审发现）。
- *       真相是：PROCESS 阶段调用它不会立刻生效 —— 输出图要到
- *       调度器的 seed 步骤（PROCESS 之后）才被覆盖，本帧的搬运白做。
- *       所以"被忽略"在效果上成立，但那是【时序】导致的，不是门控拦的。
- *       想要确定的行为，请只在自己的 DRAW/后处理函数里调。 */
-void SCUT_EnvCopyOutput(const scut_u8 *src, int src_w, int src_h);
+ *      docstring 承诺了一件代码没做的事（2026-10-10 代码评审发现）。
+ *      真相是：PROCESS 阶段调用它不会立刻生效 —— 输出图要到
+ *      调度器的 seed 步骤（PROCESS 之后）才被覆盖，本帧的搬运白做。
+ *      所以"被忽略"在效果上成立，但那是【时序】导致的，不是门控拦的。
+ *      想要确定的行为，请只在自己的 DRAW/后处理函数里调。 */
+void SCUT_EnvCopyOutput(int img, const scut_u8 *src, int src_w, int src_h);
 
 /* ==========================================================================
- *  【第二张图】—— 想在面板上同时看两张图时用
+ *  「图片2」这块缓冲的性质（了解即可，不影响使用）
  *
- *  默认用不到。只有当你既想看最终画面、又想把某个中间结果并排看
- *  （二值化图、逆透视俯视图、丢线掩码…）时才需要写这几行。
- *
- *  第二张图是一块【独立】的输出缓冲：
  *    · 环境每帧只负责把它清黑，不铺默认底图、不合成覆盖层；
  *    · 想显示什么就每帧往里写（不写就是黑的，不会残留上一帧 ——
  *      这是刻意的：残留会让你以为"算法这次也画了"）；
  *    · 它的内容【不影响】算法读到的输入图，纯粹是显示。
  *
- *  两种写法，按你的代码形状选一种：
+ *  典型写法：
  *      // ① 你已经有自己的数组（最常见）
  *      uint8_t binary_image[SCUT_IMAGE_H][SCUT_IMAGE_W];
- *      SCUT_EnvCopyOutput2(binary_image[0], 0, 0);   // 0 = 用环境宽高
+ *      SCUT_EnvCopyOutput(SCUT_IMG_2, binary_image[0], 0, 0);   // 0 = 用环境宽高
  *
  *      // ② 想直接点着画（例如把掩码叠成红色）
- *      SCUT_OutImage2SetRGB(x, y, 255, 0, 0);
+ *      SCUT_OutImageSetRGB(SCUT_IMG_2, x, y, 255, 0, 0);
  *
- *  ★ 面板上要不要显示这一栏，由工程配置（scut_project.json 的
- *    display.secondImage）决定；代码里写了但配置没开，
- *    只是看不到，不影响运行。
+ *  ★ 面板上「图片2」这一栏默认就有（默认收起），不用额外配置；
+ *    在配置面板的「显示」里可以关掉 —— 关掉只是不再读那张图，不影响运行。
  *  ★ 这几个函数属于【显示设施】，和 SCUT_DrawPoint 一样：
- *    拷到车载工程时把这几行调用删掉即可，算法主体不需要改。
- *  ★ 坐标越界、未绑定时一律静默忽略，与 OutImageSet / DrawPoint 同一套约定。
+ *    拷到车载工程时把调用删掉即可，算法主体不需要改。
  * ========================================================================== */
-void SCUT_OutImage2Set(int x, int y, scut_u8 value);
-void SCUT_OutImage2SetRGB(int x, int y, scut_u8 r, scut_u8 g, scut_u8 b);
-
-/* 读第二张图的像素（亮度，BT.601）。主要给"先画后读"的调试代码用。 */
-scut_u8 SCUT_OutImage2Get(int x, int y);
-
-/* 把用户数组搬进第二张图。参数语义与 SCUT_EnvCopyOutput 完全一致：
- * src 为 row-major 首地址，src_w / src_h 传 0 表示用环境宽高。
- * ★ 只能在 DRAW / 后处理阶段调用（与 SCUT_EnvCopyOutput 同理）。 */
-void SCUT_EnvCopyOutput2(const scut_u8 *src, int src_w, int src_h);
 
 /* ==========================================================================
  *  【主机侧调试设施】—— 车载工程里给空实现即可，或直接删掉调用

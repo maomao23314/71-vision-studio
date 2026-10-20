@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-test_outimage.py -- 输出图（主画面 / 第二张图）与「默认底图」的相互作用。
+test_outimage.py -- 输出图（图片1 / 图片2）与「默认底图」的相互作用。
 
 ★★ 这条测试为什么存在（一个真实的接口缺口）★★
 
@@ -28,14 +28,14 @@ test_outimage.py -- 输出图（主画面 / 第二张图）与「默认底图」
 
   两条都过，才说明"该保留的保留、该修好的修好了"。
 
-★★ C / D 两段是第二张图（0.10.6）★★
+★★ C / D 两段是图片2（0.10.6）★★
 
-    C. 算法往第二张图里画 → 帧 JSON 多一条 img2、目录多一个 *_b.ppm；
+    C. 算法往图片2里画 → 帧 JSON 多一条 img2、目录多一个 *_b.ppm；
        第二帧不画 → 必须回到全黑（每帧清空，不残留上一帧）；
        主画面完全不受影响。
     C2. 会话层（`tests/second_session.js`）：开关打开才读那张图、
        关掉连文件都不读。这一段单独跑 Node，因为"读不读"是 TS 的决定。
-    D. 算法不写第二张图 → 一个字段、一个文件都不多（"选配"= 零开销）。
+    D. 算法不写图片2 → 一个字段、一个文件都不多（"选配"= 零开销）。
 
 用法:
     python tests/test_outimage.py [--toolchain <根目录>]
@@ -119,7 +119,7 @@ def make_project(work, name, user_c, output_array, pic_files):
         'outputArray': output_array,
         'hooks': {'init': [], 'frame': ['image_process'], 'post': []},
         'pic': {'dir': 'pic/1', 'ext': '.bmp', 'start': 1},
-        'run': {'processRepeat': 1, 'runFrames': 1, 'benchRepeat': 1},
+        'run': {'processRepeat': 1, 'benchRepeat': 1},
         'toolchain': {'path': '', 'pythonPath': '',
                       'autoWatch': False},
     }
@@ -146,7 +146,7 @@ void image_process(void)
     int x, y;
     for (y = 0; y < SCUT_IMAGE_H; y++) {
         for (x = 0; x < SCUT_IMAGE_W; x++) {
-            SCUT_OutImageSet(x, y, 200);
+            SCUT_OutImageSet(SCUT_IMG_1, x, y, 200);
         }
     }
 }
@@ -168,7 +168,7 @@ void image_process(void)
 '''
 
 # ---------------------------------------------------------------------------
-# C) 第二张图：算法自己往里画
+# C) 图片2：算法自己往里画
 # ---------------------------------------------------------------------------
 USER_SECOND = r'''
 #include "scut_sdk.h"
@@ -190,8 +190,8 @@ void image_process(void)
             second_buf[y][x] = 77;
         }
     }
-    SCUT_EnvCopyOutput2(second_buf[0], 0, 0);
-    SCUT_OutImage2SetRGB(0, 0, 255, 0, 0);
+    SCUT_EnvCopyOutput(SCUT_IMG_2, second_buf[0], 0, 0);
+    SCUT_OutImageSetRGB(SCUT_IMG_2, 0, 0, 255, 0, 0);
 }
 '''
 
@@ -281,13 +281,13 @@ def main():
                 check(px[0] != 200 or len(distinct) > 1,
                       'B 画面不是被 A 的常量污染')
 
-        # ---- C) 算法写「第二张图」 ----
+        # ---- C) 算法写「图片2」 ----
         #
         # 这一节守两条承诺：
         #   ① 写了才多一条 —— 帧 JSON 里出现 img2，同目录出现 *_b.ppm；
-        #   ② 每帧清黑 —— 第一帧画满，第二帧不画，第二张图必须回到全黑，
+        #   ② 每帧清黑 —— 第一帧画满，第二帧不画，图片2必须回到全黑，
         #      不能残留上一帧的内容（"残留"会让用户以为这一帧也算出了同样的结果）。
-        print('\n[C] 算法写第二张图（应当单独成图，且每帧不残留）')
+        print('\n[C] 算法写图片2（应当单独成图，且每帧不残留）')
         projC = make_project(work, 'C_second', USER_SECOND, '', pics)
         r = run([sys.executable, BUILD, '--project', projC,
                  '--toolchain', args.toolchain])
@@ -314,28 +314,28 @@ def main():
 
             p2a = os.path.join(framesC, 'frame_0001_b.ppm')
             p2b = os.path.join(framesC, 'frame_0002_b.ppm')
-            check(os.path.isfile(p2a), 'C 第 1 帧的第二张图落盘（frame_0001_b.ppm）')
-            check(os.path.isfile(p2b), 'C 第 2 帧的第二张图也落盘')
+            check(os.path.isfile(p2a), 'C 第 1 帧的图片2落盘（frame_0001_b.ppm）')
+            check(os.path.isfile(p2b), 'C 第 2 帧的图片2也落盘')
             if os.path.isfile(p2a):
                 got = read_ppm(p2a)
-                check(got is not None, 'C 第二张图是合法 PPM(P6)')
+                check(got is not None, 'C 图片2是合法 PPM(P6)')
                 if got:
                     w, h, px = got
                     check(px[0:3] == bytes([255, 0, 0]),
-                          'C 第二张图保留了算法点的红色（彩色原样透传）',
+                          'C 图片2保留了算法点的红色（彩色原样透传）',
                           '实际 %r' % (px[0:3],))
                     n77 = sum(1 for i in range(3, len(px), 3)
                               if px[i] == 77 and px[i + 1] == 77 and px[i + 2] == 77)
                     check(n77 == w * h - 1,
-                          'C 第二张图整幅是算法搬进去的 77',
+                          'C 图片2整幅是算法搬进去的 77',
                           '命中 %d/%d' % (n77, w * h - 1))
             if os.path.isfile(p2b):
                 got = read_ppm(p2b)
                 if got:
                     w, h, px = got
                     check(all(b == 0 for b in px),
-                          'C 第 2 帧不再画 → 第二张图被清黑（不残留上一帧）')
-            # 主画面不该被第二张图影响：没配 outputArray ⇒ 仍是默认底图（灰度）
+                          'C 第 2 帧不再画 → 图片2被清黑（不残留上一帧）')
+            # 主画面不该被图片2影响：没配 outputArray ⇒ 仍是默认底图（灰度）
             p1a = os.path.join(framesC, 'frame_0001.ppm')
             if os.path.isfile(p1a):
                 got = read_ppm(p1a)
@@ -344,14 +344,14 @@ def main():
                     grey = all(px[i] == px[i + 1] == px[i + 2]
                                for i in range(0, len(px), 3))
                     check(grey and not (px[0] == 77 and px[1] == 77),
-                          'C 主画面不受第二张图影响（仍是输入图底图）')
+                          'C 主画面不受图片2影响（仍是输入图底图）')
 
         # ---- C2) 会话层：开关真的决定"读不读" ----
         #
         # ★ 为什么这一小段还要单独跑一次 Node：
         #   C/后端写对了，不代表会话会把 rgb2 组装出来（中间还差一段
         #   "按开关决定读不读 PPM"的 TS 逻辑）。那一段坏掉的表现是
-        #   "后端明明写了文件，面板永远没有第二张图"，而且不报错。
+        #   "后端明明写了文件，面板永远没有图片2"，而且不报错。
         print('\n[C2] 会话层：开关打开收到 rgb2 / 关闭连文件都不读')
         node = shutil.which('node')
         if not node:
@@ -367,8 +367,8 @@ def main():
                       'C2 开关 %s 时会话层确认了 rgb2 的有无' % mode,
                       out[-300:])
 
-        # ---- D) 算法不写第二张图 ⇒ 一点都不多付 ----
-        print('\n[D] 算法不写第二张图（不许多写文件、不许多发字段）')
+        # ---- D) 算法不写图片2 ⇒ 一点都不多付 ----
+        print('\n[D] 算法不写图片2（不许多写文件、不许多发字段）')
         framesB2 = os.path.join(projB, '.scut', 'bin', 'frames_json')
         r = run([exeB, '--json', '--frames', '1', '--out', framesB2])
         lines = [l for l in (r.stdout or '').splitlines() if l.startswith('{')]

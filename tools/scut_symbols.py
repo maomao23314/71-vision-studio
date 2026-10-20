@@ -158,7 +158,7 @@ def _collect_dims(dies, arr_die, base):
     dims=[120] total=120。
 
     下游 `len(dims)==1` 的分支据此认定"这是一行"。若这个数组被填进
-    「结果图数组名」，生成的就是 SCUT_EnvCopyOutput(&g_row[0], 120, 1)
+    「结果图数组名」，生成的就是 SCUT_EnvCopyOutput(SCUT_IMG_1, &g_row[0], 120, 1)
     —— 只搬 1 行，画面是上面一条，且【不报任何错】。
 
     ★ 拼接顺序是【从外到内】：外层维度在前，内层在后。
@@ -341,7 +341,7 @@ def _copy_fn_text(out_array, variables):
 
     ★★ 为什么一定要在这里做「形状检查」★★
 
-      SCUT_EnvCopyOutput(ptr, 0, 0) 的约定是"用环境的宽高"，
+      SCUT_EnvCopyOutput(SCUT_IMG_1, ptr, 0, 0) 的约定是"用环境的宽高"，
       于是环境会按 H 行 × W 列去 memcpy。
 
       如果用户填的是一个【标量】（例如 int g_threshold），
@@ -412,7 +412,7 @@ def _copy_fn_text(out_array, variables):
         " * ------------------------------------------------------------------ */\n"
         "void scut_env_copy_output(void)\n"
         "{\n"
-        "    SCUT_EnvCopyOutput((const unsigned char *)%s, %d, %d);\n"
+        "    SCUT_EnvCopyOutput(SCUT_IMG_1, (const unsigned char *)%s, %d, %d);\n"
         "}\n"
         % (w, h, src, w, h))
 

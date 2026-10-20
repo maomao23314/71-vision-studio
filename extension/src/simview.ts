@@ -294,30 +294,14 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
     }
 
     /**
-     * 连续运行 N 帧（「运行」按钮）。
+     * 上一张图。
      *
-     * ★ 与「测速」的区别（两个按钮各管一件事，不重复）：
-     *     测速 =【同一张图】重复跑算法 N 次，取平均周期数（看性能）
-     *     运行 = 按图集顺序连着跑 N 帧（看效果）
-     *
-     * ★ 同样【不重启进程】：算法内部状态（环形缓冲、状态机、丢线计数）保留，
-     *   这与车上的行为一致 —— 翻页/连跑都不该把状态清零。
+     * ★ 这里原来还有一个「运行（连续跑 N 帧）」。
+     *   它真正的功能被「测速」覆盖了（同一张图重复 N 次，取平均周期数），
+     *   而"按顺序连跑 60 帧"既不给结论、又得等半天 —— 用户原话是"没意义"。
+     *   连带的 runFrames / 「运行」连跑帧数配置 / F8 键位 / 命令，
+     *   在 0.10.6 一并删除，原来占着的播放键图标改给了「编译」。
      */
-    public async run(): Promise<void> {
-        const n = Math.max(1, this.runConfig().runFrames || 60);
-
-        const s = await this.ensureSession();
-        if (!s) {
-            void vscode.window.showWarningMessage(
-                'SCUT-71：还没有可运行的仿真程序。请先点「编译」。');
-            return;
-        }
-        this.updateProduction();
-        this.sendStatus();
-        await s.runFrames(n);
-    }
-
-    /** 上一张图。 */
     public async prevPic(): Promise<void> {
         await this.nudgePic(-1);
     }
@@ -771,11 +755,11 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
   <div id="app">
     <section id="pane-0" class="image-pane collapsible">
       <header id="pane-0-head">
-        <span class="chevron">▾</span>
-        <span class="title">画面</span>
+        <span class="chevron">▸</span>
+        <span class="title">图片1</span>
         <span id="pane-0-sum" class="dim"></span>
       </header>
-      <div id="pane-0-body">
+      <div id="pane-0-body" class="collapsed">
         <div class="pane-view">
           <div id="pane-0-wrap" class="screen-wrap">
             <canvas id="pane-0-canvas" class="screen" width="188" height="120"></canvas>
@@ -800,32 +784,34 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
     </section>
 
     <!--
-      ★★ 第二张图：与主画面【同一套组件】 ★★
+      ★★ 图片2：与图片1【同一套组件】 ★★
 
       用户的原话："加完了之后我想这两个图片也可以展开/收起（放大什么的功能不变）"。
       所以这里不是"再画一块 canvas"，而是用同一个组件（createPane）再声明一份：
         · 折叠：与「变量查看 / 计时 / 日志」同一个 collapsible 组件，
           开合状态各自记住（persist 在 panes.p0 / panes.p1 里）；
         · 缩放：两块各自独立（各有一套 zoom/pan）——共用一个缩放会让
-          "看主画面细节"顺手把另一张也放大，两张图尺寸相同、用途不同，
+          "看图片1的细节"顺手把另一张也放大，两张图尺寸相同、用途不同，
           独立更符合直觉；
         · 键盘 Ctrl+= / Ctrl+- 作用于【鼠标最后停留的那一块】。
       ★ 结构照抄一份，逻辑只有一份 —— 复制结构不会漂移，复制逻辑才会。
 
-      ★ 默认 hidden：这一栏归配置（display.secondImage）管。
-        关着的时候宿主连第二张图的 PPM 都不会去读，不是"隐藏但仍在传"。
+      ★ 默认就有（不 hidden），但和图片1一样默认【收起】：
+        两栏都是"点一下才展开"，面板打开时先看到的是工具栏和变量。
+        这一栏的显隐仍归配置（display.secondImage，默认开）管 ——
+        关掉时宿主连那张 PPM 都不读，不是"隐藏但仍在传"。
     -->
-    <section id="pane-1" class="image-pane collapsible" hidden>
+    <section id="pane-1" class="image-pane collapsible">
       <header id="pane-1-head">
-        <span class="chevron">▾</span>
-        <span class="title">第二张图</span>
+        <span class="chevron">▸</span>
+        <span class="title">图片2</span>
         <span id="pane-1-sum" class="dim"></span>
       </header>
-      <div id="pane-1-body">
+      <div id="pane-1-body" class="collapsed">
         <div class="pane-view">
           <div id="pane-1-wrap" class="screen-wrap">
             <canvas id="pane-1-canvas" class="screen" width="188" height="120"></canvas>
-            <div id="pane-1-placeholder" class="placeholder">第二张图还没有内容<br><span class="dim">在算法里用 SCUT_EnvCopyOutput2 / SCUT_OutImage2Set 画它<br>（每帧重画；这一帧不画就是黑的）</span></div>
+            <div id="pane-1-placeholder" class="placeholder">图片2 还没有内容<br><span class="dim">在算法里用 SCUT_EnvCopyOutput(SCUT_IMG_2, …)<br>或 SCUT_OutImageSet(SCUT_IMG_2, …) 画它<br>（每帧重画；这一帧不画就是黑的）</span></div>
           </div>
           <div class="pane-actions">
             <button id="pane-1-fit" title="适应窗口（默认行为：拖动边框后自动重新适应）">适应</button>
@@ -838,7 +824,7 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
     </section>
 
     <section id="toolbar">
-      <button id="btn-build" title="编译仿真程序 (Ctrl+Shift+B)">编译</button>
+      <button id="btn-build" title="编译仿真程序 (Ctrl+Shift+B)">▶ 编译</button>
       <button id="btn-debug" class="primary" title="启动调试（F5）：下断点、单步、看调用栈">调试</button>
       <span class="toolbar-sep"></span>
       <button id="btn-prev" class="primary" title="上一张图 (←)">◀ 上一张</button>

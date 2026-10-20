@@ -109,8 +109,6 @@ export class SimSessionImpl implements SimSession {
      */
     private frameWaiters: Array<(f: FramePacket) => void> = [];
 
-    /** 正在「运行 N 帧」时剩余要推的步数；0 表示不在连续运行。 */
-    private pendingSteps = 0;
     private runGeneration = 0;
     /** 视图不可见时为 true：此时【不再放行下一帧】，把仿真进程按在 getchar 上。 */
     private productionPaused = false;
@@ -291,7 +289,6 @@ export class SimSessionImpl implements SimSession {
             return;
         }
         this.stopping = true;
-        this.pendingSteps = 0;
         this.runGeneration++;
         this.emitLog('[会话] 正在停止…');
         try {
@@ -331,7 +328,6 @@ export class SimSessionImpl implements SimSession {
      *     "gN"  = 跳到第 N 张
      */
     step(): Promise<void> {
-        this.pendingSteps = 0;
         this.writeLine('');
         return Promise.resolve();
     }
@@ -389,34 +385,6 @@ export class SimSessionImpl implements SimSession {
         const waited = this.waitFrame();
         this.writeLine('b' + Math.max(1, Math.floor(n)));
         return waited;
-    }
-
-    /**
-     * 连续跑 n 帧（播放）。
-     *
-     * ★ 为什么不直接让进程自己跑 n 帧（改用 --frames n）：
-     *   --frames n 会让进程【一口气】把 n 行 JSON 全吐出来，
-     *   而这 n 帧的图像文件会被反复覆写 —— 扩展宿主读到的是
-     *   「已经是最后一帧」的内容，中间帧全丢。
-     *   所以要一帧一帧放行：写一行 → 收一帧 → ACK → 再写一行。
-     *   背压在这里和「只允许一帧在途」是同一件事。
-     */
-    runFrames(n: number): Promise<void> {
-        if (n <= 0) {
-            return Promise.resolve();
-        }
-        // 累计而不是覆盖：连点两次「运行」应当是"再跑 n 帧"，而不是把上一次
-        // 还没跑完的次数抹掉（覆盖会让第二次点击把第一次悄悄截断）。
-        this.pendingSteps += n;
-        // ★ 只有在【没有帧在途】时才立刻写第一行。
-        //   有帧在途时，那一帧的 ACK 会替我们放行下一帧（见 completeAck）；
-        //   此时再立刻写一行，就会多跑一帧 —— 实测 runFrames(5) 产出 6 帧。
-        //   这类偏差不报错、只是"跑多了几帧"，非常难被察觉，所以在这里钉死。
-        if (!this.frameInFlight && !this.productionPaused && this.child) {
-            this.pendingSteps--;
-            this.writeLine('');
-        }
-        return Promise.resolve();
     }
 
     /**
@@ -707,15 +675,12 @@ if (!rgb) {
         //   仿真进程会停在 getchar() 上等我们写那一行。这正是「暂停产帧」
         //   的落地方式 —— 不是我们在宿主侧丢帧，而是根本不让进程往下跑，
         //   这样切回来时看到的一定是【最新】状态，而不是一堆过期帧。
-        if (this.productionPaused) {
-            return;
-        }
-
-        // 连续运行：放行下一帧
-        if (this.pendingSteps > 0 && this.child) {
-            this.pendingSteps--;
-            this.writeLine('');
-        }
+        //
+        // ★ 这里原先还有一段"连续运行：放行下一帧"（读 pendingSteps）。
+        //   那是「运行 N 帧」用的，0.10.6 已随该功能一起删除：
+        //   现在一帧就是一帧，只由用户点「下一张 / 上一张 / 测速」驱动。
+        //   "隐藏时不放行"这件事不需要额外语句 —— 不写 stdin 就是不跑，
+        //   所以这里只是收尾（没有 else 分支要写）。
     }
 
     /**
@@ -725,6 +690,9 @@ if (!rgb) {
      *   webview 隐藏时 postMessage 的可用性在 vscode.d.ts 里自相矛盾
      *   （一处说可以，另一处说不可以）。所以【设计上不依赖它】：
      *   隐藏即停止产帧，可见即恢复。
+     *
+     * ★ 恢复可见时原本还要在这里补写一行（把隐藏期间攒下的连续运行放出去）。
+     *   「运行 N 帧」删掉之后没有"攒下的帧"这回事了，所以只剩记日志。
      */
     setProductionPaused(paused: boolean): void {
         if (this.productionPaused === paused) {
@@ -732,10 +700,6 @@ if (!rgb) {
         }
         this.productionPaused = paused;
         this.emitLog(paused ? '[会话] 视图不可见，已暂停产帧。' : '[会话] 视图恢复可见，继续产帧。');
-        if (!paused && !this.frameInFlight && this.pendingSteps > 0 && this.child) {
-            this.pendingSteps--;
-            this.writeLine('');
-        }
     }
 
     get isProductionPaused(): boolean {

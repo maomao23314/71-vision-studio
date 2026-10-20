@@ -236,7 +236,7 @@ if ts_top and py_top:
                     % (len(ts_top), ', '.join(ts_top)))
 
 # ---- run 段的默认值两边也必须一致（最容易各写一套的地方）----
-for key, expect in [('processRepeat', 1), ('runFrames', 60), ('benchRepeat', 1000)]:
+for key, expect in [('processRepeat', 1), ('benchRepeat', 1000)]:
     if re.search(r"%s:\s*number;" % key, pcSrc) is None:
         continue
     if '"%s": %d' % (key, expect) not in read(BUILD):

@@ -365,13 +365,13 @@ def main():
     print('    driver: %s' % (out or '(no output)'))
     if err:
         print('    stderr : %s' % err[:400])
-    # 默认展开（body 不带 collapsed）
-    check('INIT false' in out, '两块画面默认展开', out)
-    check('AFTER true' in out, '点标题后正文收起', out)
-    check('BACK false' in out, '再点一次展开（是可切换，不是单向）', out)
+    # ★ 默认【收起】（用户要求）：body 带 collapsed
+    check('INIT true' in out, '两块画面默认收起', out)
+    check('AFTER false' in out, '点标题后正文展开', out)
+    check('BACK true' in out, '再点一次收起（是可切换，不是单向）', out)
     # ★ 关键：点第二块只该动第二块
-    check('P1 true P0 false' in out,
-          '折叠互不串台（点第二张图不会收起主画面）', out)
+    check('P1 false P0 true' in out,
+          '折叠互不串台（点图片2不会展开图片1）', out)
 
     print('\n' + '=' * 60)
     if failures:
