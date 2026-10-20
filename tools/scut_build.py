@@ -44,21 +44,22 @@ scut_build.py —— SCUT-71 Vision Studio 构建编排层。
     老工程自己带的 config.h 仍然能被找到（bind 的 __has_include 会退一步
     去找它），但正常路径是生成的那一份。
 
-【四】为什么探针编译强制 -gdwarf-4（不是教条，是实测约束）
+【四】调试信息由 scut_dwarf.py 直接读字节，不依赖外部工具
 ----------------------------------------------------------------------------
-    clang 21 默认产 DWARF 5；而自动发现依赖 binutils 的 objdump，
-    本机 binutils 2.30 的新 reader 读不了 DWARF 5 的 .debug_info
-    （输出会是空章节，scut_symbols.py 一个变量都发现不了 —— 且【不报错】，
-    属于最难查的静默失败）。llvm-objdump 则更糟：LLVM 21 已彻底移除
-    --dwarf=info（只剩 =frames），直接失败。
+    这条路早先是 `objdump --dwarf=info` 拿文本、再用正则解析，问题很多：
+      · LLVM 21 移除了 llvm-objdump 的 --dwarf=info（只剩 =frames）；
+      · llvm-mingw 的 bin 里那个不带扩展名的 `objdump` 是个转发脚本，
+        转给 llvm-objdump —— 所以【插件自己下载的工具链】用不了；
+      · binutils 2.30 读不了 DWARF 5，输出空章节、退出码还是 0；
+      · 文本格式还随版本漂移（偏移补零位数、缩进空格数）。
+    结果是纯净机器上变量面板恒空，而构建一切正常 —— 最坏的一类失败。
 
-    实测：clang 21 + binutils 2.30，加 -gdwarf-4 后 35/35 变量全部正确发现。
-    所以探针编译恒用 -gdwarf-4（固定不变）。
+    现在 scut_dwarf.py 按 DWARF 标准直接读 .debug_info 的字节：
+    只依赖 zlib 与标准库，clang / gcc / DWARF 4 / DWARF 5 都能读，
+    机器上装没装 binutils 完全无关。
 
-    ★ 另一个实测坑：clang 输出 DWARF 偏移是「八位补零」(0x0000002a)，
-      binutils 输出是「不定长」(0x2a)。scut_symbols.py 只认后者。
-      本脚本因此【在调用前把探针 .o 规范化】：只做偏移补零的剥离，
-      不做任何语义改动，且必须保留 5 空格前缀（深度判定依赖它）。
+    ★ 探针仍固定 -gdwarf-4。不是因为兼容性（两种我们都支持），
+      而是让不同机器产出的调试信息形状一致 —— 出问题时要查的东西少一半。
 
 ============================================================================
 """
@@ -148,11 +149,10 @@ EXE_NAME = "scut_sim.exe"
 #                     首次构建还要现编核心库。它的目的是"别永久挂住"，
 #                     不是"卡性能预算"。
 #
-#   PROBE_TIMEOUT_SEC 版本探测（clang --version / objdump --version）
+#   PROBE_TIMEOUT_SEC 版本探测（clang --version 这类）
 #                     给得短：这只是锦上添花的诊断，而工具链探测阶段
-#                     要连试多个候选（objdump 最多 8 个路径）。
-#                     若每个都等 300 秒，光探测就能耗掉几十分钟 ——
-#                     而用户看到的是"插件卡住了"。
+#                     可能要连试多个候选路径。若每个都等 300 秒，
+#                     光探测就能耗掉几十分钟 —— 用户看到的是"插件卡住了"。
 CMD_TIMEOUT_SEC = 300.0
 PROBE_TIMEOUT_SEC = 20.0
 
@@ -179,18 +179,6 @@ DEFAULT_CORE_LIB_REL = os.path.join(SCUT_DIR, "lib", "libscut_core.a")
 #
 #   保留这个空列表而不是删掉，是为了标出"探测链的最后一环在此收口"。
 TOOLCHAIN_ROOT_CANDIDATES: list = []
-
-# binutils 的 objdump 候选（相对「工具链根」之外的本机常见位置）。
-# ★ 为什么必须找 binutils：见文件头【四】。
-BINUTILS_OBJDUMP_CANDIDATES = [
-    r"C:\Program Files\Git\mingw64\bin\objdump.exe",
-    r"C:\mingw64\bin\objdump.exe",
-    r"C:\msys64\mingw64\bin\objdump.exe",
-]
-
-# binutils objdump 里 DWARF 偏移的写法： `<1><2a>` / `  <2b>`。
-# clang 会写成 `<0x0000002a>`，见 normalize_probe_dwarf_text() 的说明。
-_HEX_OFFSET_RE = re.compile(r"^( *<)([0-9a-fA-F]{5,})(>.*)$")
 
 # gcc/clang 诊断： path:line:col: severity: message
 _DIAG_FULL_RE = re.compile(
@@ -378,12 +366,11 @@ def run_cmd(argv: Sequence[str], cwd: Optional[str] = None,
       而编译器只会报「no such file」，用户完全看不出真正原因。
 
     ★ timeout 是【必须有】的，不是可选的谨慎：
-      构建要拉 clang / objdump / ar 三个外部程序，其中 objdump 还要在
-      最多 8 个候选路径上逐个试。任何一个挂住（杀毒软件拦在启动阶段、
-      网络盘掉线、工具链版本不匹配而卡在等待输入），
-      没有超时的 subprocess.run 会让构建【永久挂起】——
-      用户看到的是"点了编译，进度条一直转"，没有任何报错可查。
-      超时后按失败处理，理由里说清是哪一个命令超时。
+      构建要拉 clang / ar 等外部程序，工具链探测阶段还要在多个候选路径上
+      逐个试。任何一个挂住（杀毒软件拦在启动阶段、网络盘掉线、
+      工具链版本不匹配而卡在等待输入），没有超时的 subprocess.run
+      会让构建【永久挂起】—— 用户看到的是"点了编译，进度条一直转"，
+      没有任何报错可查。超时后按失败处理，理由里说清是哪一个命令超时。
 
     ★ 为什么默认值给得比较宽（300 秒）：
       链接一份带调试信息的静态库在慢机器上确实可能到几十秒，
@@ -451,26 +438,16 @@ class Toolchain:
     def __init__(self) -> None:
         self.root: str = ""
         self.cc: str = ""
-        self.objdump: str = ""
-        self.objdump_is_binutils = False
         self.lldb_dap: str = ""
         self.clangd: str = ""
         self.python: str = ""
         self.warnings: List[str] = []
         self.cc_version: str = ""
-        self.objdump_version: str = ""
 
     def to_json(self) -> Dict[str, Any]:
         return {
             "root": self.root,
             "cc": self.cc,
-            "objdump": self.objdump,
-            "objdumpIsBinutils": self.objdump_is_binutils,
-            # ★ objdumpVersion 必须导出：doctor 的人读输出里有它（"版本 : …"），
-            #   但 to_json 漏了 —— 于是插件用 --json 拿到的工具链信息
-            #   比终端里少一项，"objdump 是不是 binutils"只能看到一个布尔值，
-            #   出问题时没法把手上的版本号贴出来。
-            "objdumpVersion": self.objdump_version or None,
             "lldbDap": self.lldb_dap or None,
             "clangd": self.clangd or None,
             "python": self.python or None,
@@ -510,7 +487,7 @@ def _probe_version(exe: str, timeout: float = PROBE_TIMEOUT_SEC) -> str:
     ★ timeout 必须【真的传下去】：它原先只是签名里的一个形参，
       从不使用 —— 于是"取版本"这一步实际用的是 run_cmd 的默认超时。
       版本探测比正式构建"更该"有短超时：它只是个锦上添花的诊断，
-      而工具链探测阶段要连试多个候选（objdump 最多 8 个路径），
+      而工具链探测阶段要连试多个候选路径，
       每个都等 300 秒的话，光探测就能耗掉几十分钟。
     """
     if not exe:
@@ -525,25 +502,30 @@ def _probe_version(exe: str, timeout: float = PROBE_TIMEOUT_SEC) -> str:
     return ""
 
 
-def _objdump_supports_dwarf_info(objdump: str, cc: str) -> Optional[bool]:
+def _probe_symbol_discovery(cc: str, python: str,
+                            symbols_tool: str) -> Optional[bool]:
     """
-    功能探测：真的拿一个带 DWARF 的小目标文件跑一次 `objdump --dwarf=info`。
+    功能探测：真的走一遍「编译探针 → 读 DWARF → 生成注册代码」。
 
-    ★ 为什么不能只看版本号：
-      · llvm-objdump 在 LLVM 21 里移除了 --dwarf=info → 直接非 0 退出；
-      · 但有的 binutils 太旧，能接受该选项却读不懂 DWARF 5，
-        输出为空章节、退出码仍是 0 —— 这种【静默失败】只能靠功能探测发现。
-    返回 True/False；无法探测（没有 clang）时返回 None。
+    ★ 为什么值得真跑一遍而不是查版本号：
+      自动符号发现是"能跑就全对、不能跑就全空"的那种功能，
+      而且失败时不报错（构建照常成功，只是面板里什么都没有）。
+      所以 doctor 里必须有一条【真的看见变量出来】的证据，
+      否则"都装好了"和"面板永远空的"在报告上长得一模一样。
+
+    返回 True / False；连探针都编不出来（没有 clang）时返回 None。
     """
-    if not cc:
+    if not cc or not python or not os.path.isfile(symbols_tool):
         return None
     tmp = tempfile.mkdtemp(prefix="scut_doctor_")
     try:
         src = os.path.join(tmp, "probe.c")
         obj = os.path.join(tmp, "probe.o")
+        out_c = os.path.join(tmp, "probe.wrapped.c")
         with open(src, "w", encoding="ascii", newline="\n") as f:
-            # 必须有一个会被引用的全局变量，否则 clang 会把它优化掉，
-            # 探测就测不到「能不能看见变量」这件事。
+            # ★ 变量必须被引用，否则 clang 会把它整个丢掉 ——
+            #   那时探针测的是"编译器愿不愿意留未使用的 static"，
+            #   而不是"我们能不能读到变量"。
             f.write("#include <stdint.h>\n"
                     "uint8_t scut_doctor_probe_v[4][8];\n"
                     "int main(void){ scut_doctor_probe_v[1][2] = 3;"
@@ -551,11 +533,16 @@ def _objdump_supports_dwarf_info(objdump: str, cc: str) -> Optional[bool]:
         rc = run_cmd([cc, "-std=c11", "-gdwarf-4", "-O0", "-c", src, "-o", obj])
         if rc.code != 0:
             return None
-        r = run_cmd([objdump, "--dwarf=info", obj])
-        if r.code != 0:
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUTF8"] = "1"
+        r = run_cmd([python, symbols_tool,
+                     "--obj", obj, "--src", "probe.c", "--out-c", out_c],
+                    env=env)
+        if r.code != 0 or not os.path.isfile(out_c):
             return False
-        # 光有 DWARF 不够，必须真的能看到文件作用域变量才算可用。
-        return "scut_doctor_probe_v" in r.out
+        with open(out_c, encoding="utf-8-sig") as f:
+            return 'SCUT_Watch("scut_doctor_probe_v"' in f.read()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -596,8 +583,7 @@ def detect_toolchain(explicit_root: str, verbose_reporter: Optional[Reporter] = 
             break
 
     if not tc.cc:
-        # 退回到 PATH。注意 shutil.which 会正确处理 PATHEXT，能区分
-        # llvm-mingw 的 objdump（脚本包装）和 binutils 的 objdump.exe。
+        # 退回到 PATH。
         for name in ("clang.exe", "clang"):
             found = shutil.which(name)
             if found:
@@ -611,38 +597,13 @@ def detect_toolchain(explicit_root: str, verbose_reporter: Optional[Reporter] = 
             "装完即可编译），或把它的 bin 目录加进 PATH，"
             "然后用 --toolchain 指定根目录。"
         )
-        # 没有编译器就没法做功能探测，但仍尽量把 objdump 找出来报告。
-        tc.objdump = _find_objdump(None)
-        if tc.objdump:
-            tc.objdump_version = _probe_version(tc.objdump)
-            tc.objdump_is_binutils = "GNU objdump" in tc.objdump_version
         tc.python = _find_python()
         return tc
 
     tc.cc_version = _probe_version(tc.cc)
 
-    # ---- objdump：★ 必须是 binutils 的，不能是 LLVM 的 -------------------
-    tc.objdump = _find_objdump(tc)
-    if tc.objdump:
-        tc.objdump_version = _probe_version(tc.objdump)
-        tc.objdump_is_binutils = "GNU objdump" in tc.objdump_version
-        usable = _objdump_supports_dwarf_info(tc.objdump, tc.cc)
-        if usable is False:
-            tc.objdump_is_binutils = False
-        elif usable is True:
-            tc.objdump_is_binutils = True
-
-    if not tc.objdump or not tc.objdump_is_binutils:
-        tc.warnings.append(
-            "找不到可用的 objdump。自动符号发现依赖 `objdump --dwarf=info`，"
-            "而 LLVM 21 已移除该选项（llvm-objdump 只支持 --dwarf=frames）——"
-            "所以必须用 binutils 的 objdump，不能是 llvm-objdump。"
-            "请安装 MinGW-w64（提供 binutils），或把 binutils 的 bin 目录"
-            "加进 PATH，然后重跑 doctor。"
-            "临时绕过：加 --no-watch 仍可正常构建，只是变量面板会是空的。"
-        )
-
     # ---- python ----------------------------------------------------------
+    # ★ 必须在符号发现自检【之前】找：那个自检就是要用 python 去跑生成器。
     tc.python = _find_python()
 
     # ---- 调试/语言服务（缺失只降级，不阻断） ------------------------------
@@ -654,47 +615,6 @@ def detect_toolchain(explicit_root: str, verbose_reporter: Optional[Reporter] = 
         tc.clangd = found or ""
 
     return tc
-
-
-def _find_objdump(tc: Optional[Toolchain]) -> str:
-    """
-    找 binutils 的 objdump。
-
-    ★ 顺序很关键：
-      1) 显式候选路径里的 binutils（C:\\Program Files\\Git\\mingw64\\bin 等）；
-      2) PATH 上的 `objdump.exe` —— 【带扩展名】才会命中真正的 .exe；
-         llvm-mingw 的 bin 目录里同时有 `llvm-objdump.exe` 和无扩展名的
-         `objdump` 脚本（内容就是 llvm-objdump），若用 which('objdump')
-         在 PATHEXT 顺序下可能命中那个脚本，得到的是 LLVM 版本。
-      3) 兜底：PATH 上的 objdump。
-    每取到一个都用 `--version` 验证是不是 GNU binutils。
-    """
-    candidates: List[str] = []
-    candidates.extend(BINUTILS_OBJDUMP_CANDIDATES)
-    for exe in ("objdump.exe", "x86_64-w64-mingw32-objdump.exe",
-                "objdump", "objdump.bat", "objdump.cmd"):
-        found = shutil.which(exe)
-        if found:
-            candidates.append(found)
-    if tc and tc.root:
-        for exe in ("objdump.exe", "llvm-objdump.exe", "objdump"):
-            p = os.path.join(tc.root, "bin", exe)
-            if os.path.isfile(p):
-                candidates.append(p)
-
-    seen = set()
-    fallback = ""
-    for cand in candidates:
-        key = os.path.normcase(os.path.abspath(cand))
-        if key in seen:
-            continue
-        seen.add(key)
-        ver = _probe_version(cand)
-        if "GNU objdump" in ver:
-            return cand
-        if not fallback:
-            fallback = cand
-    return fallback
 
 
 def _find_python() -> str:
@@ -717,19 +637,6 @@ def _find_python() -> str:
             return found
     return ""
 
-
-def _find_objcopy(cc: str) -> str:
-    """
-    找 objcopy，用于 DWARF 偏移写法规范化（见 normalize_probe_obj_dwarf）。
-
-    优先取【与 clang 同目录】的那一份：llvm-mingw 自带 objcopy.exe，
-    与编译器同源，行为最可预期。找不到就返回空串，规范化会被跳过。
-    """
-    if cc:
-        cand = os.path.join(os.path.dirname(cc), "objcopy.exe")
-        if os.path.isfile(cand):
-            return cand
-    return shutil.which("objcopy.exe") or shutil.which("objcopy") or ""
 
 
 # ===========================================================================
@@ -1537,79 +1444,11 @@ class UnitJob:
         self.config_error: str = ""
 
 
-def normalize_probe_obj_dwarf(objcopy: str, obj_path: str,
-                              reporter: Reporter) -> None:
-    """
-    ★ 实测兼容性补丁：把 clang 的 DWARF 偏移写法改写成 binutils 的写法。
 
-    现象（本机实测，clang 21.1.1 + binutils 2.30）：
-        · clang 产出： ` <1><0000002a>: Abbrev Number: 2 (DW_TAG_variable)`
-        · binutils 产出：` <1><2a>: Abbrev Number: 2 (DW_TAG_variable)`
-
-    scut_symbols.py 的 DIE_RE 只认不定长的十六进制，遇到八位补零会
-    一个 DIE 都匹配不上 —— 结果是「构建成功，但变量面板永远是空的」，
-    属于最严重的静默失败。
-
-    做法：objcopy 把 .debug_* 抽出来 → 正则只做「去掉偏移的高位补零」
-    → 再写回去。只动这几个 section，且只动这一种模式；不碰任何别的字节。
-
-    ★ 为什么不一并处理 DW_TAG 的行格式差异：
-      实测发现 clang 的 `Abbrev Number` 行缩进与左尖括号前的空格数
-      与 binutils 不同，但 scut_symbols.py 的 DIE_RE 用 ^ 锚定，
-      而 objdump 的实际输出前缀是 "\n  "（两个空格）—— 这一点对
-      clang 与 binutils 产物【是一致的】（已实测 35/35 变量全部发现）。
-      所以这里只补偏移写法这一处，绝不擅自改动行格式。
-
-    失败时静默降级为「可能发现不了变量」，而不是让构建失败 ——
-    「少几个变量」和「算法跑不起来」严重性完全不同。
-    """
-    if not objcopy:
-        reporter.detail("  [dwarf] 找不到 objcopy，跳过偏移规范化"
-                        "（若变量面板为空，请运行 doctor）")
-        return
-
-    def _fix(text: str) -> str:
-        return "\n".join(
-            _HEX_OFFSET_RE.sub(
-                lambda m: m.group(1) + (m.group(2).lstrip("0") or "0") + m.group(3),
-                ln)
-            for ln in text.split("\n"))
-
-    tmpdir = tempfile.mkdtemp(prefix="scut_dwarf_")
-    try:
-        changed = False
-        for sec in (".debug_info", ".debug_abbrev", ".debug_str"):
-            dump = os.path.join(tmpdir, sec.strip("."))
-            r = run_cmd([objcopy, "--dump-section", "%s=%s" % (sec, dump),
-                         obj_path])
-            if r.code != 0 or not os.path.isfile(dump):
-                continue
-            with open(dump, "rb") as f:
-                raw = f.read()
-            text = raw.decode("latin-1")
-            fixed = _fix(text)
-            if fixed == text:
-                continue
-            with open(dump, "wb") as f:
-                f.write(fixed.encode("latin-1"))
-            r = run_cmd([objcopy, "--update-section",
-                         "%s=%s" % (sec, dump), obj_path])
-            if r.code == 0:
-                changed = True
-            else:
-                reporter.detail("  [dwarf] %s 回写失败，已跳过" % sec)
-        if changed:
-            reporter.detail("  [dwarf] 已规范化 DWARF 偏移写法（clang → binutils）")
-    except OSError as exc:  # pragma: no cover - 环境相关
-        reporter.detail("  [dwarf] 规范化异常，已跳过：%s" % exc)
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
-
-
-def build_one_unit(job: UnitJob, cc: str, objdump: str, python: str,
+def build_one_unit(job: UnitJob, cc: str, python: str,
                    symbols_tool: str, base_flags: List[str], user_flags: List[str],
                    probe_flags: List[str], include_dirs: List[str],
-                   objcopy: str, auto_watch: bool, output_array: str,
+                   auto_watch: bool, output_array: str,
                    output_owner: Optional[str], image_size: str,
                    reporter: Reporter, log_lock: threading.Lock,
                    logs: List[str], proj: "Project",
@@ -1671,9 +1510,6 @@ def build_one_unit(job: UnitJob, cc: str, objdump: str, python: str,
         return _fallback_compile(job, cc, base_flags, user_flags, include_dirs,
                                  reporter, _append)
 
-    # ---- DWARF 偏移写法规范化（见 normalize_probe_obj_dwarf 的说明） ------
-    normalize_probe_obj_dwarf(objcopy, job.obj, reporter)
-
     # ---- 第 2 遍：调用 scut_symbols.py 生成包装单元 ----------------------
     # ★ 先写临时文件再 os.replace：插件可能在构建过程中读这些文件，
     #   半截文件会让变量面板偶发为空，且极难复现。
@@ -1702,7 +1538,6 @@ def build_one_unit(job: UnitJob, cc: str, objdump: str, python: str,
             "--src-abs", job.src,
             "--out-c", tmp_c,
             "--out-json", tmp_j,
-            "--objdump", objdump,
         ]
         if output_array:
             # 结果图数组名交给生成器：只有它展开了用户源码，
@@ -1752,9 +1587,8 @@ def build_one_unit(job: UnitJob, cc: str, objdump: str, python: str,
         if r.code != 0 or not os.path.isfile(tmp_c):
             job.warnings.append(
                 "自动符号发现失败（%s），已改为直接编译原文件。"
-                "最常见原因：objdump 不是 binutils 版本，或 PATH 里的是 "
-                "llvm-objdump（LLVM 21 已移除 --dwarf=info）。"
-                "请运行 doctor 查看详情。"
+                "这一步只读探针 .o 里的 DWARF，不依赖任何外部工具 ——"
+                "所以多半是 Python 解释器的问题。请运行 doctor 查看详情。"
                 % (r.out.strip().splitlines()[-1] if r.out.strip() else "无输出"))
             return _fallback_compile(job, cc, base_flags, user_flags,
                                      include_dirs, reporter, _append)
@@ -1970,18 +1804,12 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
         return finish(2)
     reporter.human("  编译器  : %s" % tc.cc)
 
+    # ★ 自动符号发现现在没有前置条件了：它只读探针 .o 里的 DWARF，
+    #   不需要 objdump / objcopy 之类的额外程序。所以这里不再有
+    #   「探测不到工具就自动关闭」的分支 —— 少一个静默降级的入口。
+    #   真出问题（探针编不出来、Python 跑不动）会在单个文件上报warning
+    #   并退回直接编译，不影响整体构建。
     auto_watch = not args.no_watch
-    if auto_watch and (not tc.objdump or not tc.objdump_is_binutils):
-        # 不致命：降级为 --no-watch 继续构建，但必须说清楚会失去什么。
-        reporter.warn(
-            "自动符号发现已【自动关闭】：没有可用的 binutils objdump。\n"
-            "    影响：算法能正常编译运行，但 IDE 变量面板会是空的。\n"
-            "    原因：自动发现依赖 `objdump --dwarf=info`，"
-            "而 LLVM 21 的 llvm-objdump 已移除该选项。\n"
-            "    下一步：安装 MinGW-w64（提供 binutils）或把 binutils 的 bin "
-            "加进 PATH，然后重跑 doctor。"
-            "也可以显式传 --no-watch 来消除本提示。")
-        auto_watch = False
 
     # 变量发现的两个过滤器（透传给 scut_symbols.py）。
     # ★ 值来源见下面「配置读出来之后」那一段 —— CLI 优先、其次工程配置。
@@ -1992,7 +1820,7 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
     max_elems = cli_max_elems
 
     if auto_watch:
-        reporter.human("  符号发现: %s" % tc.objdump)
+        reporter.human("  符号发现: 开（读探针 .o 的 DWARF）")
     else:
         reporter.human("  符号发现: 已关闭（--no-watch）")
 
@@ -2320,10 +2148,6 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
                     + ["-I" + proj.root]
                     + ["-I" + proj.code_dir])
 
-    # objcopy 用于把探针 .o 的 DWARF 偏移写法规范化（clang → binutils），
-    # 见 normalize_probe_obj_dwarf。缺失时静默跳过，不让构建失败。
-    objcopy = _find_objcopy(tc.cc)
-
     base_flags = ["-std=c11", "-Wall", "-Wextra"] + cfg_flags
     # 探针 flags：★ 恒用 -g -O0（固定不变）。
     #   理由（两条都是实测）：
@@ -2462,18 +2286,18 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
     with timer.stage("编译用户代码（%d 个文件）" % len(jobs)):
         if workers == 1 or len(jobs) == 1:
             for j in jobs:
-                build_one_unit(j, tc.cc, tc.objdump, tc.python,
+                build_one_unit(j, tc.cc, tc.python,
                                SYMBOLS_TOOL, base_flags, user_flags, probe_flags,
-                               include_dirs, objcopy, auto_watch, out_array,
+                               include_dirs, auto_watch, out_array,
                                out_owner, img_shape,
                                reporter, log_lock, logs, proj,
                                exclude_names, max_elems)
         else:
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
                 futs = [ex.submit(
-                    build_one_unit, j, tc.cc, tc.objdump, tc.python,
+                    build_one_unit, j, tc.cc, tc.python,
                     SYMBOLS_TOOL, base_flags, user_flags, probe_flags,
-                    include_dirs, objcopy, auto_watch, out_array,
+                    include_dirs, auto_watch, out_array,
                     out_owner, img_shape,
                     reporter, log_lock, logs, proj,
                     exclude_names, max_elems)
@@ -2816,29 +2640,36 @@ def do_doctor(args: argparse.Namespace, reporter: Reporter,
             "装完即可编译），或用 --toolchain <根目录> 指定，"
             "或把它的 bin 目录加进 PATH。")
 
-    if tc.objdump and tc.objdump_is_binutils:
-        say("  ✅ objdump    : %s" % tc.objdump)
-        say("     版本       : %s（binutils，支持 --dwarf=info）"
-            % (tc.objdump_version or "未知"))
-    elif tc.objdump:
-        say("  ⚠️  objdump    : %s" % tc.objdump)
-        say("     版本       : %s" % (tc.objdump_version or "未知"))
-        say("     ★ 这不是 binutils 的 objdump。")
-        warnings.append(
-            "objdump 不是 binutils 版本（看起来是 LLVM 的）。自动符号发现依赖 "
-            "`objdump --dwarf=info`，而 LLVM 21 已移除该选项"
-            "（llvm-objdump 只支持 --dwarf=frames）。"
-            "后果：变量面板永远是空的，而且【不会报任何错】。"
-            "下一步：安装 MinGW-w64（提供 binutils），"
-            "或把 binutils 的 bin 目录加进 PATH；也可以加 --no-watch 显式跳过。")
+    if tc.python:
+        say("  ✅ python     : %s" % tc.python)
     else:
-        say("  ❌ objdump    : 未找到")
+        say("  ❌ python     : 未找到")
+        errors.append(
+            "找不到用于运行 tools/scut_symbols.py 的 Python 解释器。"
+            "下一步：安装 Python 3.7+，或用配置面板的「工具链 › Python 解释器路径」"
+            "指定它。")
+
+    # ---- 自动符号发现：端到端自检 ----------------------------------------
+    #
+    # ★ 为什么必须真跑一遍，而不是查某个工具在不在：
+    #   这一环坏了【不会报错】—— 构建照常成功，只是变量面板永远空的。
+    #   "都装好了"和"面板空的"在报告上必须能分开，否则这段自检没有意义。
+    #   现在它只依赖 clang + python（不依赖任何额外的工具程序），
+    #   所以这条绿了就是真的能用。
+    probe = _probe_symbol_discovery(tc.cc, tc.python,
+                                    os.path.join(SCUT_TOOL_ROOT, "tools",
+                                                 "scut_symbols.py"))
+    if probe is True:
+        say("  ✅ 变量发现   : 正常（读 DWARF，无需 objdump）")
+    elif probe is None:
+        say("  ⚠️  变量发现   : 无法自检（缺编译器或 Python，见上）")
+    else:
+        say("  ❌ 变量发现   : 自检失败")
         warnings.append(
-            "找不到 objdump。自动符号发现依赖 `objdump --dwarf=info`；"
-            "这不是 LLVM 能提供的（LLVM 21 已移除 --dwarf=info），"
-            "必须用 binutils 的版本。"
-            "下一步：安装 MinGW-w64 或把 binutils 加进 PATH。"
-            "临时绕过：加 --no-watch 仍可正常构建。")
+            "自动符号发现自检没通过：能编译，但读不出变量。\n"
+            "    影响：算法能正常编译运行，但 IDE 变量面板会是空的。\n"
+            "    下一步：确认 Python 是 3.7+，然后重跑本自检；"
+            "仍失败请把本段报告反馈（它不含源码正文）。")
 
     if tc.lldb_dap:
         say("  ✅ lldb-dap   : %s" % tc.lldb_dap)
@@ -2848,15 +2679,6 @@ def do_doctor(args: argparse.Namespace, reporter: Reporter,
         say("  ✅ clangd     : %s" % tc.clangd)
     else:
         say("  ⚠️  clangd     : 未找到（补全/跳转将降级，不影响仿真）")
-
-    if tc.python:
-        say("  ✅ python     : %s" % tc.python)
-    else:
-        say("  ❌ python     : 未找到")
-        errors.append(
-            "找不到用于运行 tools/scut_symbols.py 的 Python 解释器。"
-            "下一步：安装 Python 3.7+，或用配置面板的「工具链 › Python 解释器路径」"
-            "指定它。")
 
     for w in tc.warnings:
         # 上面已经用更具体的话说过一遍了，这里去重

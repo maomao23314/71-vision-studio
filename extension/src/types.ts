@@ -13,7 +13,7 @@
  * ========================================================================== */
 
 export interface ToolInfo {
-    /** 工具名，如 'clang' / 'objdump' / 'lldb-dap' / 'python' */
+    /** 工具名，如 'clang' / 'lldb-dap' / 'python' */
     name: string;
     /** 绝对路径 */
     path: string;
@@ -31,14 +31,8 @@ export interface Toolchain {
     /** 链接器 */
     ld: string;
     /**
-     * binutils 的 objdump。
-     *
-     * ★ 必须来自 binutils，【不能】用 LLVM 的 llvm-objdump：
-     *   实测 LLVM 21 已移除 --dwarf=info（只支持 =frames），
-     *   自动符号发现会直接失败。
+     * 调试适配器 lldb-dap（缺省时调试功能降级）
      */
-    objdump: string;
-    /** 调试适配器 lldb-dap（缺省时调试功能降级） */
     lldbDap?: string;
     /** 语言服务 clangd（可选：只做发现与建议，插件自己不起语言服务） */
     clangd?: string;

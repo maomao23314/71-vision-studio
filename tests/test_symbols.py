@@ -12,8 +12,14 @@ test_symbols.py -- scut_symbols.py 的回归测试。
     2. 一维 / 二维 / 三维数组的维度与元素数
     3. 结构体 / 嵌套结构体 / 结构体数组 / 联合 / 枚举 / 指针 / const / static
     4. ★ 函数内 static 局部变量【必须被排除】（陷阱 P-3）
-    5. ★ objdump 间接字符串前缀必须被剥离（陷阱 P-2，gcc/clang 一致性）
+    5. ★ DWARF 4 与 DWARF 5 必须给出【完全相同】的结果
+       （v5 的字符串走 .debug_str_offsets、地址走 .debug_addr，
+        两条路是完全不同的代码，历史上各自都错位过一次）
     6. 生成文件必须能被编译器接受
+
+★ 本测试【不依赖 objdump】。变量发现是纯 Python 读 .debug_info 的字节，
+  所以"机器上装没装 binutils"不会改变这条测试的结果 ——
+  这一点本身就是被测的性质之一。
 
 退出码 0 = 全部通过。
 """
@@ -119,26 +125,35 @@ def parse_generated(path):
     return found
 
 
-def check(cc, objdump, tmp, label, failures):
-    print('\n=== [%s] 探针编译 ===' % label)
+def check(cc, tmp, label, failures, dwarf=None):
+    """跑一轮完整的「探针编译 → 生成 → 校核 → 生成的 C 能编过」。
+
+    dwarf 给 '4' / '5' 时显式指定 -gdwarf-N；给 None 时用编译器默认。
+    """
+    tag = label + ('/dwarf%s' % dwarf if dwarf else '')
+    print('\n=== [%s] 探针编译 ===' % tag)
     src = os.path.join(tmp, 'fixtures.c')
     shutil.copyfile(FIXT, src)
-    obj = os.path.join(tmp, 'fixtures.o')
-    r = run([cc, '-std=c11', '-g', '-O0', '-c', src, '-o', obj])
+    obj = os.path.join(tmp, 'fixtures_%s.o' % tag.replace('/', '_'))
+    cmd = [cc, '-std=c11', '-g', '-O0']
+    if dwarf:
+        cmd.append('-gdwarf-%s' % dwarf)
+    cmd += ['-c', src, '-o', obj]
+    r = run(cmd)
     if r.returncode != 0:
         print('  ❌ 编译失败:\n%s' % r.stderr[:600])
-        failures.append('%s: fixture compile failed' % label)
-        return
+        failures.append('%s: fixture compile failed' % tag)
+        return None
     print('  ✅ %s' % os.path.basename(cc))
 
-    out_c = os.path.join(tmp, 'fixtures.wrapped.c')
-    out_j = os.path.join(tmp, 'fixtures.vars.json')
+    out_c = os.path.join(tmp, 'fixtures_%s.wrapped.c' % tag.replace('/', '_'))
+    out_j = os.path.join(tmp, 'fixtures_%s.vars.json' % tag.replace('/', '_'))
     r = run([sys.executable, TOOL, '--obj', obj, '--src', 'fixtures.c',
-             '--out-c', out_c, '--out-json', out_j, '--objdump', objdump])
+             '--out-c', out_c, '--out-json', out_j])
     if r.returncode != 0:
-        print('  ❌ 生成失败:\n%s' % r.stderr[:600])
-        failures.append('%s: generator failed' % label)
-        return
+        print('  ❌ 生成失败:\n%s' % (r.stdout + r.stderr)[:600])
+        failures.append('%s: generator failed' % tag)
+        return None
 
     got = parse_generated(out_c)
     print('  发现 %d 个变量' % len(got))
@@ -147,7 +162,7 @@ def check(cc, objdump, tmp, label, failures):
     missing = [k for k in EXPECT if k not in got]
     if missing:
         print('  ❌ 漏发现: %s' % ', '.join(sorted(missing)))
-        failures.append('%s: missing %d' % (label, len(missing)))
+        failures.append('%s: missing %d' % (tag, len(missing)))
     else:
         print('  ✅ 全部 %d 个期望变量均已发现' % len(EXPECT))
 
@@ -164,7 +179,7 @@ def check(cc, objdump, tmp, label, failures):
         print('  ❌ 类型/维度错误:')
         for w in wrong:
             print('       %s' % w)
-        failures.append('%s: %d type mismatches' % (label, len(wrong)))
+        failures.append('%s: %d type mismatches' % (tag, len(wrong)))
     else:
         print('  ✅ 类型、维度、元素数全部正确')
 
@@ -172,7 +187,7 @@ def check(cc, objdump, tmp, label, failures):
     local = [n for n in got if n.startswith('fixture_local_static')]
     if local:
         print('  ❌ 未排除函数内 static 局部变量: %s' % local)
-        failures.append('%s: local static leaked' % label)
+        failures.append('%s: local static leaked' % tag)
     else:
         print('  ✅ 函数内 static 局部变量已正确排除（陷阱 P-3）')
 
@@ -187,7 +202,7 @@ def check(cc, objdump, tmp, label, failures):
         print('  ✅ 包装单元顺序正确（#include → #line → constructor）')
     else:
         print('  ❌ 包装单元结构不对: inc=%d line=%d ctor=%d' % (i_inc, i_line, i_ctor))
-        failures.append('%s: wrapper structure' % label)
+        failures.append('%s: wrapper structure' % tag)
 
     # --- 生成的 C 必须可编译 ---
     inc = os.path.join(ROOT, 'core', 'include')
@@ -196,7 +211,7 @@ def check(cc, objdump, tmp, label, failures):
              '-c', out_c, '-o', os.path.join(tmp, 'wrapped.o')])
     if r.returncode != 0:
         print('  ❌ 生成的包装单元编译失败:\n%s' % r.stderr[:600])
-        failures.append('%s: generated C does not compile' % label)
+        failures.append('%s: generated C does not compile' % tag)
     else:
         w = [l for l in (r.stderr or '').splitlines() if 'warning' in l.lower()]
         print('  ✅ 生成的包装单元编译通过%s'
@@ -207,20 +222,26 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--cc', default='gcc')
     ap.add_argument('--also', default='', help='第二个编译器（交叉验证）')
-    ap.add_argument('--objdump', default='objdump')
     args = ap.parse_args()
 
-    for tool in (args.cc, args.objdump, 'objdump'):
+    for tool in ([args.cc] + ([args.also] if args.also else [])):
         if shutil.which(tool) is None and not os.path.isfile(tool):
-            print('❌ 找不到工具: %s' % tool)
+            print('❌ 找不到编译器: %s' % tool)
             return 2
 
     failures = []
+    results = {}
     tmp = tempfile.mkdtemp(prefix='scut_test_')
     try:
-        check(args.cc, args.objdump, tmp, 'primary', failures)
-        if args.also:
-            check(args.also, args.objdump, tmp, 'cross', failures)
+        # ★ 每台编译器都跑 DWARF 4 与 DWARF 5 各一遍。
+        #   这不是"多测一点"，而是这两条是完全不同的解析路径：
+        #   v5 的字符串在 .debug_str_offsets、地址在 .debug_addr，
+        #   两处各自错过一次，表现都是"变量少了但没人发现"。
+        for cc, label in [(args.cc, 'primary')] + \
+                         ([(args.also, 'cross')] if args.also else []):
+            for dw in ('4', '5'):
+                results[(label, dw)] = check(cc, tmp, label, failures,
+                                             dwarf=dw)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

@@ -100,8 +100,13 @@ const ITEMS = [
         to: 'sdk/backends/headless/scut_headless_main.c',
         kind: 'file',
     },
-    { from: 'tools/scut_build.py', to: 'sdk/tools/scut_build.py', kind: 'file' },
-    { from: 'tools/scut_symbols.py', to: 'sdk/tools/scut_symbols.py', kind: 'file' },
+    // ★ tools/ 整目录同步，而不是逐个文件列。
+    //   原先这里是两条 `kind: 'file'` 的显式条目（scut_build.py /
+    //   scut_symbols.py）。加了第三个脚本（scut_dwarf.py）之后它们没跟着改，
+    //   于是 vsix 里的 sdk/tools/ 少了那一个文件 —— 装上去的表现是
+    //   "变量面板永远是空的"，而本地仓库里跑测试全绿。列文件就等于
+    //   每次新增都要记得回来改两处，早晚漏一次。
+    { from: 'tools', to: 'sdk/tools', kind: 'dir' },
     // 工程模板（同样必须随 .vsix 分发，否则「新建工程」按钮是坏的）
     { from: 'templates/starter', to: 'templates/starter', kind: 'dir' },
     { from: 'templates/README-pic.txt', to: 'templates/README-pic.txt', kind: 'file' },
@@ -125,17 +130,30 @@ const REQUIRED = [
     'sdk/backends/headless/scut_headless_main.c',
     'sdk/tools/scut_build.py',
     'sdk/tools/scut_symbols.py',
+    // ★ scut_symbols.py 现在 import 同目录的 scut_dwarf，少了它生成器
+    //   一启动就 ImportError —— 构建会退化成"没有变量清单"，
+    //   而且是在用户的机器上才发现。
+    'sdk/tools/scut_dwarf.py',
     'templates/starter/scut_project.json',
     'templates/starter/code/camera.c',
     'templates/README-pic.txt',
 ];
 
-/** 递归收集一个目录下的全部文件（返回相对该目录的路径，正斜杠分隔）。 */
+/**
+ * 递归收集一个目录下的全部文件（返回相对该目录的路径，正斜杠分隔）。
+ *
+ * ★ 跳过 `__pycache__`：`tools/` 是整目录同步的，而跑过一次 Python 之后
+ *   那里就会冒出 `.pyc`。把它们打进 vsix 毫无意义，还会让"副本与源不一致"
+ *   这条自检在每个人的机器上结果都不一样（.pyc 里带着绝对路径与时间戳）。
+ */
 function walkFiles(dir, base = dir) {
     const out = [];
     for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
         const abs = path.join(dir, entry.name);
         if (entry.isDirectory()) {
+            if (entry.name === '__pycache__') {
+                continue;
+            }
             out.push(...walkFiles(abs, base));
         } else if (entry.isFile()) {
             out.push(path.relative(base, abs).replace(/\\/g, '/'));

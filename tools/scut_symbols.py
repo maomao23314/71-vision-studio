@@ -28,23 +28,26 @@ scut_symbols.py -- 从 DWARF 自动发现用户代码的全局变量，生成 Wa
     3) clang -g -O0 -c user.wrapped.c -o user.o            # 真正的目标文件
     4) 链接
 
-★ 上面写的是 clang 而不是 gcc：本环境的编译器固定为 clang（LLVM-MinGW），
-  它的 DWARF 输出与 binutils objdump 的组合是实测过的通路。
-  这里原先写 gcc，会让人以为换 gcc 也行 ——
-  而 objdump 对两者的间接字符串格式并不相同。
+★ DWARF 由 scut_dwarf.py 直接读字节，不经过任何外部命令。
+  所以 clang / gcc / 以后的编译器都一样能读，不再要求机器上装着
+  哪一家的 objdump。
 
-★ 本脚本【不设版本闸门】：它只有 argparse/json/re/subprocess/sys/collections
-  五个标准库 import，语法在 Python 3.6 上也能跑。
+★ 本脚本【不设版本闸门】：它只 import 标准库（argparse/json/re/sys 与同目录的
+  scut_dwarf），语法在 Python 3.6 上也能跑。
   调用方 scut_build.py 有 3.7 闸门（因为那边用了 __future__ annotations），
   而且它会把【同一个解释器】同时用于两个脚本 —— 所以实际下限由那边决定，
   这里重复设一道闸门只会制造"两个脚本下限不一致"的困惑。
 """
 import argparse
 import json
+import os
 import re
-import subprocess
 import sys
-from collections import OrderedDict
+
+# ★ 同目录的兄弟模块。用 sys.path 而不是相对导入：本脚本是被
+#   `python tools/scut_symbols.py` 直接当文件跑的，没有包上下文。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import scut_dwarf as dwarf  # noqa: E402  （必须在 sys.path 调整之后）
 
 # ---- DWARF 基础类型 -> SCUT 渲染类型 ----------------------------------------
 BASE_TYPES = {
@@ -66,45 +69,26 @@ BASE_TYPES = {
 }
 
 # ---------------------------------------------------------------------------
-# DIE 行匹配
+# 从 DWARF 到「这是什么类型的变量」
 #
-# 目标格式（objdump --dwarf=info）：
-#      <depth><offset>: Abbrev Number: N (DW_TAG_xxx)
-#   例： ` <1><2a>: Abbrev Number: 2 (DW_TAG_variable)`
-#
-# ★ 三个必须容忍的差异（任何一个不兼容都会导致【一个 DIE 都匹配不上】，
-#   表现为「构建成功、变量面板永远为空」——最严重的一类静默失败）：
-#
-#   1) 偏移的补零写法。binutils 习惯渲染成 `<2a>`，但某些版本/某些产物
-#      会渲染成 `<0000002a>`。都用 [0-9a-f]+ 就能同时吃下。
-#   2) 行首空格数。binutils 是 1 个空格 + `<depth>`；不同版本/不同平台
-#      可能是 2 个。用 \s* 而不是写死 `^ `。
-#   3) Abbrev Number 与括号之间的空白。宽松处理。
-#
-#   之前的版本写死了 `^ <...` 和不定长十六进制，只要 objdump 换一种渲染
-#   就整条链路失效 —— 而失败是静默的（0 个变量，返回码仍为 0）。
-#   所以这里刻意放宽，把「格式差异」这类环境噪音从失败原因里彻底排除。
-#   ★ 必须带 re.MULTILINE：
-#     同一个正则有两种用法 —— parse_dwarf() 逐行 match()，以及
-#     main() 里对整个输出 search() 做"有没有解析到任何 DIE"的自检。
-#     没有 MULTILINE 时 `^` 只匹配字符串开头，于是 search() 永远为假，
-#     自检会把【正常】的输出误判成失败。这个 bug 被回归测试当场抓住。
-DIE_RE = re.compile(
-    r'^\s*<(\d+)><([0-9a-fA-F]+)>:\s*Abbrev Number:\s*\d+\s*\((DW_TAG_\w+)\)',
-    re.MULTILINE)
-# 属性行同理：`    <2a>   DW_AT_name   : ...`，偏移可能补零。
-ATTR_RE = re.compile(r'^\s*<[0-9a-fA-F]+>\s+(DW_AT_\w+)\s*:\s*(.*)$',
-                     re.MULTILINE)
+# ★ 这一段只关心【怎么把内存渲染成数值】，读字节的活在 scut_dwarf 里。
+# ---------------------------------------------------------------------------
 
-# objdump 每行 DIE 的第一个 <> 数字就是【树深度】：
-#     <0> = DW_TAG_compile_unit
-#     <1> = 文件作用域声明（全局变量、函数）
-#     <2> = 函数内局部变量 / 结构体成员
-# ★ 必须只取 depth == 1 的变量，否则会把【函数内的 static 局部变量】
-#   也当成全局变量 —— 它在 DWARF 里有绝对地址，看起来完全合法，
-#   但在文件作用域并不可见，生成的包装单元会编译失败：
-#       error: 'c' undeclared (first use in this function)
+# 文件作用域的变量在 DWARF 树里的深度。
+#     depth 0 = 编译单元根
+#     depth 1 = 文件作用域的声明（全局变量、函数）
+#     depth 2 = 函数内的局部变量 / 结构体成员
+# ★ 只取 depth == 1：函数内的 static 局部变量在 DWARF 里【同样有绝对地址】，
+#   看起来完全合法，但它在文件作用域并不可见，生成的包装单元会编译失败
+#   （error: 'xxx' undeclared）。
 FILE_SCOPE_DEPTH = 1
+
+# DWARF 的基本类型编码（DW_ATE_*）。只用来判断"有符号还是无符号"。
+DW_ATE_BOOLEAN = 0x02
+DW_ATE_SIGNED = 0x05
+DW_ATE_SIGNED_CHAR = 0x06
+DW_ATE_UNSIGNED = 0x07
+DW_ATE_UNSIGNED_CHAR = 0x08
 
 # 图像尺寸的【展示用】副本，由 --image-size 传入（格式 "188x120"）。
 #
@@ -116,17 +100,6 @@ FILE_SCOPE_DEPTH = 1
 #   它只用于错误信息，不参与任何生成逻辑，所以缺省值是安全的。
 IMAGE_SHAPE = "由工程配置决定的整幅图像尺寸"
 
-# objdump 对较长的字符串用间接引用，形如：
-#     DW_AT_name : (indirect string, offset: 0xa4): int
-# ★ 必须剥掉这个前缀，否则 'int' 会被当成未知类型名而退化为「按字节数猜」，
-#   表现为 gcc 下是 I32、clang 下变成 U32 —— 符号性悄悄丢失，且完全静默。
-INDIRECT_RE = re.compile(r'^\(indirect string, offset: 0x[0-9a-f]+\):\s*')
-
-
-def clean_name(s):
-    """剥掉 objdump 的 (indirect string, offset: ...) 前缀与首尾空白。"""
-    return INDIRECT_RE.sub('', (s or '').strip()).strip()
-
 
 class CopyShapeError(Exception):
     """结果图数组的形状不对（不是数组）。
@@ -137,48 +110,35 @@ class CopyShapeError(Exception):
       后者是脚本 bug，要给调用栈。两类问题的措辞完全不同。"""
 
 
-class Die:
-    __slots__ = ('off', 'tag', 'attrs', 'depth')
+def _children(dies, die):
+    """直接子节点（按 DWARF 里的出现顺序）。
 
-    def __init__(self, off, tag, depth=0):
-        self.off, self.tag, self.attrs, self.depth = off, tag, {}, depth
-
-    def __repr__(self):
-        return '<Die d%d %s %s>' % (self.depth, self.off, self.tag)
-
-
-def parse_dwarf(text):
-    """解析 objdump --dwarf=info 的文本输出为 {offset: Die}。"""
-    dies = OrderedDict()
-    cur = None
-    for raw in text.splitlines():
-        m = DIE_RE.match(raw)
-        if m:
-            cur = Die(m.group(2), m.group(3), int(m.group(1)))
-            dies[cur.off] = cur
-            continue
-        if cur is None:
-            continue
-        a = ATTR_RE.match(raw)
-        if a:
-            key, val = a.group(1), a.group(2).strip()
-            if key == 'DW_AT_name':
-                val = clean_name(val)
-            cur.attrs.setdefault(key, val)
-    return dies
+    ★ 用 parent 指针而不是"按偏移相邻"去推父子关系：父子关系是
+      DWARF 用 NULL 条目显式表达的，按相邻推会在兄弟节点自己也带
+      子节点时错位。"""
+    return [d for d in dies.values() if d.parent == die.off]
 
 
-def off_of(ref):
-    m = re.search(r'<0x([0-9a-f]+)>', ref or '')
-    return m.group(1) if m else None
+def _subrange_count(d):
+    """一个 DW_TAG_subrange_type 表示多少元素。算不出来返回 None。
+
+    ★ 上界可能是"引用到一个常量 DIE"（gcc 对 VLA 就这么写），
+      这时算不出固定长度 —— 返回 None 表示"这一维未知"，
+      由调用方决定怎么降级，不要拿个猜出来的数糊弄过去。"""
+    ub = dwarf.attr_int(d, 'DW_AT_upper_bound')
+    if ub is not None:
+        lb = dwarf.attr_int(d, 'DW_AT_lower_bound', 0) or 0
+        return ub - lb + 1
+    cnt = dwarf.attr_int(d, 'DW_AT_count')
+    if cnt is not None:
+        return cnt
+    return None
 
 
 def _collect_dims(dies, arr_die, base):
     """
-    收集数组维度。
-
-    objdump 的文本输出不显式给出父子关系，但 DW_TAG_subrange_type
-    总是【紧跟】在其 array_type 之后、且缩进更深。据此按顺序收集。
+    收集数组维度。从 arr_die 顺着子节点找 DW_TAG_subrange_type，
+    每个子节点贡献一维。
 
     ★★ dims 必须【拼接】而不是覆盖（第 12 轮评审修复）★★
 
@@ -206,22 +166,13 @@ def _collect_dims(dies, arr_die, base):
       也和朴素二维数组 a[H][W] 的 [H, W] 一致 ——
       下游 `dims[0]` 当行数、`dims[1]` 当列数的约定才不会错。
     """
-    keys = list(dies.keys())
-    try:
-        i = keys.index(arr_die.off) + 1
-    except ValueError:
-        return base
     dims = []
-    while i < len(keys):
-        d = dies[keys[i]]
+    for d in _children(dies, arr_die):
         if d.tag != 'DW_TAG_subrange_type':
-            break
-        ub, cnt = d.attrs.get('DW_AT_upper_bound'), d.attrs.get('DW_AT_count')
-        if ub is not None:
-            dims.append(int(ub) + 1)
-        elif cnt is not None:
-            dims.append(int(cnt))
-        i += 1
+            continue
+        n = _subrange_count(d)
+        if n is not None:
+            dims.append(n)
     out = dict(base)
     # ★ 外层 + 内层。内层是数组 typedef 时才非空。
     merged = dims + list(base.get('dims') or [])
@@ -243,32 +194,35 @@ def resolve_type(dies, ref, depth=0):
         total      总元素数
         is_struct  是否结构体/联合/类
         ptr        是否指针
+
+    ref 是 scut_dwarf 给出的偏移号（dwarf.attr_ref 的返回值）。
     """
     if depth > 24:
         return None
-    off = off_of(ref)
-    if not off or off not in dies:
+    if not ref or ref not in dies:
         return None
-    die = dies[off]
+    die = dies[ref]
 
     if die.tag == 'DW_TAG_typedef':
-        return resolve_type(dies, die.attrs.get('DW_AT_type'), depth + 1)
+        return resolve_type(dies, dwarf.attr_ref(die, 'DW_AT_type'), depth + 1)
 
-    if die.tag == 'DW_TAG_pointer_type':
+    if die.tag in ('DW_TAG_pointer_type', 'DW_TAG_reference_type',
+                   'DW_TAG_rvalue_reference_type'):
         return dict(kind='SCUT_T_PTR', elem_bytes=8, dims=[], total=1,
                     is_struct=False, ptr=True)
 
     if die.tag == 'DW_TAG_base_type':
-        name = clean_name(die.attrs.get('DW_AT_name'))
-        size = int(die.attrs.get('DW_AT_byte_size', '0') or 0)
+        name = dwarf.attr_str(die, 'DW_AT_name')
+        size = dwarf.attr_int(die, 'DW_AT_byte_size', 0) or 0
         if name in BASE_TYPES:
             k, b = BASE_TYPES[name]
             return dict(kind=k, elem_bytes=b, dims=[], total=1,
                         is_struct=False, ptr=False)
-        # 未知基础类型：优先用 encoding 判断符号性，再按字节数猜，
-        # 避免把 signed 误判成 unsigned。
-        enc = (die.attrs.get('DW_AT_encoding') or '').lower()
-        unsigned = 'unsigned' in enc
+        # 未知基础类型：先看 encoding 判符号性，再按字节数猜 ——
+        # 否则会把 signed 误判成 unsigned，那是静默错值。
+        enc = dwarf.attr_int(die, 'DW_AT_encoding', 0) or 0
+        unsigned = enc in (DW_ATE_UNSIGNED, DW_ATE_UNSIGNED_CHAR,
+                           DW_ATE_BOOLEAN)
         guess = {
             (1, False): 'SCUT_T_I8',  (1, True): 'SCUT_T_U8',
             (2, False): 'SCUT_T_I16', (2, True): 'SCUT_T_U16',
@@ -280,7 +234,7 @@ def resolve_type(dies, ref, depth=0):
                     is_struct=False, ptr=False)
 
     if die.tag == 'DW_TAG_enumeration_type':
-        size = int(die.attrs.get('DW_AT_byte_size', '0') or 4)
+        size = dwarf.attr_int(die, 'DW_AT_byte_size', 0) or 4
         return dict(kind='SCUT_T_ENUM', elem_bytes=size, dims=[], total=1,
                     is_struct=False, ptr=False)
 
@@ -289,20 +243,18 @@ def resolve_type(dies, ref, depth=0):
     #   DW_AT_name / DW_AT_byte_size，只有 DW_AT_type 指向真实类型。
     #   早期版本未处理这几个 tag，导致所有 const 变量被静默丢弃
     #   （表现为「面板里看不到 const 数组」），且不报任何错。
-    #   const / volatile / restrict / _Atomic 在语义上都只是限定符，
-    #   对「如何把内存渲染成数值」毫无影响，因此直接穿透。
     if die.tag in ('DW_TAG_const_type', 'DW_TAG_volatile_type',
                    'DW_TAG_restrict_type', 'DW_TAG_atomic_type'):
-        return resolve_type(dies, die.attrs.get('DW_AT_type'), depth + 1)
+        return resolve_type(dies, dwarf.attr_ref(die, 'DW_AT_type'), depth + 1)
 
     if die.tag in ('DW_TAG_structure_type', 'DW_TAG_union_type',
                    'DW_TAG_class_type'):
-        size = int(die.attrs.get('DW_AT_byte_size', '0') or 0)
+        size = dwarf.attr_int(die, 'DW_AT_byte_size', 0) or 0
         return dict(kind='SCUT_T_STRUCT', elem_bytes=size or 1, dims=[],
                     total=1, is_struct=True, ptr=False)
 
     if die.tag == 'DW_TAG_array_type':
-        base = resolve_type(dies, die.attrs.get('DW_AT_type'), depth + 1)
+        base = resolve_type(dies, dwarf.attr_ref(die, 'DW_AT_type'), depth + 1)
         if base is None:
             return None
         return _collect_dims(dies, die, base)
@@ -320,22 +272,22 @@ def collect_variables(dies):
         # 它们在 DWARF 里同样有绝对地址，但生成的包装单元引用不到它们。
         if die.depth != FILE_SCOPE_DEPTH:
             continue
-        name = clean_name(die.attrs.get('DW_AT_name'))
+        name = dwarf.attr_str(die, 'DW_AT_name')
         if not name or not re.match(r'^[A-Za-z_]\w*$', name):
             continue
         # 必须有 DW_AT_location 且是绝对地址 —— 这样才是实例化对象，
         # 而不是仅有声明的 extern 引用（那些注册了也没有意义）。
-        loc = die.attrs.get('DW_AT_location')
-        if not loc or ('DW_OP_addr' not in loc and 'DW_OP_addrx' not in loc):
+        if not dwarf.has_absolute_address(die):
             continue
-        ty = resolve_type(dies, die.attrs.get('DW_AT_type'))
+        ty = resolve_type(dies, dwarf.attr_ref(die, 'DW_AT_type'))
         if ty is None:
             continue
         out.append(dict(
             name=name, kind=ty['kind'], dims=ty['dims'], total=ty['total'],
             elem_bytes=ty['elem_bytes'], is_struct=ty['is_struct'],
-            ptr=ty['ptr'], external=die.attrs.get('DW_AT_external') == '1',
-            decl_line=die.attrs.get('DW_AT_decl_line'),
+            ptr=ty['ptr'],
+            external=dwarf.attr_int(die, 'DW_AT_external', 0) == 1,
+            decl_line=dwarf.attr_int(die, 'DW_AT_decl_line'),
         ))
     return out
 
@@ -617,7 +569,10 @@ def main():
                          'SCUT_Watch/SCUT_WATCH_SCALAR 调用；留空则退回 --src')
     ap.add_argument('--out-c', required=True, help='输出的包装 .c 文件')
     ap.add_argument('--out-json', help='输出的变量清单 JSON')
-    ap.add_argument('--objdump', default='objdump')
+    # ★ 兼容参数：旧版靠 objdump 读 DWARF，现在不用了。
+    #   保留它是为了让还在传这个参数的调用方不报「不认识的参数」——
+    #   构建脚本、插件、用户自己写的脚本都可能带着它。传进来的值会被忽略。
+    ap.add_argument('--objdump', default='', help=argparse.SUPPRESS)
     ap.add_argument('--exclude', default='', help='逗号分隔的黑名单')
     ap.add_argument('--max-elems', type=int, default=0,
                     help='元素数超过该值的变量不注册 (0=不限)')
@@ -633,44 +588,38 @@ def main():
         global IMAGE_SHAPE
         IMAGE_SHAPE = args.image_size.replace('x', ' 行 × ') + " 列"
 
-    r = subprocess.run([args.objdump, '--dwarf=info', args.obj],
-                       capture_output=True, text=True, errors='replace')
-    if r.returncode != 0:
-        print('[scut_symbols] objdump 失败: %s' % r.stderr[:300], file=sys.stderr)
+    # ---- 读 DWARF（纯 Python，不调任何外部命令） --------------------------
+    #
+    # ★ 静默失败检测：读不出任何 DIE 时【明确报错】。
+    #   这是本项目最危险的一类失败：构建整体成功，用户以为一切正常，
+    #   只是变量面板永远空的。已知成因：
+    #     1) 探针编译没带 -g（没调试信息）；
+    #     2) 调试信息是 CodeView 而不是 DWARF（MSVC 的 cl.exe 就是）；
+    #     3) 目标文件被 strip 过。
+    #   三种都读不出 DIE，但给用户的话完全不同，所以按证据分开说。
+    try:
+        reader, dies = dwarf.load_die_tree(args.obj)
+    except dwarf.DwarfError as exc:
+        print('[scut_symbols] 读不了调试信息：%s' % exc, file=sys.stderr)
         return 2
 
-    # -----------------------------------------------------------------------
-    # ★ 静默失败检测：命令成功、但一个 DIE 都没解析出来
-    #
-    # 这是本项目最危险的一类失败：构建整体成功，用户以为一切正常，
-    # 只是变量面板永远空的。已知两种成因：
-    #
-    #   1) DWARF 版本不被 objdump 支持（实测：clang/llvm-mingw 显式加
-    #      -gdwarf-5 时，binutils 2.30/2.37 的 objdump 输出里
-    #      DW_TAG_variable 条目一个都没有，退出码仍是 0）
-    #   2) objdump 的渲染格式与解析正则不符（偏移补零、缩进差异等）
-    #
-    # 两种情况都无法从返回码区分，所以这里主动检查并【明确报错】。
-    # 注意：完全不报错也可以"工作"（生成一个没有变量的文件），
-    # 但那正是我们要消灭的失败模式，所以宁可吵闹。
-    # -----------------------------------------------------------------------
-    if not DIE_RE.search(r.stdout):
-        has_debug = '.debug_info' in r.stdout or 'DW_TAG_' in r.stdout
-        hint = (
-            "objdump 没有输出任何可解析的 DWARF DIE。\n"
-            "  可能原因一：调试信息版本不被 objdump 支持。\n"
-            "    实测 clang 显式使用 -gdwarf-5 时，binutils 的 objdump\n"
-            "    会输出空章节且退出码为 0。\n"
-            "    解决办法：去掉 -gdwarf-5（clang 21 默认就是 DWARF 4），\n"
-            "    或换用支持 DWARF 5 的 binutils。\n"
-            "  可能原因二：objdump 的输出格式与解析器不匹配。\n"
-            "    请运行 `doctor` 做功能探测。\n"
-            "  已确认：该目标文件%s调试信息。"
-            % ("包含" if has_debug else "不包含"))
+    if not dies:
+        if not reader.ok():
+            hint = ("目标文件里没有 DWARF 调试信息（.debug_info 段不存在）。\n"
+                    "  最常见的原因：探针编译没带 -g。\n"
+                    "  已确认：%s" % args.obj)
+            if '.debug$S' in reader._obj.sections:
+                hint += ("\n  另外：这个文件里是 CodeView 调试信息（.debug$S），"
+                         "\n    那是 MSVC 的格式，不是 DWARF —— "
+                         "请用 clang/mingw 的编译器。")
+        else:
+            hint = ("目标文件里有调试信息，但解析不出任何条目。\n"
+                    "  说明：这是 scut_dwarf 的兼容性缺口，不是你的代码问题。\n"
+                    "  请把 %s 保留下来反馈（它不含源码正文）。" % args.obj)
         print('[scut_symbols] %s' % hint, file=sys.stderr)
         return 3
 
-    variables = collect_variables(parse_dwarf(r.stdout))
+    variables = collect_variables(dies)
 
     # ★★ 结果图数组要先单独留下来（豁免于下面两个过滤器）★★
     #

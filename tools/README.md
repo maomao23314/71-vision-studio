@@ -121,14 +121,17 @@ static void scut_autoreg(void)
 |---|---|
 | **路径含空格与中文** | 全程用列表形式调用进程，**绝不**拼接命令字符串、**绝不** `shell=True`。这是"能用"的唯一可靠做法 |
 | **工程用 `config.h`，而 `bind` 里 `#include "scut_config.h"`** | `bind` 的 `__has_include` 会依次找 `scut_config.h`、`config.h`，两种命名都能编。旧工程不需要改 |
-| `objdump` 是 LLVM 的 `llvm-objdump` | **警告并自动关闭符号发现**（仍能构建）。原因：自动发现依赖 `objdump --dwarf=info`，而 **LLVM 21 已移除该选项** |
+| 机器上没装 binutils / 只装了 `llvm-objdump` | **无关**。变量发现读的是 `.debug_info` 的字节，不走任何外部命令 |
 | 生成文件写到一半被插件读到 | 先写同盘临时文件，再 `os.replace` **原子替换**。绝不会留下半截 JSON |
 | 编译出错 | 解析成结构化诊断（文件/行/列/严重级），并**把第一个错误单独醒目地讲一遍** |
 
-关于 `objdump` 这条要多说一句，因为它是个**静默失败**：LLVM 21 的 `llvm-objdump` 只支持 `--dwarf=frames`，用它会拿不到任何变量，而构建**照常成功**。所以：
+关于变量发现要多说一句，因为它坏起来是**静默失败**（构建照常成功，面板却永远是空的）：
 
-> **自动符号发现必须用 binutils 的 `objdump`**（例如 MinGW-w64 里的那个），不能用 `llvm-objdump`。
-> `doctor` 会真的拿一个小目标文件跑一遍来做**功能探测**，而不是只看版本号。
+> 变量发现现在由 `tools/scut_dwarf.py` 直接读 DWARF 的二进制（只用 zlib 和标准库）。
+> 早先那条 `objdump --dwarf=info` + 正则的路已经删掉了 —— 它要求机器上
+> 恰好装着一份**能读当前 DWARF 版本**的 binutils，而这个条件在纯净机器上根本不成立。
+> 现在 `doctor` 会真的跑一遍「编译探针 → 读 DWARF → 看变量出没出来」来验证这一环，
+> 而不是查某个工具在不在。
 
 ---
 
@@ -197,7 +200,7 @@ python tools\scut_build.py doctor --project .
 | 现象 | 原因 | 怎么办 |
 |---|---|---|
 | `找不到环境核心静态库` | 环境核心还没构建/没放对位置 | 把 `libscut_core.a` 放到 `<工程>/.scut/lib/`，或 `--core-lib <路径>` |
-| 变量面板**空的**，但构建成功 | `objdump` 不是 binutils 版本 | 跑 `doctor` 看第 `[1/3]` 节；装上 MinGW-w64 或把 binutils 加进 PATH |
+| 变量面板**空的**，但构建成功 | 变量发现那一环没走通（探针没带 `-g`、或 Python 跑不动生成器） | 跑 `doctor`，看「变量发现」那一项的自检结论 |
 | `duplicate symbol: main` | `code/` 里写了 `main()` | 删掉它。`main` 由呈现后端提供；你只需在 `scut_project.json` 的 `hooks` 里填函数名 |
 
 ---
@@ -205,5 +208,8 @@ python tools\scut_build.py doctor --project .
 ## 七、给维护者
 
 - 脚本只用 **Python 标准库**，目标 **Python 3.7+**（低于此版本会在启动时直接给人话提示 + 一份 JSON，而不是抛语法错误）。
+  变量发现额外只依赖 `zlib`（标准库），**不依赖任何外部程序**。
 - 非直观的地方都有**中文注释解释「为什么」**，改之前请先读文件头的设计说明。
+- `tools/scut_dwarf.py` 是独立的 DWARF 读取器，不知道 SCUT 的任何概念，
+  可以被任何工具复用；改它请跑 `tests/test_dwarf.py`。
 - `scut_symbols.py` 的回归测试在 `tests/test_symbols.py`，改动生成器后务必跑一遍。

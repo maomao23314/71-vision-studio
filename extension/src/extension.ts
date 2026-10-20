@@ -207,7 +207,6 @@ export function activate(context: vscode.ExtensionContext): void {
                 log('[自检] 没有找到 clang —— 编译功能不可用。执行「SCUT-71: 环境自检」查看怎么办。');
             } else {
                 log(`[自检] clang = ${tc.cc}`);
-                log(`[自检] objdump = ${tc.objdump || '(缺失，自动符号发现不可用)'}`);
                 log(`[自检] python = ${tc.python ?? '(缺失，构建脚本不可用)'}`);
             }
         },
@@ -666,8 +665,7 @@ async function commandSelectVariables(simView: SimViewProvider): Promise<void> {
         void vscode.window.showWarningMessage(
             'SCUT-71：还没有变量清单。\n'
             + '    下一步：先执行「SCUT-71: 编译仿真程序」。'
-            + '若编译成功但清单仍为空，说明自动符号发现不可用'
-            + '（通常是缺 binutils 的 objdump），执行「SCUT-71: 环境自检」查看原因。',
+            + '若编译成功但清单仍为空，执行「SCUT-71: 环境自检」查看变量发现那一项。',
         );
         return;
     }

@@ -190,24 +190,22 @@ SCUT_DrawPoint(x, y, SCUT_RGB(g, g, g));   /* 灰度也用同一个宏 */
 
 ## 需要的工具链
 
-插件**不随包分发**任何第三方二进制（`clang`、`objdump` 都不带），
+插件**不随包分发**任何第三方二进制（`clang` 带不带取决于你选哪条路），
 它做的是：告诉你缺什么、为什么缺、以及装完之后要做什么。
 
 | 工具 | 必需？ | 从哪来 |
 |---|---|---|
 | `clang` / `clang++` | ✅ 编译必需 | [LLVM-MinGW](https://github.com/mstorsjo/llvm-mingw/releases)（自带 MinGW sysroot）——**插件可代下载** |
-| binutils `objdump` | ⚠️ 自动变量发现必需 | MinGW-w64 / MSYS2 / **Git for Windows** 自带 |
 | Python **3.7+** | ✅ 构建脚本必需（插件不代下载） | python.org / Anaconda 均可；**不需要任何第三方库** |
 | `lldb-dap` | 可选（调试用） | LLVM-MinGW 自带 |
 | `clangd` | 可选（建议装） | LLVM-MinGW 自带；装 clangd 扩展后补全/跳转更准 |
 
-> **为什么 `objdump` 必须是 binutils 的，不能用 `llvm-objdump`：**
-> LLVM 21 移除了 `llvm-objdump --dwarf=info`（现在只支持 `--dwarf=frames`），
-> 而自动变量发现正是靠这条命令读 DWARF。用 LLVM 版本会**静默失败**——
-> 退出码非 0 且没有任何提示，表现为「变量面板莫名其妙一直是空的」。
-> 插件会显式探测并给出这一条中文警告。
->
-> 实测：装了 **Git for Windows** 的机器通常就已经有这个 `objdump` 了。
+> **变量自动发现不需要 `objdump`。**
+> 早先这里要求装 binutils 的 `objdump`（因为 LLVM 21 删掉了
+> `llvm-objdump --dwarf=info`，而 llvm-mingw 自带的 `objdump` 只是个转发脚本）。
+> 现在这条依赖已经去掉：变量发现改成纯 Python 读 `.debug_info` 的字节，
+> clang / gcc、DWARF 4 / 5 都能读，机器上装没装 binutils 完全无关。
+> 换句话说——**编译能过，变量面板就有内容**。
 
 **工具链根目录留空时**，依次探测：`SCUT71_TOOLCHAIN` 环境变量
 → 插件自己下载过的目录 → `PATH`。都找不到会**弹窗问你**

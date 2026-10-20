@@ -2,7 +2,7 @@
   "name": "scut-71-vision-studio",
   "displayName": "SCUT-71 Vision Studio",
   "description": "智能车视觉仿真环境 —— 只写算法，其余交给环境",
-  "version": "0.10.4",
+  "version": "0.10.5",
   "publisher": "scut-racing",
   "license": "GPL-3.0",
   "engines": {

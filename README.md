@@ -24,9 +24,9 @@
 > python.org / Anaconda 装哪个都行；装完在配置面板的「工具链 › Python 解释器路径」
 > 里指过去即可。没有它编译脚本跑不起来。
 
-> **变量面板需要 binutils 的 `objdump`。** LLVM 21 移除了 `llvm-objdump --dwarf=info`，
-> 所以 llvm-mingw 自带的那个（其实是个转发脚本）用不了。装了 MinGW-w64 或
-> Git for Windows 就有了，插件会自动去找。缺了它不影响编译和运行，只是变量面板是空的。
+> **变量面板不需要额外装任何东西。** 变量自动发现是纯 Python 读 `.debug_info`
+> 的字节，不调用 `objdump` 之类的外部程序 —— 编译能过，面板就有内容。
+> 老教程里那句"必须装 binutils 的 objdump"已经作废了。
 
 > **代码补全建议装 `clangd`**（可选）。插件自己不会起语言服务，只会在「环境自检」里
 > 告诉你找没找到它；想让补全和跳转更准，就装 clangd 扩展。不装不影响编译与仿真。
@@ -305,7 +305,8 @@ python tests/run_all_tests.py   # 跑一遍回归（15 个套件）
 | `core/src/scut_log.c` | 日志环形缓冲（256 行 × 192 字节） |
 | `backends/headless/` | 提供 `main()`；命令行解析、图集探测、帧 JSON 输出 |
 | `tools/scut_build.py` | 构建编排、生成契约头与 glue、并行编译 |
-| `tools/scut_symbols.py` | DWARF 符号发现（正则解析 objdump 文本输出） |
+| `tools/scut_dwarf.py` | 读目标文件里的 DWARF（纯标准库，PE/COFF + ELF） |
+| `tools/scut_symbols.py` | 变量发现：DWARF 类型 → 注册代码 + 变量清单 |
 
 ### ① ↔ ② 协议
 

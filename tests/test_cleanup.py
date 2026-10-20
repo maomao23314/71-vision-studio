@@ -22,6 +22,7 @@ test_cleanup.py -- 第二轮清理的回归测试（死代码 / 过时注释 / �
 退出码 0 = 全部通过。
 """
 import io
+import json
 import os
 import re
 import sys
@@ -242,11 +243,22 @@ src = read('tools/scut_build.py')
 ok('--exclude 透传给符号发现', 'gen_cmd += ["--exclude", exclude_names]' in src)
 ok('--max-elems 透传给符号发现', 'gen_cmd += ["--max-elems", str(max_elems)]' in src)
 
-# objdumpVersion 要出现在 JSON 里（doctor 的人读输出里有它）
+# objdump 相关的东西必须彻底消失（换成了纯 Python 读 DWARF）
+# ★ 这一节是"防回潮"：新写法把 objdump 从构建链里彻底拿掉了，
+#   若哪天有人"顺手"把它加回来（比如为了兼容老文档），
+#   变量发现就会重新变成"看机器装了什么"的状态。
 tc = sb.Toolchain()
-tc.objdump_version = 'GNU objdump 2.40'
-ok('to_json 导出 objdumpVersion',
-   tc.to_json().get('objdumpVersion') == 'GNU objdump 2.40')
+ok('Toolchain 不再有 objdump 字段', not hasattr(tc, 'objdump'))
+ok('to_json 不再导出 objdump',
+   'objdump' not in json.dumps(tc.to_json(), ensure_ascii=False))
+ok('不再有 objdump 候选路径表',
+   'BINUTILS_OBJDUMP_CANDIDATES' not in src)
+ok('不再有 _find_objdump', '_find_objdump' not in src)
+ok('不再有 objcopy 修补', '_find_objcopy' not in src
+   and 'normalize_probe_obj_dwarf' not in src)
+ok('生成器不再接收 --objdump', '"--objdump"' not in src)
+ok('符号发现失败提示不再甩锅给 objdump',
+   'objdump 不是 binutils 版本' not in src)
 
 print('\n=== 10. Python 版本闸门统一为 3.7 ===')
 ok('闸门是 3.7', 'sys.version_info < (3, 7)' in src)
@@ -276,8 +288,12 @@ _doc_body = _parts[1] if len(_parts) > 2 else _dc_body
 ok('decode_output 代码里不再有 latin-1 候选链', 'latin-1' not in _code_body)
 ok('decode_output 的说明里讲了为什么没有 latin-1 候选',
    'latin-1' in _doc_body)
-ok('DWARF 规范化处的 latin-1 用法【保留】（那是正当的）',
-   'raw.decode("latin-1")' in src)
+# ★ 原来这里还有一条"D W A R F 规范化处的 latin-1 用法保留"。
+#   那段代码（用 objcopy 抽 .debug_* 出来、按 latin-1 当文本正则改偏移再写回）
+#   已经整块删掉了 —— 现在读的是 DWARF 二进制，不需要任何文本化。
+#   所以这条断言没有对象了，跟着一起删，而不是留一个恒真的空壳。
+ok('DWARF 读取器里没有文本化 hack',
+   'latin-1' not in read('tools/scut_dwarf.py'))
 
 print('\n=== 12. 面向用户的产物里不得出现"设置界面"（G1） ===')
 
@@ -532,6 +548,29 @@ ok('--no-log 会调 set_log_enabled',
 # build_vars_json 不允许"先拷条目、最后补 ']'"的越界收尾。
 ok('build_vars_json 不再有事后回退找 }',
    'while (k > 0 && out[k]' not in host_c)
+
+print('\n=== 17. 打包完整性：tools/ 的每个模块都要进 vsix ===')
+
+# ★ 这条守的是一类【只在用户机器上才发作】的缺陷：
+#   sync-sdk.js 原来逐个列文件（scut_build.py / scut_symbols.py）。
+#   加了 scut_dwarf.py 之后那两条没跟着改，于是仓库里测试全绿、
+#   而打出来的 vsix 里 sdk/tools/ 少了它 —— 装上去就是
+#   "变量面板永远是空的"，还在用户那边。现在改成整目录同步，
+#   这条断言盯的是【别再退回逐个列文件】。
+sync_js = read('extension/scripts/sync-sdk.js')
+ok('sync-sdk.js 整目录同步 tools/',
+   re.search(r"from:\s*'tools',\s*to:\s*'sdk/tools'", sync_js) is not None)
+ok('sync-sdk.js 的 REQUIRED 覆盖 scut_dwarf.py',
+   "'sdk/tools/scut_dwarf.py'" in sync_js)
+ok('sync-sdk.js 会跳过 __pycache__',
+   "'__pycache__'" in sync_js)
+
+# scut_symbols.py 必须在【同一个目录】里 import scut_dwarf，
+# 否则打包后路径一变就 ImportError。
+ok('scut_symbols 从同目录导入 scut_dwarf',
+   re.search(r'import\s+scut_dwarf', sym_src) is not None)
+ok('scut_symbols 不再 import 已删掉的解析辅助',
+   'from collections import OrderedDict' not in sym_src)
 
 print('\n' + '=' * 60)
 if FAIL == 0:

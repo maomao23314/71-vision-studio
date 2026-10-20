@@ -186,28 +186,6 @@ async function pickToolchainFolder(): Promise<string> {
  */
 const ROOT_CANDIDATES: string[] = [];
 
-/**
- * binutils 版 objdump 的显式候选路径。
- *
- * ★ 为什么不能只信 PATH：
- *   llvm-mingw 的 bin 目录里同时有 `llvm-objdump.exe` 和一个叫 `objdump` 的
- *   【shell 脚本包装】。shutil.which('objdump') / where.exe 都可能先命中那个包装，
- *   于是拿到 LLVM 版本 —— 而 LLVM 21 已经删掉了 `--dwarf=info`
- *   （实测：`llvm-objdump: --dwarf=<value>: The only supported value is 'frames'`），
- *   自动符号发现会【静默失效】（退出码非 0，没有任何提示）。
- *   所以这里先按已知位置找真·binutils，最后才退回 PATH。
- *
- * ★ Git for Windows 自带的 MinGW-w64 是最稳的一个来源：装 Git 的人基本都有，
- *   且它带的确实是 GNU binutils。
- */
-const BINUTILS_OBJDUMP_CANDIDATES = [
-    'C:\\Program Files\\Git\\mingw64\\bin\\objdump.exe',
-    'C:\\Program Files\\Git\\usr\\bin\\objdump.exe',
-    'C:\\mingw64\\bin\\objdump.exe',
-    'C:\\msys64\\mingw64\\bin\\objdump.exe',
-    'C:\\msys64\\ucrt64\\bin\\objdump.exe',
-];
-
 /** 执行一次命令并拿到合并后的输出。超时/失败都不抛，返回 undefined。 */
 function runCapture(exe: string, args: string[], timeoutMs = PROBE_TIMEOUT_MS): Promise<string | undefined> {
     return new Promise<string | undefined>((resolve) => {
@@ -224,8 +202,8 @@ function runCapture(exe: string, args: string[], timeoutMs = PROBE_TIMEOUT_MS): 
                 return;
             }
             // ★ 注意：只要拿到了输出就返回，即使退出码非 0。
-            //   实测 binutils 的 `objdump --version` 退出码是 0，
-            //   但 `clang -v` 之类会往 stderr 写且可能非 0；把退出码当失败会误判。
+            //   `clang -v` 之类会往 stderr 写且退出码可能非 0；
+            //   把退出码当失败会让"能用的工具"被判成缺失。
             resolve(text);
         });
     });
@@ -310,72 +288,6 @@ function whichInPath(names: string[]): string | undefined {
         }
     }
     return undefined;
-}
-
-/**
- * 判断某个 objdump 的 `--version` 输出是不是【binutils】版。
- *
- * ★ 为什么必须靠版本串而不是文件名（本项目最关键的一条坑）：
- *   llvm-mingw 的 bin/ 里同时存在 `llvm-objdump.exe` 和【一个叫 objdump 的
- *   shell 脚本】。后者名字完全看不出问题，但它转发到 llvm-objdump，
- *   而 LLVM 21 已经移除了 `--dwarf=info`（实测报错：
- *   `llvm-objdump: --dwarf=<value>: The only supported value is 'frames'`）。
- *   一旦用错，自动符号发现会【静默失败】——退出码非 0、没有任何提示，
- *   用户只会看到变量面板一直是空的。
- *   binutils 的版本串里一定含 "GNU objdump"，LLVM 的含 "LLVM"。
- *
- * 单独抽成纯函数是为了能直接做单元测试（这条逻辑错了整个变量面板就是空的，
- * 但它藏在「探测环境」里，不抽出来几乎没法测）。
- */
-export function isBinutilsObjdumpVersion(versionText: string | undefined): boolean {
-    return /GNU objdump/i.test(versionText ?? '');
-}
-
-/** 判断某个 objdump 是不是 LLVM 版（用来把警告说得更具体）。 */
-export function isLlvmObjdumpVersion(versionText: string | undefined): boolean {
-    return /LLVM/i.test(versionText ?? '') && !isBinutilsObjdumpVersion(versionText);
-}
-
-/**
- * 找 binutils 的 objdump（不是 LLVM 的）。
- *
- * 判定标准：`objdump --version` 的第一行含 "GNU objdump"。
- * LLVM 版会输出 "LLVM version ..."。这一条判定比看文件名叫 objdump 可靠得多 ——
- * llvm-mingw 里那个 `objdump` 就是脚本，文件名完全看不出问题。
- */
-async function findBinutilsObjdump(): Promise<{ path?: string; version?: string; sawLlmObjdump: boolean }> {
-    const tried = new Set<string>();
-
-    const consider = async (p: string | undefined) => {
-        if (!p || tried.has(p.toLowerCase())) {
-            return undefined;
-        }
-        tried.add(p.toLowerCase());
-        const v = await probeVersion(p);
-        if (isBinutilsObjdumpVersion(v)) {
-            return { path: p, version: v };
-        }
-        return undefined;
-    };
-
-    for (const cand of BINUTILS_OBJDUMP_CANDIDATES) {
-        const hit = await consider(exists(cand) ? cand : undefined);
-        if (hit) {
-            return { ...hit, sawLlmObjdump: false };
-        }
-    }
-
-    // 工具链自带的 objdump / objdump.exe 也试一次（有些发行版确实带 binutils）
-    const toolchainObjdump = whichInPath(['objdump.exe', 'objdump']);
-    const hit = await consider(toolchainObjdump);
-    if (hit) {
-        return { ...hit, sawLlmObjdump: false };
-    }
-
-    // 到这里就没找到 binutils 版。看看是不是只存在 llvm-objdump，
-    // 好给用户一句【指名道姓】的警告。
-    const llvm = whichInPath(['llvm-objdump.exe', 'llvm-objdump']);
-    return { sawLlmObjdump: llvm !== undefined };
 }
 
 /**
@@ -758,34 +670,7 @@ function detectImpl(allowDownload: boolean): Promise<Toolchain> {
             }
         }
 
-        // ---- 2) objdump：必须 binutils ----
-        const obj = await findBinutilsObjdump();
-        if (!obj.path) {
-            if (obj.sawLlmObjdump) {
-                warnings.push(
-                    '自动符号发现不可用：系统里只找到 llvm-objdump，没有找到 binutils 的 objdump。\n'
-                    + '    原因：LLVM 21 已经【移除】了 llvm-objdump 的 --dwarf=info 选项'
-                    + '（现在只支持 --dwarf=frames），而自动变量发现正是靠 `objdump --dwarf=info`'
-                    + '读 DWARF 调试信息。用 llvm-objdump 会【静默失败】——退出码非 0 且没有任何提示，'
-                    + '变量面板会莫名其妙地一直是空的。\n'
-                    + '    影响：算法能编译能运行，但 IDE 变量面板里一个变量都不会出现。\n'
-                    + '    下一步（任选其一）：\n'
-                    + '      1) 安装 MinGW-w64（它自带 binutils），把它的 bin 目录加进 PATH；\n'
-                    + '         最省事的一条：装了 Git for Windows 的话，它的\n'
-                    + '         C:\\Program Files\\Git\\mingw64\\bin\\objdump.exe 通常就在；\n'
-                    + '      2) 已经有 MinGW-w64 的话，在设置里把 objdump 指到它的 bin 目录；\n'
-                    + '      3) 暂时跳过：先用 --no-watch 语义构建（本插件会自动这样做），'
-                    + '仿真照常跑，只是没有变量。');
-            } else {
-                warnings.push(
-                    '没有找到 objdump，自动符号发现不可用。\n'
-                    + '    影响：算法能编译能运行，但 IDE 变量面板里一个变量都不会出现。\n'
-                    + '    下一步：安装 MinGW-w64（提供 binutils 的 objdump），'
-                    + '把它的 bin 目录加进 PATH，然后重新执行「SCUT-71: 环境自检」。');
-            }
-        }
-
-        // ---- 3) Python ----
+        // ---- 2) Python ----
         const py = await findPython(binDir);
         if (py.warning) {
             warnings.push(py.warning);
@@ -813,7 +698,6 @@ function detectImpl(allowDownload: boolean): Promise<Toolchain> {
             cc: cc ?? '',
             cxx: cxx ?? '',
             ld: ld ?? cc ?? '',
-            objdump: obj.path ?? '',
             lldbDap,
             clangd,
             python: py.path,
@@ -876,7 +760,7 @@ export function detectToolchain(allowDownload = false): Promise<Toolchain> {
 function fallbackToolchain(e: unknown): Toolchain {
     const msg = e instanceof Error ? e.message : String(e);
     return {
-        root: '', cc: '', cxx: '', ld: '', objdump: '',
+        root: '', cc: '', cxx: '', ld: '',
         warnings: [`工具链探测过程中出现意外错误：${msg}\n`
             + '    下一步：执行「SCUT-71: 环境自检」查看详细信息，'
             + '或在配置面板里手动指定「工具链 › 工具链根目录」。'],
@@ -928,10 +812,12 @@ export async function runDoctor(): Promise<DoctorResult> {
     lines.push('');
 
     lines.push('【自动符号发现】');
-    await row('binutils objdump', tc.objdump || undefined);
     await row('Python（构建脚本用）', tc.python || undefined);
-    if (!tc.objdump) {
-        lines.push('  ! objdump 缺失 → 变量面板会是空的（仿真本身不受影响）');
+    // ★ 这里不需要再列一个"读 DWARF 的工具"。
+    //   变量发现现在是纯 Python 读 .debug_info 的字节，不依赖外部程序；
+    //   真正能不能用由构建脚本 doctor 的端到端自检回答。
+    if (!tc.python) {
+        lines.push('  ! Python 缺失 → 不但变量面板是空的，编译本身也跑不起来');
     }
     lines.push('');
 
@@ -971,7 +857,6 @@ export async function toolInfos(): Promise<ToolInfo[]> {
         ['clang', tc.cc],
         ['clang++', tc.cxx],
         ['ld', tc.ld],
-        ['objdump', tc.objdump],
         ['lldb-dap', tc.lldbDap],
         ['clangd', tc.clangd],
         ['python', tc.python],
