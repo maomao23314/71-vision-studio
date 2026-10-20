@@ -7,7 +7,8 @@
  *   其余模块（simsession/simview/...）都必须依赖 vscode 运行时，测不了。
  *
  * 协议来源：backends/headless/scut_headless_main.c（权威，勿凭记忆）。
- *   · 每帧一行 JSON：{"frame":..,"w":..,"h":..,"img":"<ppm path>","timing":{..}}
+ *   · 每帧一行 JSON：{"frame":..,"w":..,"h":..,"img":"<ppm path>",
+ *                     ["img2":"<ppm path>",]"timing":{..}}
  *   · 结尾一行变量：{"vars":[{"name":..,"kind":..,"dim":..,"total":..,
  *                             "values":"..","truncated":bool}, ...]}
  *   · 帧图像是 PPM(P6)：ASCII 头 "P6\n<w> <h>\n255\n" + w*h*3 字节 RGB。
@@ -202,6 +203,14 @@ export interface FrameLine {
     h: number;
     /** PPM 文件路径（可能是反斜杠与正斜杠混用的形式） */
     img: string;
+    /**
+     * 第二张图的 PPM 路径（算法写过才有；没写过是空串）。
+     *
+     * ★ 后端从没见人写过第二张图时【连这个字段都不发】，
+     *   所以空串也等价于"没有" —— 这里统一成空串，
+     *   调用方只需要判断真假，不用区分"缺字段"和"空字符串"。
+     */
+    img2: string;
     /** 本帧实际使用的【输入图】路径（仿真进程的 "pic" 字段）。 */
     pic: string;
     /** 本帧图像加载失败的原因（成功时为空串）。 */
@@ -250,6 +259,7 @@ export function parseFrameLine(line: string): FrameLine | undefined {
         w: root.w,
         h: root.h,
         img: root.img,
+        img2: typeof root.img2 === 'string' ? root.img2 : '',
         pic: typeof root.pic === 'string' ? root.pic : '',
         loadError: typeof root.loadError === 'string' ? root.loadError : '',
         vars: parseVariablesLine(JSON.stringify(root)) ?? [],

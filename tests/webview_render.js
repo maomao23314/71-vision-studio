@@ -68,6 +68,17 @@ if (!files.length) {
 }
 const img = loadPpm(path.join(framesDir, files[0]));
 
+/* ★ 第二张图的像素：整幅偏红。
+ *   为什么敢自己造：这一层验的是"rgb2 能被画到正确的画布上"，
+ *   而不是"后端写出的第二张图对不对"（那是 test_outimage.py 的事）。
+ *   用与主图完全不同的内容，才能证明两块画布没有互相串。 */
+const secondRgb = new Array(img.width * img.height * 3);
+for (let i = 0; i < secondRgb.length; i += 3) {
+    secondRgb[i] = 220;        // R
+    secondRgb[i + 1] = 40;     // G
+    secondRgb[i + 2] = 40;     // B
+}
+
 // ★ 消息契约以 media/simview.js 里的 switch(msg.type) 为准，
 //   并且 values 的【类型】以 simsession.ts 为准：
 //     scutsession.ts 里做的是  v.values.split(/\s+/)  ——
@@ -260,6 +271,16 @@ const feed = `
              rgb: new Uint8Array(${JSON.stringify(img.rgb)}),
              timing: { processUs: 258.7, drawUs: 4.2, frameUs: 295.9,
                        processCycles: 825600, cyclesValid: true } });
+      // ★ 第二张图：先开那一栏（真实宿主也是先发 display 再发帧），
+      //   再喂一帧带 rgb2 的。rgb2 刻意用"整幅偏红"的数据，
+      //   这样能区分两块画布 —— 如果渲染串了，断言会指出来。
+      send({ type: 'display', secondImage: true });
+      send({ type: 'frame', index: 2,
+             width: ${img.width}, height: ${img.height},
+             rgb: new Uint8Array(${JSON.stringify(img.rgb)}),
+             rgb2: new Uint8Array(${JSON.stringify(secondRgb)}),
+             timing: { processUs: 258.7, drawUs: 4.2, frameUs: 295.9,
+                       processCycles: 825600, cyclesValid: true } });
       send({ type: 'vars', snapshots: ${JSON.stringify(realSnapshots || snapshots)},
              frame: 1,
              timing: { processUs: 258.7, drawUs: 4.2, frameUs: 295.9,
@@ -273,6 +294,10 @@ const feed = `
           var rec = { size: c.width + 'x' + c.height, nonzero: 0, colored: 0 };
           try {
               var d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+              /* 左上角像素：用来判断"第二张图的数据有没有落到错误的画布上"。
+               * 主画面是灰度相机图（R==G==B）或黑，而喂进去的 rgb2 是
+               * (220,40,40) —— 两者不可能撞上，所以这个三点采样是可靠的。 */
+              rec.pixel00 = [d[0], d[1], d[2]];
               for (var k = 0; k < d.length; k += 4) {
                   if (d[k] || d[k+1] || d[k+2]) rec.nonzero++;
                   /* ★ 真彩色断言：三通道不全相等的像素数。
@@ -378,6 +403,7 @@ if (!m) {
         (r.painted || []).forEach(function (p, i) {
             console.log('  canvas[' + i + ']      : ' + p.size +
                         '  非零像素=' + p.nonzero + '  非灰度像素=' + p.colored +
+                        '  左上角=' + JSON.stringify(p.pixel00) +
                         (p.err ? '  错误=' + p.err : ''));
         });
         console.log('  变量面板条目数   : ' + r.varItems);
@@ -390,15 +416,31 @@ if (!m) {
         console.log('  前端主动发的消息 : ' + JSON.stringify(r.sent).slice(0, 200));
 
         // 判定：画面画出来了 + 有彩色标注 + 变量有条目 + 变量区没有残留的折线图 canvas
+        //      + 第二张图画到了【第二块】画布上（不是串到第一块）
         const painted = (r.painted || []).some((p) => p.nonzero > 0);
         const colored = (r.painted || []).some((p) => p.colored > 0);
         const noSpark = r.varCanvases === 0;
-        const pass = r.canvases > 0 && painted && colored && r.varItems > 0 && noSpark;
+        const canvasCount = (r.painted || []).length;
+        const second = canvasCount > 1 ? r.painted[1] : null;
+        const secondOk = !!second && second.nonzero > 0;
+        /* 主画布左上角不该是第二张图那个红色（(220,40,40)）。
+         * ★ 只比"非灰度像素数"是不够的：主图若整幅偏黑，非灰度像素会
+         *   被标注占满，反而说不清。用具体像素点比更准，也更能指出串图。 */
+        const RED = [220, 40, 40];
+        const isRed = (px) => !!px && px[0] === RED[0] && px[1] === RED[1]
+            && px[2] === RED[2];
+        const secondGotRed = second && isRed(second.pixel00);
+        const mainNotSecond = canvasCount > 0 && !isRed(r.painted[0].pixel00);
+        const pass = r.canvases > 0 && painted && colored && r.varItems > 0
+            && noSpark && secondOk && secondGotRed && mainNotSecond;
         console.log('\n  ==> 渲染判定: ' +
-            (pass ? '✅ 画面已绘制、彩色标注可见、变量面板有条目、变量区无折线图'
+            (pass ? '✅ 两块画面都已绘制（第二张图进了第二块画布）、彩色标注可见、变量面板有条目、变量区无折线图'
                    : '❌ 未通过'
                      + (painted ? '' : '（画面全黑）')
                      + (colored ? '' : '（没有非灰度像素：彩色标注没透传）')
-                     + (noSpark ? '' : '（变量区还有 canvas）')));
+                     + (noSpark ? '' : '（变量区还有 canvas）')
+                     + (secondOk ? '' : '（第二张图的画布是空的：rgb2 没有画上去）')
+                     + (secondGotRed ? '' : '（第二块画布没收到 rgb2 的数据）')
+                     + (mainNotSecond ? '' : '（主画布收到了 rgb2：两块画布串了）')));
     }
 }

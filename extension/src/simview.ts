@@ -50,6 +50,15 @@ export interface SimViewDeps {
     getPicDir(): string | undefined;
     /** 工程根目录。仿真进程靠它读 scut_project.json 的运行期参数。 */
     projectRoot(): string | undefined;
+    /**
+     * 工程配置里「显示第二张图」是否打开。
+     *
+     * ★ 为什么由宿主问一次、在这里缓存，而不是每帧去读配置：
+     *   这个值要参与每帧的推送（决定推不推第二张图），
+     *   而 readConfig 是一次真实文件读 —— 每帧读一次配置纯属浪费。
+     *   配置面板保存后会调 refreshDisplay()，那时才重新问一次。
+     */
+    showSecondImage(): boolean;
     /** 环境日志（写进侧边栏日志折叠区）。 */
     log(line: string): void;
 }
@@ -69,6 +78,11 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
     private lastLoadError: string | undefined;
     /** 上次弹加载失败通知的时间戳（节流用，毫秒）。 */
     private lastLoadErrorAt = 0;
+    /**
+     * 「显示第二张图」的缓存值。
+     * undefined = 还没问过。refreshDisplay() 会把它清掉，下次重新问。
+     */
+    private secondImage: boolean | undefined;
     private disposables: vscode.Disposable[] = [];
 
     constructor(extensionUri: vscode.Uri, deps: SimViewDeps) {
@@ -121,6 +135,7 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
                 this.sendCatalog(attached);
                 this.sendSnapshot();
                 this.sendStatus();
+                this.sendDisplay(attached);
             }
         });
         // 被用户彻底隐藏（右键取消勾选）会 dispose，摘掉集合避免推给死 webview
@@ -153,13 +168,43 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
         this.sendSnapshot();
     }
 
+    /* ------------------------------------------------------ 显示配置 */
+
+    /** 「显示第二张图」的当前值（按需问一次 deps，之后用缓存）。 */
+    private wantsSecond(): boolean {
+        if (this.secondImage === undefined) {
+            this.secondImage = this.deps.showSecondImage();
+        }
+        return this.secondImage;
+    }
+
+    /**
+     * 配置面板保存后调用：重新读显示开关并推给面板。
+     *
+     * ★ 为什么不重启仿真进程：这个环境从 0.7 起就把"翻页/改设置不重启"
+     *   当成硬约束（算法有前后帧状态，重启等于把状态清零）。
+     *   显示开关本来只影响"推不推那一张图"，与进程无关，
+     *   所以这里只是改一个缓存 + 发一条消息，下一帧就生效。
+     */
+    public refreshDisplay(): void {
+        this.secondImage = undefined;
+        const on = this.wantsSecond();
+        this.deps.log(`[视图] 第二张图显示：${on ? '开' : '关'}`);
+        for (const v of this.views) {
+            v.post({ type: 'display', secondImage: on });
+        }
+    }
+
     /* ----------------------------------------------------------- 对外 API */
 
     /** 构建成功后调用：更新可执行文件路径与变量清单。 */
     public setBuildOutput(exePath: string | undefined, manifest: VariableManifest | undefined): void {
         if (exePath && exePath !== this.lastExePath) {
             this.lastExePath = exePath;
-            // 换了二进制 → 旧会话必须结束（旧进程占着旧文件）
+            /* 换了二进制 → 旧会话必须结束（旧进程占着旧文件）。
+             * ★ 顺手把显示缓存也作废：换二进制多半意味着换了工程/重编译，
+             *   而"显示第二张图"是跟着工程配置走的，重新问一次最省心。 */
+            this.secondImage = undefined;
             void this.stop();
         }
         if (manifest) {
@@ -426,6 +471,10 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
              *   那个选项从未被拼进 argv，已随 SimSessionOptions 一并删除。
              *   勾选只影响宿主侧的显示过滤，不需要传给子进程。 */
             projectRoot: this.deps.projectRoot(),
+            // 第二张图：面板开着才去读它的 PPM。
+            // 传函数而不是布尔值 —— 面板上勾选一下就该立即生效，
+            // 不该为了一个显示开关重启进程（见 wantSecondImage 的说明）。
+            wantSecondImage: (): boolean => this.wantsSecond(),
         });
         // ★ 只交给 pushLog 一处分流：它内部决定去 webview / 输出通道 /
         //   环境日志通道。此前这里先 deps.log 再 pushLog，非用户日志会被记两遍。
@@ -505,7 +554,7 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
             }
             // ★ 直接 post Uint8Array。engines.vscode >= 1.57 时走结构化克隆快路径，
             //   比 base64 快 10–20 倍（VS Code 维护者给的实测数字）。
-            v.post({
+            const msg: Record<string, unknown> = {
                 type: 'frame',
                 index: f.index,
                 width: f.width,
@@ -514,7 +563,14 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
                 timing: f.timing,
                 // 把"本帧用的是哪张输入图"一并送给前端显示
                 pic: f.pic ?? '',
-            });
+            };
+            /* ★ 第二张图：有才带这个字段。
+             *   "没有这个字段"与"图没画"是同一件事，前端据此显示空态提示 ——
+             *   比推一张全黑图更诚实（全黑也可能是算法画了黑）。 */
+            if (f.rgb2) {
+                msg.rgb2 = f.rgb2;
+            }
+            v.post(msg);
             delivered = true;
         }
 
@@ -558,6 +614,7 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
                 // webview 脚本就位，把当前上下文补上
                 for (const v of this.views) {
                     this.sendCatalog(v);
+                    this.sendDisplay(v);
                 }
                 this.sendSnapshot();
                 this.sendStatus();
@@ -619,6 +676,11 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
         for (const v of this.views) {
             v.post({ type: 'status', running, exePath: this.lastExePath ?? null });
         }
+    }
+
+    /** 把「显示第二张图」的开关同步给面板（决定那一栏显不显示）。 */
+    private sendDisplay(v: AttachedView): void {
+        v.post({ type: 'display', secondImage: this.wantsSecond() });
     }
 
     private sendCatalog(v: AttachedView): void {
@@ -707,23 +769,72 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
 </head>
 <body>
   <div id="app">
-    <section id="screen-section">
-      <div id="screen-wrap">
-        <canvas id="screen" width="188" height="120"></canvas>
-        <div id="placeholder">尚未收到帧<br><span class="dim">点「编译」后「下一张」开始；变量在下方勾选后自动显示</span></div>
-      </div>
-      <!--
-        ★ 画面浮层：只在鼠标移入画面区时出现，平时不占空间。
-        为什么要有"适应"：侧边栏宽度是用户随时会拖的，画面必须跟着自适应，
-        否则一拖窄就出现横向滚动条、一拖宽就留一大片黑边。
-      -->
-      <div id="screen-actions">
-        <button id="btn-fit" title="适应窗口（默认行为：拖动边框后自动重新适应）">适应</button>
-        <button id="btn-zoom-out" title="缩小 (Ctrl+-)">−</button>
-        <button id="btn-zoom-in"  title="放大 (Ctrl+=)">+</button>
-        <button id="btn-zoom-reset" title="回到适应窗口">1:1</button>
+    <section id="pane-0" class="image-pane collapsible">
+      <header id="pane-0-head">
+        <span class="chevron">▾</span>
+        <span class="title">画面</span>
+        <span id="pane-0-sum" class="dim"></span>
+      </header>
+      <div id="pane-0-body">
+        <div class="pane-view">
+          <div id="pane-0-wrap" class="screen-wrap">
+            <canvas id="pane-0-canvas" class="screen" width="188" height="120"></canvas>
+            <div id="pane-0-placeholder" class="placeholder">尚未收到帧<br><span class="dim">点「编译」后「下一张」开始；变量在下方勾选后自动显示</span></div>
+          </div>
+          <!--
+            ★ 画面浮层：只在鼠标移入画面区时出现，平时不占空间。
+            为什么要有"适应"：侧边栏宽度是用户随时会拖的，画面必须跟着自适应，
+            否则一拖窄就出现横向滚动条、一拖宽就留一大片黑边。
+            ★ 浮层是 .screen-wrap 的兄弟节点而不是子节点：
+              子节点会跟着画面一起滚动，放大后按钮就跑到看不见的地方了。
+          -->
+          <div class="pane-actions">
+            <button id="pane-0-fit" title="适应窗口（默认行为：拖动边框后自动重新适应）">适应</button>
+            <button id="pane-0-zout" title="缩小 (Ctrl+-)">−</button>
+            <button id="pane-0-zin"  title="放大 (Ctrl+=)">+</button>
+            <button id="pane-0-one" title="回到 1:1">1:1</button>
+          </div>
         </div>
-      <div id="pic-info" class="pic-info dim"></div>
+        <div id="pic-info" class="pic-info dim"></div>
+      </div>
+    </section>
+
+    <!--
+      ★★ 第二张图：与主画面【同一套组件】 ★★
+
+      用户的原话："加完了之后我想这两个图片也可以展开/收起（放大什么的功能不变）"。
+      所以这里不是"再画一块 canvas"，而是用同一个组件（createPane）再声明一份：
+        · 折叠：与「变量查看 / 计时 / 日志」同一个 collapsible 组件，
+          开合状态各自记住（persist 在 panes.p0 / panes.p1 里）；
+        · 缩放：两块各自独立（各有一套 zoom/pan）——共用一个缩放会让
+          "看主画面细节"顺手把另一张也放大，两张图尺寸相同、用途不同，
+          独立更符合直觉；
+        · 键盘 Ctrl+= / Ctrl+- 作用于【鼠标最后停留的那一块】。
+      ★ 结构照抄一份，逻辑只有一份 —— 复制结构不会漂移，复制逻辑才会。
+
+      ★ 默认 hidden：这一栏归配置（display.secondImage）管。
+        关着的时候宿主连第二张图的 PPM 都不会去读，不是"隐藏但仍在传"。
+    -->
+    <section id="pane-1" class="image-pane collapsible" hidden>
+      <header id="pane-1-head">
+        <span class="chevron">▾</span>
+        <span class="title">第二张图</span>
+        <span id="pane-1-sum" class="dim"></span>
+      </header>
+      <div id="pane-1-body">
+        <div class="pane-view">
+          <div id="pane-1-wrap" class="screen-wrap">
+            <canvas id="pane-1-canvas" class="screen" width="188" height="120"></canvas>
+            <div id="pane-1-placeholder" class="placeholder">第二张图还没有内容<br><span class="dim">在算法里用 SCUT_EnvCopyOutput2 / SCUT_OutImage2Set 画它<br>（每帧重画；这一帧不画就是黑的）</span></div>
+          </div>
+          <div class="pane-actions">
+            <button id="pane-1-fit" title="适应窗口（默认行为：拖动边框后自动重新适应）">适应</button>
+            <button id="pane-1-zout" title="缩小 (Ctrl+-)">−</button>
+            <button id="pane-1-zin"  title="放大 (Ctrl+=)">+</button>
+            <button id="pane-1-one" title="回到 1:1">1:1</button>
+          </div>
+        </div>
+      </div>
     </section>
 
     <section id="toolbar">

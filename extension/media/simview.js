@@ -13,8 +13,14 @@
  *  ★ 协议（权威在宿主侧：src/simview.ts + src/simsesion.ts 的推送点。
  *    本清单必须与那里逐字对齐 —— 它曾经漂移过，见下面两条更正。）
  *
- *    收到 {type:'frame',  index,width,height,rgb,timing,pic}
+ *    收到 {type:'frame',  index,width,height,rgb,rgb2?,timing,pic}
  *         ★ 曾漏写 pic（宿主 simview.ts 的 onFrame 会带它）。
+ *         ★ rgb2 = 第二张图（算法用 SCUT_OutImage2Set 画的那张）。
+ *           没有这个字段就是"本帧没有第二张图"，要么算法没画，
+ *           要么配置里没开（宿主那边就不读它）。
+ *    收到 {type:'display', secondImage}   ← 第二张图那一栏显不显示
+ *         ★ 开关的真值在工程配置（scut_project.json 的 display.secondImage），
+ *           面板不自己判断 —— 否则"配置里关着、面板却还显示"会成为第二个真值。
  *    收到 {type:'vars',   snapshots:[{name,values[],truncated,total,
  *                                    dims,kind,manual}], frame, timing}
  *         ★ 曾漏写 dims/kind/manual（宿主 sendSnapshot 会补齐）。
@@ -38,22 +44,52 @@
   var vscode = acquireVsCodeApi();
 
   // ---- 持久化状态（替代 retainContextWhenHidden，见技术要点 §四）----
+  /**
+   * 两块画面的键。索引即 DOM 编号（#pane-0 / #pane-1）。
+   * ★ 必须是常量数组而不是各写一遍 0/1 —— 下面所有地方（DOM 取名、
+   *   折叠、缩放、持久化）都按索引走同一张表。
+   */
+  var PANE_KEYS = ['p0', 'p1'];
+
   var saved = vscode.getState() || {};
+
+  /**
+   * 两块画面各自的 UI 状态。
+   *
+   * ★ 为什么分两块而不是一份共用：
+   *   折叠状态、缩放、平移本来就是"这一块看什么"的事。
+   *   共用一份的话，用户在主画面上放大看细节，第二张图会跟着放大 ——
+   *   两张图尺寸相同但用途不同，跟着动纯属干扰。
+   *
+   * ★ open 默认 true：画面本来就是面板的主内容，默认收起没有道理。
+   */
+  function newPaneState() {
+    return { open: true, zoom: 1, manual: false, panX: 0, panY: 0 };
+  }
+
+  function initPanes(from) {
+    var out = {};
+    var list = (from && from.panes) || {};
+    for (var i = 0; i < PANE_KEYS.length; i++) {
+      var k = PANE_KEYS[i];
+      var d = newPaneState();
+      var s = list[k];
+      if (s && typeof s === 'object') {
+        d.open = s.open !== false;
+        d.zoom = typeof s.zoom === 'number' ? s.zoom : 1;
+        d.manual = s.manual === true;
+        d.panX = typeof s.panX === 'number' ? s.panX : 0;
+        d.panY = typeof s.panY === 'number' ? s.panY : 0;
+      }
+      out[k] = d;
+    }
+    return out;
+  }
+
   var state = {
     selected: Array.isArray(saved.selected) ? saved.selected.slice() : null,
-    /** 手动缩放系数（仅在 manualZoom=true 时生效）。 */
-    zoom: typeof saved.zoom === 'number' ? saved.zoom : 1,
-    /**
-     * 是否处于手动缩放模式。
-     * ★ 默认 false —— 也就是默认"自适应"。用户的三条要求里第一条就是
-     *   "除非手动点击 +-，否则自动适应"，所以默认必须是不锁定缩放。
-     */
-    manualZoom: saved.manualZoom === true,
-    /** 实际生效的缩放（自适应时由容器宽度算出，不是用户设的值）。 */
-    effectiveZoom: 1,
-    /** 平移（用滚动位置表示）。 */
-    panX: typeof saved.panX === 'number' ? saved.panX : 0,
-    panY: typeof saved.panY === 'number' ? saved.panY : 0,
+    /** 两块画面（主画面 / 第二张图）的 UI 状态，见 newPaneState。 */
+    panes: initPanes(saved),
     timingOpen: saved.timingOpen === true,
     pickOpen: saved.pickOpen === true,
     varsOpen: saved.varsOpen !== false,   // 变量查看默认展开
@@ -62,10 +98,7 @@
   function persist() {
     vscode.setState({
       selected: state.selected,
-      zoom: state.zoom,
-      manualZoom: state.manualZoom,
-      panX: state.panX,
-      panY: state.panY,
+      panes: state.panes,
       timingOpen: state.timingOpen,
       pickOpen: state.pickOpen,
       varsOpen: state.varsOpen,
@@ -74,8 +107,6 @@
   }
 
   var el = {
-    screen: document.getElementById('screen'),
-    placeholder: document.getElementById('placeholder'),
     tProcess: document.getElementById('t-process'),
     tCycles: document.getElementById('t-cycles'),
     tIndex: document.getElementById('t-index'),
@@ -93,22 +124,18 @@
     logBody: document.getElementById('log-body'),
     logCount: document.getElementById('log-count'),
     picInfo: document.getElementById('pic-info'),
-    screenWrap: document.getElementById('screen-wrap'),
     status: document.getElementById('status'),
     varsList: document.getElementById('vars-list'),
     varsCount: document.getElementById('vars-count'),
     varsHint: document.getElementById('vars-hint'),
     log: document.getElementById('log'),
-    screenSection: document.getElementById('screen-section'),
     toolbar: document.getElementById('toolbar')
   };
 
-  var ctx = el.screen ? el.screen.getContext('2d', { alpha: false }) : null;
   var catalog = [];
   var snapshots = [];
   var selected = new Set(state.selected || []);
   var selectedInitialised = state.selected !== null;
-  var knownNames = {};
 
   /* ------------------------------------------------------------ 日志 */
 
@@ -140,145 +167,191 @@
     updateLogCount();
   }
 
-  /* -------------------------------------------------------- 图像显示 */
-
-  // ★ 复用同一份 ImageData 与 Uint8ClampedArray，避免每帧分配。
-  //   188x120 = 22560 像素，60fps 下每秒分配 1.3 MB 垃圾虽然不算多，
-  //   但扩展宿主到 webview 的每次分配都可能触发 GC 抖动，能省就省。
-  var imageData = null;
-  var rgba = null;
-  var frameW = 0;
-  var frameH = 0;
-
-  function ensureBuffers(w, h) {
-    if (imageData && frameW === w && frameH === h) {
-      return;
-    }
-    frameW = w;
-    frameH = h;
-    el.screen.width = w;
-    el.screen.height = h;
-    imageData = ctx.createImageData(w, h);
-    rgba = imageData.data;
-  }
-
-  /* 图像是 RGB 三通道（每像素 R/G/B 三字节）→ canvas 的 RGBA。
-   *
-   * ★ alpha 一次性置 255（只在缓冲区重建时做）：每帧都写一遍纯属浪费，
-   *   而 alpha 恒为不透明，所以只写一次完全等价。
-   * ★ RGB 三字节直接抄进 RGBA 的前三槽即可，不需要任何换算 ——
-   *   这正是把输出缓冲从灰度改成真彩色之后最大的好处：
-   *   从"灰度扩成三通道"变成了"原样搬运"。 */
-  function drawRgb(rgb, w, h) {
-    if (!ctx) {
-      return;
-    }
-    ensureBuffers(w, h);
-    var n = w * h;
-    for (var i = 0, j = 0, k = 0; i < n; i++, j += 4, k += 3) {
-      rgba[j] = rgb[k];
-      rgba[j + 1] = rgb[k + 1];
-      rgba[j + 2] = rgb[k + 2];
-      rgba[j + 3] = 255;
-    }
-    ctx.putImageData(imageData, 0, 0);
-    if (el.placeholder) {
-      el.placeholder.style.display = 'none';
-    }
-    applyZoom();
-  }
-
   /* ==========================================================================
-   *  画面缩放 / 平移 / 自适应
+   *  画面（两块：主画面 / 第二张图）
+   *  --------------------------------------------------------------------------
+   *  两块画面是【同一个组件】的两个实例：画布、缩放、平移、自适应都只有
+   *  一份实现（createPane），区别只在 DOM 编号和持久化键上。
    *
-   *  ★ 三条行为规则（对应用户的三点要求）：
+   *  ★ 为什么做成实例，而不是把第一块复制一遍：
+   *    复制出来的第二份一定会漂移 —— 以后修了主画面的缩放锚点，
+   *    第二张图那份忘了改，用户就会遇到"同一个手势在两块图上行为不同"。
+   *    这个文件里有过一次同源教训（四个折叠区块各写一份，有的记住状态、
+   *    有的不记），统一成一份才不会再犯。
    *
-   *   1) 【默认自适应】—— 不在"手动缩放"状态时，画面宽度始终填满可用宽度。
-   *      用户不需要先点一次"适应"才能看清。
-   *
-   *   2) 【可拖动、可滚轮】—— 放大之后必须能移动视野，否则放大等于白放大
-   *      （188×120 放大 6 倍是 1128 像素宽，侧边栏根本放不下）。
-   *      拖动用鼠标拖拽；滚轮以【光标位置】为锚点缩放，这样"想细看哪里就
-   *      把哪里滚大"，而不是缩放完还要再找位置。
-   *
-   *   3) 【拖边框后重新自适应】—— 只要用户没有手动缩放过，容器尺寸一变
-   *      就重新算缩放。这是最自然的行为：窗口变宽，图跟着变大。
-   *      一旦用户手动点过 +/-，就进入"手动模式"，不再自动改缩放
-   *      （否则用户精心放大的视野会被一次窗口拖动毁掉）；
-   *      但点「适应」或「1:1」可以退回自动模式。
+   *  ★ 缩放/平移是【每块独立】的：
+   *    两块图尺寸相同但用途不同。共用一份缩放，用户在主画面上放大看细节，
+   *    第二张图会跟着放大 —— 那不是他想要的。
    * ========================================================================== */
 
-  /** 是否处于"手动缩放"模式（用户点过 +/- 或滚轮）。 */
-  function isManualZoom() {
-    return state.manualZoom === true;
+  /**
+   * 造一块画面。
+   *
+   * 三条行为规则（对应用户的三点要求，两块都一样）：
+   *   1) 【默认自适应】不在手动缩放状态时，画面宽度填满可用宽度，
+   *      用户不需要先点一次"适应"。
+   *   2) 【可拖动、可滚轮】放大必须能移动视野，否则放大等于白放大；
+   *      滚轮以【光标位置】为锚点缩放。
+   *   3) 【拖边框后重新自适应】没手动缩放过就跟着容器重算；
+   *      手动缩放后不再自动改（否则精心放大的视野会被一次拖动毁掉），
+   *      点「适应」或「1:1」可退回。
+   */
+  function createPane(idx) {
+    var key = PANE_KEYS[idx];
+    var st = state.panes[key];
+    var dom = {
+      section: document.getElementById('pane-' + idx),
+      head: document.getElementById('pane-' + idx + '-head'),
+      body: document.getElementById('pane-' + idx + '-body'),
+      wrap: document.getElementById('pane-' + idx + '-wrap'),
+      canvas: document.getElementById('pane-' + idx + '-canvas'),
+      placeholder: document.getElementById('pane-' + idx + '-placeholder'),
+      sum: document.getElementById('pane-' + idx + '-sum')
+    };
+
+    /* ★ 复用同一份 ImageData 与 Uint8ClampedArray，避免每帧分配。
+     *   188x120 = 22560 像素，60fps 下每秒分配 1.3 MB 垃圾虽然不算多，
+     *   但扩展宿主到 webview 的每次分配都可能触发 GC 抖动，能省就省。
+     *   两块画面各有一份（它们的尺寸以后可能不同）。 */
+    var ctx = dom.canvas ? dom.canvas.getContext('2d', { alpha: false }) : null;
+    var imageData = null;
+    var rgba = null;
+    var w = 0;
+    var h = 0;
+    /** 实际生效的缩放（自适应时由容器宽度算出，不是用户设的值）。 */
+    var effZoom = 1;
+
+    function isManual() {
+      return st.manual === true;
+    }
+
+    /** 按当前容器宽度算出"填满"所需的缩放系数。 */
+    function fitScale() {
+      if (!dom.wrap || w <= 0) {
+        return 1;
+      }
+      // 左右各留 10px（padding + 边框 + 可能的滚动条），避免出现横向滚动条
+      var avail = Math.max(32, dom.wrap.clientWidth - 20);
+      return Math.max(0.2, avail / w);
+    }
+
+    /** 应用缩放与平移，并同步滚动位置。 */
+    function apply() {
+      if (!dom.canvas || w <= 0) {
+        return;   // 还没收到过帧：由占位文字撑着，不需要算
+      }
+      var z = isManual() ? st.zoom : fitScale();
+      effZoom = z;
+      dom.canvas.style.width = (w * z) + 'px';
+      dom.canvas.style.height = (h * z) + 'px';
+      // 平移通过滚动实现：拖动改 scrollLeft/scrollTop，
+      // 这样浏览器原生处理边界，不需要自己钳制。
+      if (dom.wrap) {
+        if (typeof st.panX === 'number') { dom.wrap.scrollLeft = st.panX; }
+        if (typeof st.panY === 'number') { dom.wrap.scrollTop = st.panY; }
+      }
+    }
+
+    /** 重新自适应（回到自动模式并重新计算）。 */
+    function resetToFit() {
+      st.manual = false;
+      st.zoom = fitScale();
+      st.panX = 0;
+      st.panY = 0;
+      persist();
+      apply();
+    }
+
+    /** 设置手动缩放（以可选的光标位置为锚点）。 */
+    function setZoom(newZoom, anchor) {
+      var old = effZoom || fitScale();
+      var z = Math.max(0.2, Math.min(12, newZoom));
+      st.manual = true;
+      st.zoom = z;
+
+      // 以光标为锚点：让光标下的那个像素在缩放前后停在原地。
+      // 不做锚点的话，滚轮放大时视野会往左上角跑，用户得反复拖回来。
+      if (anchor && dom.wrap) {
+        var wrap = dom.wrap;
+        var rect = wrap.getBoundingClientRect();
+        var cx = anchor.x - rect.left + wrap.scrollLeft;   // 光标在内容坐标系里的位置
+        var cy = anchor.y - rect.top + wrap.scrollTop;
+        var k = z / old;
+        st.panX = cx * k - (anchor.x - rect.left);
+        st.panY = cy * k - (anchor.y - rect.top);
+      }
+      persist();
+      apply();
+    }
+
+    /** 读取当前滚动位置，记进 state（供重建后恢复）。 */
+    function rememberPan() {
+      if (dom.wrap) {
+        st.panX = dom.wrap.scrollLeft;
+        st.panY = dom.wrap.scrollTop;
+      }
+    }
+
+    /**
+     * 画一帧。
+     *
+     * 图像是 RGB 三通道（每像素 R/G/B 三字节）→ canvas 的 RGBA。
+     * ★ alpha 一次性置 255（只在缓冲区重建时做）：每帧都写一遍纯属浪费，
+     *   而 alpha 恒为不透明，所以只写一次完全等价。
+     * ★ RGB 三字节直接抄进 RGBA 的前三槽即可，不需要任何换算 ——
+     *   这正是把输出缓冲从灰度改成真彩色之后最大的好处：
+     *   从"灰度扩成三通道"变成了"原样搬运"。
+     */
+    function draw(rgb, width, height) {
+      if (!ctx || !dom.canvas) {
+        return;
+      }
+      if (!imageData || w !== width || h !== height) {
+        w = width;
+        h = height;
+        dom.canvas.width = width;
+        dom.canvas.height = height;
+        imageData = ctx.createImageData(width, height);
+        rgba = imageData.data;
+      }
+      var n = width * height;
+      for (var i = 0, j = 0, k = 0; i < n; i++, j += 4, k += 3) {
+        rgba[j] = rgb[k];
+        rgba[j + 1] = rgb[k + 1];
+        rgba[j + 2] = rgb[k + 2];
+        rgba[j + 3] = 255;
+      }
+      ctx.putImageData(imageData, 0, 0);
+      if (dom.placeholder) {
+        dom.placeholder.style.display = 'none';
+      }
+      if (dom.sum) {
+        dom.sum.textContent = width + '×' + height;
+      }
+      apply();
+    }
+
+    return {
+      idx: idx,
+      key: key,
+      dom: dom,
+      st: st,
+      hasFrame: function () { return w > 0; },
+      apply: apply,
+      resetToFit: resetToFit,
+      setZoom: setZoom,
+      rememberPan: rememberPan,
+      isManual: isManual,
+      draw: draw
+    };
   }
 
-  /** 按当前容器宽度算出"填满"所需的缩放系数。 */
-  function fitScale() {
-    var wrap = el.screenWrap;
-    if (!wrap || frameW <= 0) {
-      return 1;
-    }
-    // 左右各留 10px（padding + 边框 + 可能的滚动条），避免出现横向滚动条
-    var avail = Math.max(32, wrap.clientWidth - 20);
-    return Math.max(0.2, avail / frameW);
-  }
+  var panes = [createPane(0), createPane(1)];
+  /** 键盘缩放作用于哪一块：鼠标最后停留的那块（默认主画面）。 */
+  var activePane = 0;
 
-  /** 应用缩放与平移，并同步滚动位置。 */
-  function applyZoom() {
-    if (!el.screen) {
-      return;
-    }
-    var z = isManualZoom() ? state.zoom : fitScale();
-    state.effectiveZoom = z;
-    el.screen.style.width = (frameW * z) + 'px';
-    el.screen.style.height = (frameH * z) + 'px';
-    // 平移通过滚动实现：拖动改 scrollLeft/scrollTop，
-    // 这样浏览器原生处理边界，不需要自己钳制。
-    if (el.screenWrap) {
-      if (typeof state.panX === 'number') { el.screenWrap.scrollLeft = state.panX; }
-      if (typeof state.panY === 'number') { el.screenWrap.scrollTop = state.panY; }
-    }
-  }
-
-  /** 重新自适应（回到自动模式并重新计算）。 */
-  function resetToFit() {
-    state.manualZoom = false;
-    state.zoom = fitScale();
-    state.panX = 0;
-    state.panY = 0;
-    persist();
-    applyZoom();
-  }
-
-  /** 设置手动缩放（以可选的光标位置为锚点）。 */
-  function setZoom(newZoom, anchor) {
-    var old = state.effectiveZoom || fitScale();
-    var z = Math.max(0.2, Math.min(12, newZoom));
-    state.manualZoom = true;
-    state.zoom = z;
-
-    // 以光标为锚点：让光标下的那个像素在缩放前后停在原地。
-    // 不做锚点的话，滚轮放大时视野会往左上角跑，用户得反复拖回来。
-    if (anchor && el.screenWrap) {
-      var wrap = el.screenWrap;
-      var rect = wrap.getBoundingClientRect();
-      var cx = anchor.x - rect.left + wrap.scrollLeft;   // 光标在内容坐标系里的位置
-      var cy = anchor.y - rect.top + wrap.scrollTop;
-      var k = z / old;
-      state.panX = cx * k - (anchor.x - rect.left);
-      state.panY = cy * k - (anchor.y - rect.top);
-    }
-    persist();
-    applyZoom();
-  }
-
-  /** 读取当前滚动位置，记进 state（供重建后恢复）。 */
-  function rememberPan() {
-    if (el.screenWrap) {
-      state.panX = el.screenWrap.scrollLeft;
-      state.panY = el.screenWrap.scrollTop;
-    }
+  function paneOf(i) {
+    return panes[i] || panes[0];
   }
 
   /* -------------------------------------------------------- 计时显示 */
@@ -345,24 +418,33 @@
   /**
    * 统一的折叠逻辑。
    *
-   * ★ 为什么四个区块共用同一个函数（用户原话："计时菜单为什么要做的跟
+   * ★ 为什么所有区块共用同一个函数（用户原话："计时菜单为什么要做的跟
    *   变量面版不是同一种组件？"）：
    *   它们本质是同一类东西 —— 可折叠的信息分区。各写一份的结果是
    *   行为不一致（有的记住状态、有的不记；有的标题显示摘要、有的不显示），
    *   用户会觉得"这个界面是拼出来的"。统一成一份，行为自然一致。
+   *
+   * ★ 两块画面（p0 / p1）也走这一份：它们就是"可折叠的信息分区"，
+   *   只是内容是一张图。这样"画面能收起"和"变量能收起"是同一套行为。
    */
   function setOpen(which) {
     var map = {
       timing: [el.timingBody, el.timingHeader, 'timingOpen'],
       pick:   [el.pickBody,   el.pickHeader,   'pickOpen'],
       vars:   [el.varsBody,   el.varsHeader,   'varsOpen'],
-      log:    [el.logBody,    el.logHeader,    'logOpen']
+      log:    [el.logBody,    el.logHeader,    'logOpen'],
+      p0:     [panes[0].dom.body, panes[0].dom.head, 'open'],
+      p1:     [panes[1].dom.body, panes[1].dom.head, 'open']
     };
     var slot = map[which];
     if (!slot || !slot[0]) {
       return;
     }
-    var open = state[slot[2]];
+    /* ★ 画面那两块的开关存在 panes[key].open 里（每块一份），
+     *   其余区块存在顶层 state 上。取值的差异只在这两行里，
+     *   折叠行为本身共用。 */
+    var isPane = (which === 'p0' || which === 'p1');
+    var open = isPane ? panes[which === 'p0' ? 0 : 1].st.open : state[slot[2]];
     slot[0].classList.toggle('collapsed', !open);
     if (slot[1]) {
       var chev = slot[1].querySelector('.chevron');
@@ -372,6 +454,15 @@
   }
 
   function toggle(which) {
+    if (which === 'p0' || which === 'p1') {
+      var pane = panes[which === 'p0' ? 0 : 1];
+      pane.st.open = !pane.st.open;
+      setOpen(which);
+      // 收起再展开后容器宽度可能变了（滚动条消失/出现），
+      // 自适应模式要跟着重算一次，否则画面会留着旧缩放。
+      if (pane.st.open) { pane.apply(); }
+      return;
+    }
     var keys = { timing: 'timingOpen', pick: 'pickOpen', vars: 'varsOpen', log: 'logOpen' };
     state[keys[which]] = !state[keys[which]];
     setOpen(which);
@@ -380,7 +471,8 @@
   function bindCollapsible(which) {
     var map = {
       timing: el.timingHeader, pick: el.pickHeader,
-      vars: el.varsHeader, log: el.logHeader
+      vars: el.varsHeader, log: el.logHeader,
+      p0: panes[0].dom.head, p1: panes[1].dom.head
     };
     var h = map[which];
     if (!h) { return; }
@@ -770,7 +862,9 @@ bind('btn-debug', function () { vscode.postMessage({ type: 'cmd', cmd: 'debug' }
     updateLogCount();
   });
 
-  // ---- 四个折叠区块（统一组件） ----
+  // ---- 折叠区块（统一组件；两块画面也走这一份） ----
+  bindCollapsible('p0');
+  bindCollapsible('p1');
   bindCollapsible('timing');
   bindCollapsible('pick');
   bindCollapsible('vars');
@@ -781,107 +875,131 @@ bind('btn-debug', function () { vscode.postMessage({ type: 'cmd', cmd: 'debug' }
     el.pickFilter.addEventListener('input', function () { renderVariables(); });
   }
 
-  // ---- 画面缩放 ----
-  bind('btn-zoom-in', function () {
-    setZoom((state.effectiveZoom || 1) * 1.25);
-  });
-  bind('btn-zoom-out', function () {
-    setZoom((state.effectiveZoom || 1) / 1.25);
-  });
-  bind('btn-fit', function () { resetToFit(); });
-  bind('btn-zoom-reset', function () {
-    // 1:1 = 一个像素一个像素，看边缘细节时最准
-    state.manualZoom = true;
-    state.zoom = 1;
-    state.panX = 0;
-    state.panY = 0;
-    persist();
-    applyZoom();
-  });
+  /* ---- 每块画面自己的缩放按钮 ----
+   * ★ 两块各四个，走同一个循环绑 —— 只有 DOM 编号不同。
+   *   若手写两遍，以后加个「保存截图」按钮只加在一块上就没人发现。 */
+  for (var pi = 0; pi < panes.length; pi++) {
+    (function (pane, i) {
+      bind('pane-' + i + '-zin', function () {
+        pane.setZoom(pane.st.zoom * 1.25);
+      });
+      bind('pane-' + i + '-zout', function () {
+        pane.setZoom(pane.st.zoom / 1.25);
+      });
+      bind('pane-' + i + '-fit', function () { pane.resetToFit(); });
+      bind('pane-' + i + '-one', function () {
+        // 1:1 = 一个像素一个像素，看边缘细节时最准
+        pane.st.manual = true;
+        pane.st.zoom = 1;
+        pane.st.panX = 0;
+        pane.st.panY = 0;
+        persist();
+        pane.apply();
+      });
+    })(panes[pi], pi);
+  }
 
-  // ---- 滚轮缩放（以光标为锚点） ----
-  if (el.screenWrap) {
-    el.screenWrap.addEventListener('wheel', function (ev) {
-      // 只在画面区滚轮时接管；Ctrl 与否都生效，符合"看大图"的直觉
+  /* ---- 每块画面：滚轮缩放 / 拖动平移 / 尺寸变化重适应 ----
+   *
+   * ★ 这三件事都必须【按块】绑定：它们操作的是这一块自己的容器与状态。
+   *   挂到全局再判断"现在操作哪一块"只会多出一份容易写错的判定。
+   */
+  function bindPaneInteractions(pane, i) {
+    var wrap = pane.dom.wrap;
+    if (!wrap) {
+      return;
+    }
+
+    // 鼠标进入 → 这块成为键盘缩放的默认目标
+    wrap.addEventListener('mouseenter', function () { activePane = i; });
+
+    // 滚轮：以光标位置为锚点缩放（Ctrl 与否都生效，符合"看大图"的直觉）
+    wrap.addEventListener('wheel', function (ev) {
       ev.preventDefault();
+      activePane = i;
       var factor = ev.deltaY < 0 ? 1.15 : (1 / 1.15);
-      setZoom((state.effectiveZoom || 1) * factor, { x: ev.clientX, y: ev.clientY });
+      pane.setZoom(pane.st.zoom * factor, { x: ev.clientX, y: ev.clientY });
     }, { passive: false });
 
     // ---- 拖动平移 ----
     //
-    // ★ 为什么不直接用 scrollLeft 而要做拖拽：
+    // ★ 为什么不直接用滚动条而要做拖拽：
     //   放大后视野比容器大，用户需要"抓住图往想看的方向拖"。
     //   滚动条能用但很别扭（尤其图比容器大很多时）。
     //   按住左键拖动是最符合直觉的交互。
     var dragging = false, dragStart = null;
-    el.screenWrap.addEventListener('mousedown', function (ev) {
+    wrap.addEventListener('mousedown', function (ev) {
       // 只有内容溢出时才需要拖；否则拖动没有意义
-      if (el.screenWrap.scrollWidth <= el.screenWrap.clientWidth + 1 &&
-          el.screenWrap.scrollHeight <= el.screenWrap.clientHeight + 1) {
+      if (wrap.scrollWidth <= wrap.clientWidth + 1 &&
+          wrap.scrollHeight <= wrap.clientHeight + 1) {
         return;
       }
       if (ev.button !== 0) { return; }
       dragging = true;
       dragStart = {
         x: ev.clientX, y: ev.clientY,
-        left: el.screenWrap.scrollLeft, top: el.screenWrap.scrollTop
+        left: wrap.scrollLeft, top: wrap.scrollTop
       };
-      el.screenWrap.classList.add('dragging');
+      wrap.classList.add('dragging');
       ev.preventDefault();
     });
     window.addEventListener('mousemove', function (ev) {
       if (!dragging || !dragStart) { return; }
-      el.screenWrap.scrollLeft = dragStart.left - (ev.clientX - dragStart.x);
-      el.screenWrap.scrollTop = dragStart.top - (ev.clientY - dragStart.y);
+      wrap.scrollLeft = dragStart.left - (ev.clientX - dragStart.x);
+      wrap.scrollTop = dragStart.top - (ev.clientY - dragStart.y);
     });
     window.addEventListener('mouseup', function () {
       if (!dragging) { return; }
       dragging = false;
       dragStart = null;
-      el.screenWrap.classList.remove('dragging');
-      rememberPan();
+      wrap.classList.remove('dragging');
+      pane.rememberPan();
       persist();
     });
+
+    // ---- 容器尺寸变化 → 未手动缩放时自动重新适应 ----
+    //
+    // ★ 这是用户第 3 条要求的落点："就算手动点击 +- 后，重新拖动边框
+    //   （加宽/变窄）之后也自动适应"。
+    //   实现上用 ResizeObserver 监听容器本身，比监听 window.resize 更准 ——
+    //   拖动侧边栏边框时窗口尺寸【不变】，只有容器变，window.resize 根本不触发。
+    if (typeof ResizeObserver !== 'undefined') {
+      var ro = new ResizeObserver(function () {
+        // 手动缩放模式下不动用户设置的缩放，但要记住滚动位置
+        if (pane.isManual()) {
+          pane.rememberPan();
+          return;
+        }
+        pane.apply();
+      });
+      ro.observe(wrap);
+    } else {
+      // 兜底：老 Chromium 没有 ResizeObserver 时用轮询
+      var lastW = wrap.clientWidth;
+      setInterval(function () {
+        var w = wrap.clientWidth;
+        if (w !== lastW) { lastW = w; if (!pane.isManual()) { pane.apply(); } }
+      }, 400);
+    }
   }
 
-  // ---- 容器尺寸变化 → 未手动缩放时自动重新适应 ----
-  //
-  // ★ 这是用户第 3 条要求的落点："就算手动点击 +- 后，重新拖动边框
-  //   （加宽/变窄）之后也自动适应"。
-  //   实现上用 ResizeObserver 监听容器本身，比监听 window.resize 更准 ——
-  //   拖动侧边栏边框时窗口尺寸【不变】，只有容器变，window.resize 根本不触发。
-  if (typeof ResizeObserver !== 'undefined' && el.screenWrap) {
-    var ro = new ResizeObserver(function () {
-      // 手动缩放模式下不动用户设置的缩放，但要记住滚动位置
-      if (isManualZoom()) {
-        rememberPan();
-        return;
-      }
-      applyZoom();
-    });
-    ro.observe(el.screenWrap);
-  } else if (el.screenWrap) {
-    // 兜底：老 Chromium 没有 ResizeObserver 时用轮询
-    var lastW = el.screenWrap.clientWidth;
-    setInterval(function () {
-      if (!el.screenWrap) { return; }
-      var w = el.screenWrap.clientWidth;
-      if (w !== lastW) { lastW = w; if (!isManualZoom()) { applyZoom(); } }
-    }, 400);
+  for (var pj = 0; pj < panes.length; pj++) {
+    bindPaneInteractions(panes[pj], pj);
   }
 
   // Ctrl+= / Ctrl+- 缩放（与 VS Code 自身的缩放快捷键一致的直觉）
+  // ★ 作用于【鼠标最后停留的那块画面】—— 两块图各有各的缩放。
   window.addEventListener('keydown', function (e) {
     if (!e.ctrlKey && !e.metaKey) { return; }
+    var target = paneOf(activePane);
     if (e.key === '=' || e.key === '+') {
-      setZoom((state.effectiveZoom || 1) * 1.25);
+      target.setZoom(target.st.zoom * 1.25);
       e.preventDefault();
     } else if (e.key === '-' || e.key === '_') {
-      setZoom((state.effectiveZoom || 1) / 1.25);
+      target.setZoom(target.st.zoom / 1.25);
       e.preventDefault();
     } else if (e.key === '0') {
-      resetToFit();
+      target.resetToFit();
       e.preventDefault();
     }
   });
@@ -922,7 +1040,20 @@ bind('btn-debug', function () { vscode.postMessage({ type: 'cmd', cmd: 'debug' }
           if (rgb instanceof ArrayBuffer) {
             rgb = new Uint8Array(rgb);
           }
-          drawRgb(rgb, msg.width, msg.height);
+          panes[0].draw(rgb, msg.width, msg.height);
+
+          /* ★ 第二张图：宿主管它叫 rgb2，没有这个字段就是"本帧没有"。
+           *   有才画 —— 没画时保持上一帧的画面，而不是刷成黑的：
+           *   闪烁的空白比"停在上一帧"更难读，何况后端只在真写过时
+           *   才会带这个字段（配置关掉时宿主根本不读它）。 */
+          if (msg.rgb2) {
+            var rgb2 = msg.rgb2;
+            if (rgb2 instanceof ArrayBuffer) {
+              rgb2 = new Uint8Array(rgb2);
+            }
+            panes[1].draw(rgb2, msg.width, msg.height);
+          }
+
           showTiming(msg.timing, msg.index);
           // 显示本帧用的是哪张输入图 —— 逐帧推进时这是用户最先想知道的信息
           if (el.picInfo) {
@@ -939,6 +1070,23 @@ bind('btn-debug', function () { vscode.postMessage({ type: 'cmd', cmd: 'debug' }
         }
         // ★ 必须发 ACK：扩展宿主靠它放行下一帧（postMessage 返回值不可信，见技术要点 §四）
         vscode.postMessage({ type: 'ack', index: msg.index });
+        return;
+      }
+
+      case 'display': {
+        /* 第二张图那一栏显不显示。开关的真值在工程配置里，
+         * 面板只负责照着显示 —— 不在这里再判断一次"该不该显示"。 */
+        try {
+          var on = msg.secondImage === true;
+          var sec = panes[1].dom.section;
+          if (sec) {
+            sec.hidden = !on;
+            // 从隐藏变可见时容器宽度才第一次有效，重新自适应一次
+            if (on) { panes[1].apply(); }
+          }
+        } catch (e) {
+          log('[视图] 第二张图开关更新失败：' + (e && e.message ? e.message : e));
+        }
         return;
       }
 
@@ -1022,13 +1170,21 @@ bind('btn-debug', function () { vscode.postMessage({ type: 'cmd', cmd: 'debug' }
   // ---- 启动：把持久化的 UI 状态应用到 DOM ----
   //
   // ★ 为什么要在最后统一 apply 一次，而不是在 HTML 里写死：
-  //   四个区块的开合状态是【用户上次的选择】，存在 setState 里。
+  //   各区块的开合状态是【用户上次的选择】，存在 setState 里。
   //   如果 HTML 写死，用户每次打开都被重置，等于没记住。
+  setOpen('p0');
+  setOpen('p1');
   setOpen('timing');
   setOpen('pick');
   setOpen('vars');
   setOpen('log');
-  applyZoom();
+  panes[0].apply();
+  panes[1].apply();
+
+  // ★ 第二张图那一栏的初始可见性等宿主下发 display 消息再定：
+  //   那件事的真值在工程配置里，面板不该自己猜一个默认值
+  //   （猜"显示"会让没配的工程多出一块黑画面；猜"不显示"则
+  //    配置开着却要等下一帧才出现）。HTML 里先 hidden，等消息。
 
   // ★ 刻意不往日志区写"视图已就绪"这类环境消息：
   //   那一区现在只放【用户算法 SCUT_Log 的输出】，混进环境噪声会让

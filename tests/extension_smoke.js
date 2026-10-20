@@ -69,6 +69,23 @@ console.log('\n=== 2. parseFrameLine：仿真帧协议 ===');
     const g = protocol.parseFrameLine(noPic);
     ok('缺 pic 字段仍能解析（向后兼容）', !!g, g === undefined ? 'undefined' : '');
     ok('缺 pic 时 pic 为空串', g && g.pic === '', g && JSON.stringify(g.pic));
+
+    /* 第二张图：后端只在算法真写过时才发 img2 字段。
+     * ★ 两种情形都要能解析 —— "缺字段"必须等价于"没有第二张图"，
+     *   否则宿主会因为 undefined 而走进读文件分支。 */
+    const withImg2 = JSON.stringify({
+        frame: 8, w: 188, h: 120,
+        img: 'C:\\a\\b\\frame_0008.ppm',
+        img2: 'C:\\a\\b\\frame_0008_b.ppm',
+        pic: 'pic/1/8.bmp', timing: {},
+    });
+    const h2 = protocol.parseFrameLine(withImg2);
+    ok('带 img2 的帧能解析', !!h2);
+    ok('img2 路径被原样带出来',
+       h2 && h2.img2 === 'C:\\a\\b\\frame_0008_b.ppm',
+       h2 && JSON.stringify(h2.img2));
+    ok('没有 img2 字段时为空串（等价于"没有第二张图"）',
+       g && g.img2 === '', g && JSON.stringify(g.img2));
 }
 
 console.log('\n=== 3. parseVariablesLine：变量协议 ===');

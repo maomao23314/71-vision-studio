@@ -191,3 +191,143 @@ void SCUT_EnvCopyOutput(const scut_u8 *src, int src_w, int src_h)
         }
     }
 }
+
+/* ==========================================================================
+ *  第二张图：写入、搬运、每帧清空
+ *  --------------------------------------------------------------------------
+ *  ★ 为什么这几个函数放在本文件，而不是和 SCUT_OutImageSet 一起放
+ *    scut_draw.c：
+ *      draw 模块绑定的那张图是【最终画面】——它和覆盖层、合成共用一套
+ *      边界（谁在 DRAW 里先写、合成时谁盖谁）。第二张图不参与这套关系：
+ *      没有覆盖层、不合成、不铺底图，它只是一块"算法自己往里画"的缓冲，
+ *      与 SCUT_EnvCopyOutput 一样属于「像素搬运」这一层。
+ *      放进本文件，就不必为了它给 draw 模块再加一个绑定参数。
+ *      （对外 API 仍然都写在 scut_sdk.h 的同一个段落里，
+ *        用的人不需要知道实现分在哪两个文件。）
+ *
+ *  ★ 为什么每帧要清黑（而不是像车载显示缓冲那样自己维护）：
+ *      残留比空白更容易误导 —— 算法这一帧没画，画面却还留着上一帧的内容，
+ *      看起来就像"这一帧也算出了同样的结果"。清黑之后，"黑"只有一个含义：
+ *      这一帧什么都没写。
+ * ========================================================================== */
+
+/* 一个像素写进第二张图。越界/未绑定一律静默忽略（与其它写入接口同约定）。 */
+static void out2_store(int x, int y, scut_u8 r, scut_u8 g, scut_u8 b)
+{
+    scut_u8 *dst = scut_bind_output2();
+    int      w   = scut_bind_width();
+    int      h   = scut_bind_height();
+    scut_u8 *p;
+
+    if (dst == 0 || w <= 0 || h <= 0) {
+        return;
+    }
+    if (x < 0 || x >= w || y < 0 || y >= h) {
+        return;
+    }
+    p = dst + (size_t)y * (size_t)w * 3u + (size_t)x * 3u;
+    p[0] = r;
+    p[1] = g;
+    p[2] = b;
+
+    /* 记账交给 bind：它拥有这块缓冲，由它回答"有没有被用过"。
+     * 后端据此决定要不要每帧多写一张图；从没用过的工程零开销。 */
+    scut_bind_output2_mark();
+}
+
+void SCUT_OutImage2Set(int x, int y, scut_u8 value)
+{
+    /* 灰度值写成等值三通道即为"灰"，与 SCUT_OutImageSet 一致。 */
+    out2_store(x, y, value, value, value);
+}
+
+void SCUT_OutImage2SetRGB(int x, int y, scut_u8 r, scut_u8 g, scut_u8 b)
+{
+    out2_store(x, y, r, g, b);
+}
+
+scut_u8 SCUT_OutImage2Get(int x, int y)
+{
+    const scut_u8 *dst = scut_bind_output2();
+    int            w   = scut_bind_width();
+    int            h   = scut_bind_height();
+    const scut_u8 *p;
+
+    if (dst == 0 || w <= 0 || h <= 0) {
+        return 0;
+    }
+    if (x < 0 || x >= w || y < 0 || y >= h) {
+        return 0;   /* 越界读返回 0，不返回未定义值 */
+    }
+    p = dst + (size_t)y * (size_t)w * 3u + (size_t)x * 3u;
+    return (scut_u8)(((scut_u32)p[0] * 299u + (scut_u32)p[1] * 587u
+                      + (scut_u32)p[2] * 114u + 500u) / 1000u);
+}
+
+/* 把用户数组搬进第二张图。逐像素深拷贝的理由与 SCUT_EnvCopyOutput 相同
+ * （逆透视指针表不能被换掉目标），这里不再重复。 */
+void SCUT_EnvCopyOutput2(const scut_u8 *src, int src_w, int src_h)
+{
+    scut_u8 *dst;
+    int      w;
+    int      h;
+    int      cols;
+    int      x, y;
+
+    if (src == 0) {
+        return;
+    }
+
+    dst = scut_bind_output2();
+    w   = scut_bind_width();
+    h   = scut_bind_height();
+    if (dst == 0 || w <= 0 || h <= 0) {
+        return;
+    }
+
+    if (src_w <= 0) { src_w = w; }
+    if (src_h <= 0) { src_h = h; }
+
+    if (src_w < w) { cols = src_w; } else { cols = w; }
+    if (src_h < h) { h = src_h; }
+
+    for (y = 0; y < h; y++) {
+        const scut_u8 *src_row = src + (size_t)y * (size_t)src_w;
+        scut_u8       *dst_row = dst + (size_t)y * (size_t)w * 3u;
+        for (x = 0; x < cols; x++) {
+            scut_u8 v = src_row[x];
+            dst_row[(size_t)x * 3u + 0] = v;
+            dst_row[(size_t)x * 3u + 1] = v;
+            dst_row[(size_t)x * 3u + 2] = v;
+        }
+        for (x = cols; x < w; x++) {
+            dst_row[(size_t)x * 3u + 0] = 0;
+            dst_row[(size_t)x * 3u + 1] = 0;
+            dst_row[(size_t)x * 3u + 2] = 0;
+        }
+    }
+    scut_bind_output2_mark();
+}
+
+/* 每帧开头由调度器调用：把第二张图清黑。
+ *
+ * ★ 从没被写过的进程直接返回 —— 不必为一个用不到的功能每帧 memset 67 KB。
+ *   一旦写过，之后每帧都清（"用过这项功能"不可逆，这与
+ *   scut_bind_output2_used 的语义一致）。 */
+void scut_env_clear_second_output(void)
+{
+    scut_u8 *dst;
+    int      w;
+    int      h;
+
+    if (!scut_bind_output2_used()) {
+        return;
+    }
+    dst = scut_bind_output2();
+    w   = scut_bind_width();
+    h   = scut_bind_height();
+    if (dst == 0 || w <= 0 || h <= 0) {
+        return;
+    }
+    memset(dst, 0, (size_t)w * (size_t)h * 3u);
+}

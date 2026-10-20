@@ -572,6 +572,60 @@ ok('scut_symbols 从同目录导入 scut_dwarf',
 ok('scut_symbols 不再 import 已删掉的解析辅助',
    'from collections import OrderedDict' not in sym_src)
 
+print('\n=== 18. 第二张图：C → 帧 JSON → 插件 → 面板 的通路必须完整 ===')
+
+# ★ 守的是一类"每一段都对、拼起来不通"的缺陷：
+#   这个功能横跨六个文件（bind / input / sched / 后端 / 插件 / 前端）。
+#   少接一段的表现不是报错，而是"配置开了、代码也写了，面板上什么都没有"，
+#   而用户报告里只会写"第二张图不显示"，看不出断在哪一段。
+#   所以这里逐段断言，缺哪段就报哪段。
+bind_h = read('core/include/scut_bind.h')
+sdk_h = read('core/include/scut_sdk.h')
+input_c = read('core/src/scut_input.c')
+sched_c = read('core/src/scut_sched.c')
+sv3 = read('extension/media/simview.js')
+
+ok('bind 头文件声明了第二块输出图',
+   'scut_bind_output2' in bind_h and 'scut_bind_output2_used' in bind_h)
+ok('bind 单元真的分配了第二块缓冲',
+   'second_image' in bind_code and 'scut_bind_output2(void)' in bind_code)
+ok('sdk 头文件公开了四个第二张图接口',
+   all(n in sdk_h for n in ('SCUT_OutImage2Set', 'SCUT_OutImage2SetRGB',
+                            'SCUT_OutImage2Get', 'SCUT_EnvCopyOutput2')))
+ok('四个接口都有实现',
+   all(n in input_c for n in ('void SCUT_OutImage2Set(',
+                              'void SCUT_OutImage2SetRGB(',
+                              'scut_u8 SCUT_OutImage2Get(',
+                              'void SCUT_EnvCopyOutput2(')))
+ok('写入时会记账（否则后端永远不会多写那张图）',
+   'scut_bind_output2_mark()' in input_c)
+ok('调度器每帧清空第二张图',
+   'scut_env_clear_second_output();' in sched_c)
+ok('后端只在用过之后才写第二张图',
+   'scut_bind_output2_used()' in host_c)
+ok('后端的帧 JSON 带 img2 字段', '"img2"' in host_c)
+ok('第二张图落盘文件名带 _b 后缀', 'frame_%04d_b.ppm' in host_c)
+
+# 插件侧：配置项 → 会话读取 → 宿主转发 → 前端渲染，四段都要在。
+ok('projectconfig.ts 有 display.secondImage',
+   re.search(r'display:\s*\{[^}]*secondImage:\s*boolean', pc_ts, re.S) is not None)
+ok('配置面板把 secondImage 列出来了',
+   re.search(r"path:\s*\['display',\s*'secondImage'\]", cfg_ts) is not None)
+ok('会话按开关决定读不读第二张图',
+   'wantSecondImage' in read('extension/src/simsession.ts'))
+ok('宿主把 rgb2 转发给面板',
+   re.search(r'if\s*\(f\.rgb2\)', read('extension/src/simview.ts')) is not None)
+ok('宿主有单独的 display 消息',
+   "type: 'display'" in read('extension/src/simview.ts'))
+ok('前端处理 display 消息（否则那一栏藏不起来）',
+   re.search(r"case\s+'display'", sv3) is not None)
+ok('前端把 rgb2 画到第二块画布',
+   re.search(r'panes\[1\]\.draw\(rgb2', sv3) is not None)
+ok('两块画面的缩放各自独立（不是一份全局 zoom）',
+   'state.zoom' not in sv3 and 'st.zoom' in sv3)
+ok('旧的单画面 id 已全部改名（防止半新半旧两套 DOM）',
+   'screen-section' not in sv3)
+
 print('\n' + '=' * 60)
 if FAIL == 0:
     print('全部 %d 项通过' % PASS)

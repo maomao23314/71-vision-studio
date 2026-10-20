@@ -50,6 +50,19 @@ export interface SimSessionOptions {
      *   于是"用户填了、插件读不到"。现在只有一个真值，就是工程 JSON。
      */
     projectRoot?: string;
+    /**
+     * 要不要读第二张图（面板上开了那一栏才读）。
+     *
+     * ★ 为什么是【函数】而不是布尔值：
+     *   用户在配置面板里勾上/取消「显示第二张图」不该要求重启仿真进程
+     *   （这个环境从 0.7 起就把"不重启"当成硬约束 —— 算法有前后帧状态）。
+     *   传一个每帧现问一次的 getter，开关就是立即生效的。
+     *
+     * ★ 为什么关掉时干脆【不读文件】：
+     *   第二张图的 PPM 是后端照常写的（后端不知道面板怎么配），
+     *   但读它要一次文件 IO + 一次 PPM 解析。用不上就别读。
+     */
+    wantSecondImage?: () => boolean;
 }
 
 /**
@@ -533,6 +546,26 @@ export class SimSessionImpl implements SimSession {
             );
         }
 
+        let rgb2: Uint8Array | undefined;
+        if (frame.img2 && (this.opts.wantSecondImage?.() ?? false)) {
+            try {
+                const buf2 = await fs.promises.readFile(frame.img2);
+                const img2 = parsePpm(new Uint8Array(buf2));
+                if (img2) {
+                    rgb2 = img2.rgb;
+                } else {
+                    this.emitLog(`[会话] 第 ${frame.frame} 帧的第二张图 PPM 解析失败（文件：${frame.img2}），已跳过。`);
+                }
+            } catch (e) {
+                // ★ 第二张图是附加信息：读不到就只当没有它，不打断这一帧，
+                //   更不卡住 ACK —— 否则"少了一张附加图"会变成"整个面板停住"。
+                this.emitLog(
+                    `[会话] 读不到第 ${frame.frame} 帧的第二张图：${frame.img2}\n`
+                    + `    ${e instanceof Error ? e.message : String(e)}`,
+                );
+            }
+        }
+
                 // ★★ 每帧变量快照（后端 0.7.1 起内嵌在帧 JSON 里）：
         //   以前快照只在进程退出时发一次 → 面板数值永远停在会话启动那一刻，
         //   "只有点测速（重启进程）变量才更新"就是这个时序 bug。
@@ -555,6 +588,7 @@ if (!rgb) {
                 width: frame.w,
                 height: frame.h,
                 rgb: new Uint8Array(frame.w * frame.h * 3),
+                rgb2,
                 timing,
                 pic: frame.pic,
                 loadError: frame.loadError,
@@ -567,6 +601,7 @@ if (!rgb) {
             width: frame.w || (rgb.length > 0 ? rgb.length / 3 : 0),
             height: frame.h,
             rgb,
+            rgb2,
             timing,
             pic: frame.pic,
             loadError: frame.loadError,

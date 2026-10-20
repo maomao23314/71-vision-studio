@@ -272,6 +272,28 @@ if (SCENARIO === 'struct_button') {
   console.log('CLICK_CAUGHT ' + JSON.stringify(caught ? String(caught).split('\n')[0] : ''));
   process.exit(0);
 }
+
+if (SCENARIO === 'pane_toggle') {
+  /* 两块画面的折叠。
+   *
+   * ★ 为什么要专门测：p0/p1 走的是【同一份】setOpen/toggle，但开关存在
+   *   panes[i].open 里而不是顶层 state 上。索引写错（点第二块却动了第一块）
+   *   时，界面表现是"点第二张图的标题，第一块收起来了"——
+   *   只在一块画面上点一次是看不出来的。
+   */
+  const b0 = getEl('pane-0-body');
+  const b1 = getEl('pane-1-body');
+  console.log('INIT ' + b0.classList.contains('collapsed'));
+  getEl('pane-0-head').click();
+  console.log('AFTER ' + b0.classList.contains('collapsed'));
+  getEl('pane-0-head').click();
+  console.log('BACK ' + b0.classList.contains('collapsed'));
+  /* 再点第二块的标题：只该动第二块 */
+  getEl('pane-1-head').click();
+  console.log('P1 ' + b1.classList.contains('collapsed')
+              + ' P0 ' + b0.classList.contains('collapsed'));
+  process.exit(0);
+}
 '''
 
 
@@ -336,6 +358,20 @@ def main():
     else:
         check('CLICK_CAUGHT ""' in out or 'CLICK_CAUGHT null' in out,
               '点击「展开字段」不抛 ReferenceError', out)
+
+    # ---- 场景 3：两块画面的折叠 ----
+    print('\n[3] 画面折叠：p0/p1 各自独立')
+    out, err, rc = run_node('pane_toggle')
+    print('    driver: %s' % (out or '(no output)'))
+    if err:
+        print('    stderr : %s' % err[:400])
+    # 默认展开（body 不带 collapsed）
+    check('INIT false' in out, '两块画面默认展开', out)
+    check('AFTER true' in out, '点标题后正文收起', out)
+    check('BACK false' in out, '再点一次展开（是可切换，不是单向）', out)
+    # ★ 关键：点第二块只该动第二块
+    check('P1 true P0 false' in out,
+          '折叠互不串台（点第二张图不会收起主画面）', out)
 
     print('\n' + '=' * 60)
     if failures:

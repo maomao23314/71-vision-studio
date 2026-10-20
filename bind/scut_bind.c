@@ -105,6 +105,29 @@ scut_u8 SCUT_IN_NAME[SCUT_IMAGE_H][SCUT_IMAGE_W];   /* 输入（摄像头，灰�
  * -------------------------------------------------------------------------- */
 scut_u8 output_image[SCUT_IMAGE_H][SCUT_IMAGE_W * 3];   /* 输出（呈现层读它） */
 
+/* --------------------------------------------------------------------------
+ *  第二块输出图
+ *
+ *  主输出图是"最终画面"（默认底图 + 用户结果图 + 彩色标注合成），
+ *  这一块是给算法放中间结果用的（二值化、俯视图、掩码…），
+ *  面板上单独占一栏。两者完全独立：环境不往这块合成任何东西，
+ *  也不给它铺默认底图 —— 画什么、什么时候画，全在算法里。
+ *
+ *  ★ 为什么也放在 bind 单元、而不是核心库里：
+ *    它是像素缓冲，和输入图/输出图一样属于「谁提供内存」这一层。
+ *    核心库仍然不知道尺寸，尺寸只在这里出现（见本文件头部）。
+ *
+ *  ★ 为什么可以直接用 static（不需要像覆盖层那样用构造函数填哨兵）：
+ *    它的静默语义是「黑色 = 什么都没画」，而全零正好就是黑色 ——
+ *    没有哨兵值这回事，也就不存在"忘了初始化导致整幅涂黑"的坑。
+ * -------------------------------------------------------------------------- */
+static scut_u8 second_image[SCUT_IMAGE_H][SCUT_IMAGE_W * 3];
+
+/* 第二块输出图是否被写过。★ 只置位、从不清零 ——
+ * 它回答的是"本进程里有没有人用过这项功能"，而不是"这一帧写过没有"。
+ * 后端据此决定要不要每帧多写一张 PPM；从没用过它的工程零开销。 */
+static int s_output2_used = 0;
+
 /* 覆盖层（彩色标注，与输出图像同尺寸）
  *
  * ★★ 为什么不能依赖 static 的零初始化，也不能用初始化列表 ★★
@@ -202,6 +225,9 @@ void scut_bind_apply(void)
  * -------------------------------------------------------------------------- */
 scut_u8 *scut_bind_input(void)    { return &SCUT_IN_NAME[0][0]; }
 scut_u8 *scut_bind_output(void)   { return &output_image[0][0]; }
+scut_u8 *scut_bind_output2(void)  { return &second_image[0][0]; }
+void     scut_bind_output2_mark(void) { s_output2_used = 1; }
+int      scut_bind_output2_used(void) { return s_output2_used; }
 scut_u32 *scut_bind_overlay(void) { return &s_overlay[0][0]; }
 int scut_bind_width(void)  { return SCUT_IMAGE_W; }
 int scut_bind_height(void) { return SCUT_IMAGE_H; }

@@ -199,6 +199,15 @@ export interface FramePacket {
      *   Buffer 处理而丢掉快路径，因此生产端必须显式 `new Uint8Array(...)` 拷一层。
      */
     rgb: Uint8Array;
+    /**
+     * 第二张图（算法用 SCUT_OutImage2Set / SCUT_EnvCopyOutput2 画的那张）。
+     *
+     * ★ 只有算法真的写过才有这个字段：后端从没见人写过第二张图时，
+     *   连 PPM 都不生成（见 scut_bind_output2_used）。
+     *   所以「有没有」这件事本身就是信息，不需要额外的布尔字段。
+     * ★ 尺寸与主图相同（同一套 width/height），因为两块缓冲同尺寸。
+     */
+    rgb2?: Uint8Array;
     timing: TimingInfo;
     /** 本帧实际使用的【输入图】路径。 */
     pic?: string;

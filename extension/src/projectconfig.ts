@@ -100,7 +100,27 @@ export interface ProjectConfig {
         /** 「测速」按钮对同一张图重复几遍取平均。 */
         benchRepeat: number;
     };
-    // ★ 这里【故意】没有 view 段 ★
+    /**
+     * 面板显示。
+     *
+     * ★ 与下面那段"故意没有 view 段"的历史不冲突，也不是它的复活：
+     *   那个 view 段的四个字段【没有任何代码读】，是纯摆设；
+     *   这里的 secondImage 有真实消费者 ——
+     *     · simview.ts 决定要不要把第二张图推给面板、要不要渲染那一栏；
+     *     · simsession.ts 据此决定要不要去读第二张图的 PPM。
+     *   加字段的规矩还是同一条：先确认有人读，再写进 UI。
+     */
+    display: {
+        /**
+         * 是否显示第二张图。
+         *
+         * 第二张图是算法用 SCUT_OutImage2Set / SCUT_EnvCopyOutput2 自己画的
+         * 中间结果（二值化、俯视图…）。关掉它的项目零开销：
+         * 后端发现没人写过就根本不生成那张图，插件也不会去读。
+         */
+        secondImage: boolean;
+    };
+    // ★ 这里【故意】没有旧的 view 段 ★
     //   0.9.4 曾加了 showTiming / showVariables / showLog / pickPersist
     //   四项，但全项目没有任何代码读取它们 —— 面板一直按自己的方式显示。
     //   留着就是骗人的死界面：用户勾了「不显示日志」，日志照旧出现，
@@ -109,6 +129,8 @@ export interface ProjectConfig {
     //   不需要再在这里存一份 —— 两份数据就是两个真值。
     //
     //   教训：把字段名写进 UI 很容易，难的是确认有人真的读它。
+    //   ★ 上面的 display 段是后来加的，它【有人读】（见那里的说明），
+    //     所以不算违反这条教训 —— 判断标准是"有没有消费者"，不是"名字像不像"。
     //
     /** 本机工具链。path 空 = 依次探测环境变量 → 已下载的目录 → PATH。 */
     toolchain: {
@@ -160,6 +182,8 @@ export function defaultConfig(): ProjectConfig {
         hooks: { init: [], frame: [], post: [] },
         pic: { dir: '', ext: '', start: 1 },
         run: { processRepeat: 1, runFrames: 60, benchRepeat: 1000 },
+        // ★ 默认关：没写第二张图的工程不该凭空多出一块黑画面。
+        display: { secondImage: false },
         toolchain: { path: '', pythonPath: '', autoWatch: true,
                      watchExclude: '', watchMaxElems: 0 },
     };
@@ -205,6 +229,7 @@ export function normalizeConfig(raw: unknown): ProjectConfig {
     const hooks = asRecord(root.hooks) ?? {};
     const pic = asRecord(root.pic) ?? {};
     const run = asRecord(root.run) ?? {};
+    const disp = asRecord(root.display) ?? {};
     const tc = asRecord(root.toolchain) ?? {};
 
     const str = (v: unknown, fb: string): string =>
@@ -239,7 +264,10 @@ export function normalizeConfig(raw: unknown): ProjectConfig {
             runFrames: count(run.runFrames, 60),
             benchRepeat: count(run.benchRepeat, 1000),
         },
-        // view 段见接口处的说明：故意不存在，空实现避免读写 ghost 字段。
+        // 显示开关：默认关（见接口里 display 段的说明）。
+        display: {
+            secondImage: bool(disp.secondImage, false),
+        },
         toolchain: {
             path: str(tc.path, ''),
             pythonPath: str(tc.pythonPath, ''),
@@ -301,6 +329,7 @@ export function writeConfig(projectRoot: string, cfg: ProjectConfig): void {
     merged.hooks = { ...(asRecord(merged.hooks) ?? {}), ...cfg.hooks };
     merged.pic = { ...(asRecord(merged.pic) ?? {}), ...cfg.pic };
     merged.run = { ...(asRecord(merged.run) ?? {}), ...cfg.run };
+    merged.display = { ...(asRecord(merged.display) ?? {}), ...cfg.display };
     merged.toolchain = { ...(asRecord(merged.toolchain) ?? {}), ...cfg.toolchain };
     merged.inputArray = cfg.inputArray;
     merged.outputArray = cfg.outputArray;

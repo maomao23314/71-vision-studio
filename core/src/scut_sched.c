@@ -359,6 +359,12 @@ static void run_one_frame(void)
      *   这件事与其它每帧状态一样，有一个明确的、单一的位置。 */
     scut_draw_clear_output_written();
 
+    /* 第二张图（算法自己的中间结果）每帧清黑。
+     * ★ 位置与上面那行同一个理由：帧开头、PROCESS 之前 ——
+     *   这样本帧里算法写的内容不会再被谁清掉。
+     * ★ 没用过该功能的进程在这里直接返回，不花 memset 的时间。 */
+    scut_env_clear_second_output();
+
     /* --- 1. PROCESS（重复 repeat 次） ---
      * 复杂度测试时把 repeat 调大，观察 process_us 是否随规模线性增长。
      * 因此这里报的是【每次调用的平均值】：repeat 变大时这个数字应当

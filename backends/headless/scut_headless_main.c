@@ -18,6 +18,7 @@
  *    {"frame":1,"w":188,"h":120,"img":"<path to ppm>",
  *     "pic":"<path to source image>",
  *     ["loadError":"<短中文原因>",]        ← 仅当本帧加载失败时出现
+ *     ["img2":"<path to ppm>",]            ← 仅当算法画过第二张图时出现
  *     "bench":false,
  *     "vars":[{"name":..,"kind":..,"dim":..,"total":..,"values":"..",
  *              "truncated":bool}, ...],     ← 每帧内嵌，面板数值与画面同步
@@ -2061,11 +2062,14 @@ static void on_frame(void *user)
     const scut_timing_t *t = scut_timing_get();
     static int   frame_no = 0;
     char         path[512];
+    char         path2[512];        /* 第二张图（算法中间结果）的输出路径 */
     char         img_esc[1024];
+    char         img2_esc[1024];
     char         pic_esc[SCUT_PATH_MAX * 2];
     char         err_esc[256];      /* loadError 转义缓冲（短语，够用） */
     char        *vars_json = s_vars_json;   /* 进程级缓冲（main 分配一次，见 VARS_JSON_CAP） */
     int          load_error;
+    int          has_img2 = 0;      /* 本帧有没有第二张图可报（见下面写盘那段） */
     int          is_bench;
     const scut_u8 *out;
     int          w, h;
@@ -2097,6 +2101,27 @@ static void on_frame(void *user)
     /* 输出图每像素 3 字节，所以行步长 = 宽度 × 3（不是宽度！）。 */
     snprintf(path, sizeof(path), "%s/frame_%04d.ppm", o->out_dir, frame_no);
     write_ppm(path, out, w, h, w * 3);
+
+    /* ---- 第二张图：算法自己画的中间结果（可选） ----
+     *
+     * ★ 什么时候写：整个进程里【从没被写过】就整条跳过。
+     *   判断依据是 bind 单元的记账（SCUT_OutImage2Set / SCUT_EnvCopyOutput2
+     *   写像素时置位）。这样不用第二张图的工程，每帧不会多一次文件写 ——
+     *   而"要不要显示"是插件那边的事，后端不需要知道配置。
+     *
+     * ★ 写盘失败不报错、只是不带 img2 字段：第二张图是附加信息，
+     *   它写不出来不该让整帧失败（画面那一张才是必须的）。
+     *
+     * ★ 文件名带 _b 后缀（frame_0001_b.ppm），与主图同目录、同一套编号，
+     *   一眼能对上"第几帧的第二张图"。 */
+    if (scut_bind_output2_used()) {
+        snprintf(path2, sizeof(path2), "%s/frame_%04d_b.ppm",
+                 o->out_dir, frame_no);
+        if (write_ppm(path2, scut_bind_output2(), w, h, w * 3) == 0) {
+            json_escape(path2, img2_esc, sizeof(img2_esc));
+            has_img2 = 1;
+        }
+    }
 
     /* 本帧真正用到的输入图路径，随帧一起报出去（JSON 的 "pic" 字段）。
      * ★ 为什么每帧都要报，而不是在开头报一次：
@@ -2162,6 +2187,7 @@ static void on_frame(void *user)
         printf("{\"frame\":%d,\"w\":%d,\"h\":%d,\"img\":\"%s\","
                "\"pic\":\"%s\","
                "%s%s%s"
+               "%s%s%s"
                "\"bench\":%s,"
                "\"vars\":%s,"
                "\"timing\":{\"processUs\":%.3f,\"drawUs\":%.3f,"
@@ -2171,6 +2197,12 @@ static void on_frame(void *user)
                load_error ? "\"loadError\":\"" : "",
                load_error ? err_esc : "",
                load_error ? "\"," : "",
+               /* ★ img2 同样只增不改：算法没动过第二张图时这一整段是空串，
+                *   JSON 里就完全没有这个字段（与 loadError 一样的"可选字段"手法）。
+                *   老解析端看到不认识的字段会忽略，不会有任何影响。 */
+               has_img2 ? "\"img2\":\"" : "",
+               has_img2 ? img2_esc : "",
+               has_img2 ? "\"," : "",
                is_bench ? "true" : "false",
                vars_json,
                t ? t->process_us : 0.0,

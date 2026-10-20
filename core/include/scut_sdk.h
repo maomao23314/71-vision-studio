@@ -105,6 +105,42 @@ scut_u8 SCUT_OutImageGet(int x, int y);
 void SCUT_EnvCopyOutput(const scut_u8 *src, int src_w, int src_h);
 
 /* ==========================================================================
+ *  【第二张图】—— 想在面板上同时看两张图时用
+ *
+ *  默认用不到。只有当你既想看最终画面、又想把某个中间结果并排看
+ *  （二值化图、逆透视俯视图、丢线掩码…）时才需要写这几行。
+ *
+ *  第二张图是一块【独立】的输出缓冲：
+ *    · 环境每帧只负责把它清黑，不铺默认底图、不合成覆盖层；
+ *    · 想显示什么就每帧往里写（不写就是黑的，不会残留上一帧 ——
+ *      这是刻意的：残留会让你以为"算法这次也画了"）；
+ *    · 它的内容【不影响】算法读到的输入图，纯粹是显示。
+ *
+ *  两种写法，按你的代码形状选一种：
+ *      // ① 你已经有自己的数组（最常见）
+ *      uint8_t binary_image[SCUT_IMAGE_H][SCUT_IMAGE_W];
+ *      SCUT_EnvCopyOutput2(binary_image[0], 0, 0);   // 0 = 用环境宽高
+ *
+ *      // ② 想直接点着画（例如把掩码叠成红色）
+ *      SCUT_OutImage2SetRGB(x, y, 255, 0, 0);
+ *
+ *  ★ 面板上要不要显示这一栏，由工程配置（scut_project.json 的
+ *    display.secondImage）决定；代码里写了但配置没开，
+ *    只是看不到，不影响运行。
+ *  ★ 坐标越界、未绑定时一律静默忽略，与 OutImageSet / DrawPoint 同一套约定。
+ * ========================================================================== */
+void SCUT_OutImage2Set(int x, int y, scut_u8 value);
+void SCUT_OutImage2SetRGB(int x, int y, scut_u8 r, scut_u8 g, scut_u8 b);
+
+/* 读第二张图的像素（亮度，BT.601）。主要给"先画后读"的调试代码用。 */
+scut_u8 SCUT_OutImage2Get(int x, int y);
+
+/* 把用户数组搬进第二张图。参数语义与 SCUT_EnvCopyOutput 完全一致：
+ * src 为 row-major 首地址，src_w / src_h 传 0 表示用环境宽高。
+ * ★ 只能在 DRAW / 后处理阶段调用（与 SCUT_EnvCopyOutput 同理）。 */
+void SCUT_EnvCopyOutput2(const scut_u8 *src, int src_w, int src_h);
+
+/* ==========================================================================
  *  【主机侧调试设施】—— 车载工程里给空实现即可，或直接删掉调用
  *
  *  绘制：见 scut_draw.h（SCUT_DrawPoint / DrawLine / DrawRect / DrawText）

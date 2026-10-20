@@ -29,20 +29,42 @@ html, body {
   gap: var(--scut-gap);
   padding: var(--scut-gap);
   box-sizing: border-box;
-  overflow: hidden;
+  /* ★ 原来是 overflow: hidden（内容超出就裁掉）。
+   *   加了第二块画面之后，"两块都展开 + 变量/日志也展开"在矮窗口里
+   *   确实会超出 —— 那时宁可整块面板能滚，也不要让最下面的日志区
+   *   被无声裁掉（被裁掉的那一栏在用户眼里等于不存在）。
+   *   平时内容装得下，这个滚动条根本不会出现。 */
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 /* ------------------------------------------------------------ 画面区域 */
 
-#screen-section {
+/* 一块画面 = 折叠标题 + 画布 + 浮层按钮。
+ * 主画面与第二张图用的是同一个结构，所以这里全是类选择器，没有 id。 */
+.image-pane {
   flex: 0 0 auto;
+}
+
+/* ★ hidden 必须压过 flex：webview 里 [hidden] 的默认 display:none
+ *   会被更具体的规则盖掉，第二张图就藏不住了。 */
+.image-pane[hidden] {
+  display: none;
+}
+
+/* 浮层按钮的定位参照。
+ * ★ 为什么要有这一层、而不是直接挂在 .image-pane 上：
+ *   浮层要浮在【画面】角上，不能跟着滚动内容一起跑。
+ *   .screen-wrap 是滚动容器，所以定位参照必须是它的父级。 */
+.pane-view {
+  position: relative;
 }
 
 /* 画面区右上角的浮层按钮组
  * ★ 为什么用绝对定位浮在画面角上：
  *   侧边栏宽度有限，工具栏再占一行会明显压缩画面。
  *   浮层只在鼠标移入画面区时出现，平时不占空间也不干扰看图。 */
-#screen-actions {
+.pane-actions {
   position: absolute;
   top: 8px;
   right: 8px;
@@ -53,16 +75,12 @@ html, body {
   z-index: 5;
 }
 
-#screen-section {
-  position: relative;   /* 作为 #screen-actions 的定位参照 */
-}
-
-#screen-section:hover #screen-actions,
-#screen-actions:focus-within {
+.pane-view:hover .pane-actions,
+.pane-actions:focus-within {
   opacity: 1;
 }
 
-#screen-actions button {
+.pane-actions button {
   padding: 2px 7px;
   font-size: 11px;
   line-height: 1.5;
@@ -73,22 +91,17 @@ html, body {
   border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.4));
 }
 
-#screen-actions button.primary {
+.pane-actions button.primary {
   background: var(--vscode-button-background, #0e639c);
   color: var(--vscode-button-foreground, #fff);
 }
 
 /* 计时独立成栏（可折叠） */
 
-
-.collapsible > header:hover {
-  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.12));
-}
-
-.collapsible > header .chevron {
-  width: 10px;
-  color: var(--vscode-descriptionForeground, #888);
-}
+/* ★ 这里原先还有一条 `.collapsible > header:hover` 和一条
+ *   `.chevron` 尺寸规则，与文件末尾"可折叠区块标题"那一组完全重复。
+ *   同名规则写两遍，改一处忘了另一处就会得到"有的区块高亮、有的不高亮"，
+ *   所以只保留末尾那一组（它带完整说明）。 */
 
 #timing-body.collapsed {
   display: none;
@@ -111,12 +124,18 @@ html, body {
   background: var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
 }
 
-#screen-wrap {
+/* 画面容器。
+ * ★ max-height：两块画面叠起来容易把下面的变量/日志区挤没，
+ *   给单块设一个上限，超出的部分由本容器的滚动条处理（它已经 overflow:auto）。
+ *   34vh 是按"188×120 的图在常见侧边栏宽度下能完整显示"估的 ——
+ *   再高就会在 1080p 的侧边栏里让下面几栏看不见。 */
+.screen-wrap {
   position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
   min-height: 90px;
+  max-height: 34vh;
   padding: 4px;
   background: var(--vscode-editor-background, #1e1e1e);
   border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
@@ -124,7 +143,7 @@ html, body {
   overflow: auto;
 }
 
-#screen {
+.screen {
   display: block;
   /* ★ 关键：灰度图放大时必须保留硬边，
      否则浏览器会做双线性插值，188x120 放大后糊成一团，
@@ -134,7 +153,7 @@ html, body {
   background: #000;
 }
 
-#placeholder {
+.placeholder {
   position: absolute;
   inset: 0;
   display: flex;
@@ -403,11 +422,11 @@ button.ghost:hover {
  *    没有它，用户不会知道放大之后还能移动视野。
  * ========================================================================== */
 
-#screen-wrap.dragging {
+.screen-wrap.dragging {
   cursor: grabbing;
 }
 
-#screen-wrap {
+.screen-wrap {
   cursor: grab;
 }
 
@@ -419,6 +438,20 @@ button.ghost:hover {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* 两块画面的正文收起。
+ * ★ 与其它区块一样，收起只藏正文，标题留着（标题就是展开的入口）。 */
+#pane-0-body.collapsed,
+#pane-1-body.collapsed {
+  display: none;
+}
+
+/* 画面标题右侧的尺寸标注（188×120）—— 收起时也能看出图有多大 */
+#pane-0-sum,
+#pane-1-sum {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ==========================================================================
