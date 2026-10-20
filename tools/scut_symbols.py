@@ -365,6 +365,10 @@ HEADER = '''/* =================================================================
 #include "scut_sdk.h"
 #include "{src}"
 
+/* ★ 重新锚定行号：用户源码末尾若是未闭合的注释/条件编译，
+ *   没有这一行时下面的构造函数会被一起吞掉（编译失败或静默少注册）。 */
+#line 1 "<scut_autoreg>"
+
 __attribute__((constructor))
 static void scut_autoreg(void)
 {{
@@ -487,6 +491,9 @@ def _emit_wrapper(args, variables, all_variables=None):
                     '%s, %d, %d, %d);'
                     % (v['name'], v['name'], v['kind'],
                        v['total'], v['elem_bytes'], dim))
+        # 来源标签：宿主据此把它和"用户在 code/ 里手写的注册"区分开。
+        regs.append('    scut_watch_tag("%s", SCUT_WATCH_TAG_AUTO);'
+                    % v['name'])
 
     fname = args.out_c.replace('\\', '/').split('/')[-1]
     body = HEADER.format(fname=fname, src=args.src, count=len(variables),
@@ -520,8 +527,8 @@ def scan_manual_watches(src_path):
     用户的手工注册是"我想让你看见这几个量"，语义上等同于"勾选"，
     不该再要求他去变量列表里重新勾一遍。所以面板必须恒定显示它们。
 
-    只认 SCUT_Watch / SCUT_WATCH_SCALAR 两个宏（不带下划线的那个 SCUT_WATCH
-    是它们的实现，不算用户调用）。
+    覆盖 SCUT_Watch 本身、SCUT_WATCH_SCALAR、SCUT_WATCH_ARRAY，以及用户自己
+    包一层、名字里带 SCUT_Watch 的宏（例如 MY_SCUT_Watch）。
     """
     names = set()
     try:
@@ -539,11 +546,17 @@ def scan_manual_watches(src_path):
 
     # 宏名 + 左括号 + 可空白 + 引号 + 名字。名字到收尾引号为止，
     # 中间不允许出现引号或换行，保证不会跨调用误抓。
-    pat = r'\bSCUT_WATCH_SCALAR\s*\(\s*"([^"\n]+)"'
+    # ★ 覆盖所有以 SCUT_Watch 开头的调用名：SCUT_Watch 本身、
+    #   SCUT_WATCH_SCALAR / SCUT_WATCH_ARRAY，以及用户自己包一层的
+    #   MY_SCUT_Watch 之类（只要名字里带着 SCUT_Watch）。
+    pat = r'\b[A-Za-z_]\w*SCUT_Watch\w*\s*\(\s*"([^"\n]+)"'
     for m in re.finditer(pat, text):
         names.add(m.group(1))
-    pat = r'\bSCUT_Watch\s*\(\s*"([^"\n]+)"'
-    for m in re.finditer(pat, text):
+
+    # 用户给宏起了与自己里层调用不同的名字时（例如 WATCH_F(x)），
+    # 内层调用的名字是参数而不是字面量，上面那条抓不到 ——
+    # 退回按"本文件里出现过的字符串字面量"收集候选。
+    for m in re.finditer(r'"([A-Za-z_]\w*)"', text):
         names.add(m.group(1))
     return names
 
@@ -555,22 +568,20 @@ def _emit_manifest(args, variables):
     # ★ 为什么需要 --src-abs：--src 会被原样写进生成文件里的
     #   `#include "{src}"`，所以它必须是相对 code/ 的路径。
     #   而本脚本的工作目录不保证是工程根，按 --src 相对路径去 open()
-    #   可能失败 —— 曾经就是这样：失败被 except 吞掉、静默返回空集，
-    #   症状是"用户主动注册的变量一个都不显示"且没有任何报错。
-    manual = scan_manual_watches(args.src_abs or args.src)
+    #   可能失败 —— 曾经就是这样：失败被 except 吞掉、静默返回空集。
+    hand = scan_manual_watches(args.src_abs or args.src)
+
     manifest = {
         'note': MANIFEST_NOTE,
         'source': args.src,
         'count': len(variables),
-        # ★★ 顶层单独列出手写注册的名字，而不是只给每个变量打 manual 标记。
+        # ★★ 手写注册的名单由宿主用【运行期标签】补全，这里只留空表。
         #
-        #   原因：手写注册最常见的就是【结构体成员】
-        #   （SCUT_WATCH_SCALAR("cam_err", &m7_0_data.cam_err, ...)），
-        #   而结构体成员在 DWARF 里【没有独立变量条目】——
-        #   实测真实工程里 7 个手写变量一个都不在 DWARF 清单中。
-        #   只把 manual 标在 DWARF 变量上会全部丢失（标了也没对应条目）。
-        #   名字单独存一份，宿主才能拿它去标记【运行期注册表】里的条目。
-        'manualWatches': sorted(manual),
+        #   手写注册最常见的是结构体成员，它在 DWARF 里没有独立条目，
+        #   编译期根本看不到。所以"哪些是手写的"只能到运行期问：
+        #   生成的注册会给自动发现的变量带上 SCUT_WATCH_AUTO 来源标签，
+        #   宿主取"注册表里有、但不带标签"的名字，就是用户手写的集合。
+        'manualWatches': [],
         'variables': [
             {
                 'name': v['name'],
@@ -582,7 +593,10 @@ def _emit_manifest(args, variables):
                 'isPtr': v['ptr'],
                 'isStatic': not v['external'],
                 'declLine': v['decl_line'],
-                'manual': v['name'] in manual,
+                # 编译期的初值：本文件里出现过这个名字的字面量。
+                # ★ 生成器自己写的那行注册也算在内，所以最终判定在运行期，
+                #   见上面 manualWatches 的说明。
+                'manual': v['name'] in hand,
                 # 默认勾选策略：标量与小数组默认看，巨大缓冲默认不看，
                 # 避免一上来就把 22560 字节的图像缓冲塞进 UI。
                 'defaultSelected': v['total'] <= 512,

@@ -392,9 +392,9 @@ export function createProjectFromTemplate(
             root: dst,
             message: `工程已创建：${dst}\n`
                 + `    已复制：${copied.join('、')}\n`
-                + '    下一步：打开这个文件夹，改 config.h 里的 SCUT_IMAGE_W / SCUT_IMAGE_H 对齐你的摄像头，'
-                + '把【你自己的】测试图按 1、2、3… 连续编号放进 pic/1/（放法见 pic/1/README-pic.txt），'
-                + '然后按 F5。',
+                + '    下一步：打开这个文件夹，按 Ctrl+Shift+B 编译，再按 → 看下一张；'
+                + '图像尺寸、钩子函数等在侧边栏的 ⚙ 配置面板里改。'
+                + '把【你自己的】测试图按连续编号放进 pic/1/（放法见 pic/1/README-pic.txt）。',
         };
     } catch (e) {
         return {

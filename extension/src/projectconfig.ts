@@ -127,8 +127,7 @@ export interface ProjectConfig {
          * 多个的话建议在这里写死。
          */
         pythonPath: string;
-        /** 找不到工具链时，是否允许下载一份（下载前一定会先问）。 */
-        autoDownload: boolean;
+        // ★ 没有 autoDownload 字段：要不要下载由弹窗当场问，不再另存一个开关。
         /** 编译时自动发现全局变量（关闭可加快构建，但变量面板会是空的）。 */
         autoWatch: boolean;
         /**
@@ -161,7 +160,7 @@ export function defaultConfig(): ProjectConfig {
         hooks: { init: [], frame: [], post: [] },
         pic: { dir: '', ext: '', start: 1 },
         run: { processRepeat: 1, runFrames: 60, benchRepeat: 1000 },
-        toolchain: { path: '', pythonPath: '', autoDownload: true, autoWatch: true,
+        toolchain: { path: '', pythonPath: '', autoWatch: true,
                      watchExclude: '', watchMaxElems: 0 },
     };
 }
@@ -244,7 +243,6 @@ export function normalizeConfig(raw: unknown): ProjectConfig {
         toolchain: {
             path: str(tc.path, ''),
             pythonPath: str(tc.pythonPath, ''),
-            autoDownload: bool(tc.autoDownload, true),
             autoWatch: bool(tc.autoWatch, true),
             // 黑名单：字符串原样留着（逗号分隔），空串 = 不排除。
             watchExclude: str(tc.watchExclude, ''),

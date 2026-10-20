@@ -22,7 +22,34 @@
 #define SCUT_WATCH_MAX 488
 
 static scut_watch_entry_t s_watch[SCUT_WATCH_MAX];
+/* 每条是否由自动符号发现注册（来源标签）。数组对外不可见，
+ * 用 scut_watch_auto_tagged() 查询。 */
+static unsigned char      s_auto_tag[SCUT_WATCH_MAX];
 static int                s_count = 0;
+
+/* 每个渲染类型占几个字节。与 tools/scut_symbols.py 的 BASE_TYPES 表逐项对应。
+ * ★ 指针/字符串/结构体由调用方给，这里返回 0 表示"不按类型推导"。
+ * ★ 必须有一份：以前元素宽度完全靠调用方传，宏取的是 sizeof(*p)，
+ *   与类型标签可能不一致（例如用 SCUT_T_F64 注册一个 float），
+ *   读值时就会多读 4 字节相邻内存。 */
+static int type_width(int t)
+{
+    switch ((scut_watch_type_t)t) {
+    case SCUT_T_I8:
+    case SCUT_T_U8:
+    case SCUT_T_BOOL: return 1;
+    case SCUT_T_I16:
+    case SCUT_T_U16:  return 2;
+    case SCUT_T_I32:
+    case SCUT_T_U32:
+    case SCUT_T_F32:
+    case SCUT_T_ENUM: return 4;
+    case SCUT_T_I64:
+    case SCUT_T_U64:
+    case SCUT_T_F64:  return 8;
+    default:          return 0;
+    }
+}
 
 /* --------------------------------------------------------------------------
  * 注册
@@ -38,6 +65,10 @@ void SCUT_Watch(const char *name, const void *p, scut_watch_type_t t,
     if (count <= 0)    { count     = 1; }
     if (elem_size <= 0){ elem_size = 1; }
     if (dim < 0)       { dim       = 0; }
+    /* 类型比调用方传的宽度可信：按类型推导得出的宽度优先。 */
+    if (type_width((int)t) > 0) {
+        elem_size = type_width((int)t);
+    }
 
     if (s_count >= SCUT_WATCH_MAX) {
         return;                                  /* 表满：丢弃而不是覆盖 */
@@ -61,6 +92,44 @@ void SCUT_Watch(const char *name, const void *p, scut_watch_type_t t,
     s_count++;
 }
 
+/* 按名字找下标，找不到返回 -1。 */
+static int find_by_name(const char *name)
+{
+    int i;
+
+    if (name == 0) {
+        return -1;
+    }
+    for (i = 0; i < s_count; i++) {
+        if (strcmp(s_watch[i].name, name) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+void scut_watch_tag(const char *name, const char *tag)
+{
+    int i = find_by_name(name);
+
+    if (i < 0 || tag == 0) {
+        return;                      /* 没注册过：标签没有可挂的位置 */
+    }
+    if (strcmp(tag, SCUT_WATCH_TAG_AUTO) == 0) {
+        s_auto_tag[i] = 1;
+    }
+}
+
+int scut_watch_auto_tagged(const char *name)
+{
+    int i = find_by_name(name);
+
+    if (i < 0) {
+        return -1;
+    }
+    return s_auto_tag[i] ? 1 : 0;
+}
+
 int scut_watch_count(void)
 {
     return s_count;
@@ -76,6 +145,11 @@ const scut_watch_entry_t *scut_watch_at(int index)
 
 void scut_watch_reset(void)
 {
+    int i;
+
+    for (i = 0; i < s_count; i++) {
+        s_auto_tag[i] = 0;
+    }
     s_count = 0;
 }
 

@@ -744,8 +744,7 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
             就会去改 scut_project.json 手改，既慢又容易写错键名。
         所以：不放视图标题栏（那里是高频动作区），也不塞进日志区，
         而是工具行末尾的一个不显眼的按钮，鼠标移上去才看得清。
-        点它直接跳到本插件的设置页并展开「工具链」子栏目 ——
-        最常被找的就是这一组。
+        点它打开本插件的配置面板（工具链在最后一组）。
       -->
       <button id="btn-settings" class="ghost" title="打开设置（图像尺寸 / 数组 / 钩子 / 图集 / 运行期 / 工具链）">⚙</button>
     </section>
@@ -756,6 +755,8 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
 
     <!--
       ★★ 变量：勾选与查看【分成两块】★★
+      勾选区只放"自动发现"的变量；主动暴露（代码里显式注册）的恒显示，不给勾选框。
+
       用户的原话点出了要害："勾选的可以在查看页面被查看"。
 
         勾选区 = 决定"环境要观察哪些变量"，是配置，改一次就放着不动
@@ -778,8 +779,8 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
       </header>
       <div id="pick-body" class="collapsed">
         <div class="pick-hint dim">
-          勾选决定「查看」区显示哪些变量，也会传给仿真程序让它只统计这些。
-          用法：勾几个你自己代码里关心的全局量；不确定的先留空也能跑。
+          这里只列自动发现的变量。勾选只决定「查看」区显示哪些，不影响仿真进程，也不需要重新编译。<br>
+          代码里显式 <code>SCUT_Watch</code> 注册的变量恒显示，不在这里出现。
         </div>
         <input id="pick-filter" type="search" placeholder="输入名字过滤…" />
         <div class="pick-tools">

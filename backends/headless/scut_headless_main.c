@@ -28,6 +28,9 @@
  *    （PGM 只能表达单通道灰度）。这里原先写成 "<path to pgm>"，
  *    照它去写解析器会按灰度格式读彩色数据。
  *
+ *  ★ 每个变量带 "autoTag"：true = 构建时自动发现的，false = 用户在代码里
+ *    手写 SCUT_Watch 注册的。宿主据此把"主动暴露"排到最前面。
+ *
  *  ★ 变量快照【也】有一条独立输出行（仅 --list-vars 模式）：
  *    {"vars":[{"name":"g_threshold","values":"128","truncated":false}, ...]}
  *    会话模式（--json --step）下快照随帧走，不再单独发。
@@ -41,7 +44,7 @@
  *    修复"测试图找不到"的 bug 之后，内部使用的图片路径变成了绝对路径
  *    （因为要由 exe 位置反推工程根）。但直接把这串绝对路径显示出来
  *    对用户毫无帮助 ——
- *      D:/22车队管理/.../scut71-project/pic/1/3.bmp
+ *      <你的工程>/pic/1/3.bmp
  *    会把插件界面撑开，而用户想知道的只是"第 3 张"。
  *    所以这里在【导出显示】时把它折回工程根的相对形式（pic/1/3.bmp）。
  *    字段名、字段类型都没变，变的只是字符串的内容更短更好读；
@@ -135,26 +138,13 @@ static void ensure_dir(const char *path)
 /* --------------------------------------------------------------------------
  *  测试图集的编译期默认值
  *
- * ★ 为什么要放这个「三处兜底」：
- *   测试图目录/扩展名写在哪里，是这个环境里唯一一处「约定」而非「契约」。
- *   旧环境把 SCUT_PIC_DIR 定在 config.h 里，而 config.h 又被记录为
- *   「只有尺寸是必改项」——于是新版 config.h 一度把这两行删掉了。
- *   如果这里不做兜底，用户手上任何一份老 config.h 都会让宿主
- *   直接编译失败，而报错信息是「SCUT_PIC_DIR 未声明」，
- *   完全看不出「其实是你配置头文件版本旧了」。
- *   所以这里给出与历史 config.h 逐字一致的默认值
- *   （`SCUT_PIC_DIR "pic/1"` / `SCUT_PIC_EXT ".bmp"`）：
- *   老工程能编译、新工程以 scut_project.json 为准，两边都不需要改代码。
+ * ★ 这三行只是"什么都没给"时的兜底：
+ *   图集目录与后缀是运行期参数，正常由插件通过 --pic / --ext 传进来；
+ *   两者都没传时才用这里的默认值（"pic/1" / ".bmp"）。
  *
- * ★ 注意 templates/starter/ 里【没有】config.h ——
- *   新模板是 scut_project.json + code/camera.c。
- *   这里的默认值只在"既没有 --pic、也没有老 config.h"时兜底。
- *
- * ★ 用 #ifndef 而不是 #define 覆盖：
- *   宏在 include 链上已经定义过就是权威，绝不在这里重新定义 ——
- *   重定义会触发 'macro redefined' 警告，而本文件要求零警告。
- *   （头文件名两种约定由 scut_sdk.h / bind 的 __has_include 处理，
- *     这里只负责「没定义时给默认值」。）
+ * ★ 为什么带 #ifndef：
+ *   宏在 include 链上已经定义过就以它为准，这里不重新定义，避免
+ *   'macro redefined' 警告。
  * -------------------------------------------------------------------------- */
 #ifndef SCUT_PIC_DIR
 #  define SCUT_PIC_DIR "pic/1"
@@ -206,6 +196,8 @@ typedef struct {
      *   读代码的人要同时看两处才知道路径是怎么来的。
      *   放进这里，路径解析的全部输入就在同一个结构体里，一眼看得全。 */
     const char *argv0;        /* 程序自身的 argv[0]，用于反推 exe 所在目录 */
+    int         no_draw;      /* --no-draw：不绘制、不合成（压测纯算法用） */
+    int         no_log;       /* --no-log：不收集 SCUT_Log 行（避免刷屏） */
 } options_t;
 
 static void usage(void)
@@ -229,6 +221,8 @@ static void usage(void)
         "                  图集按 0 起编号 (N=0 即第一张)，否则按旧约定 1 起。\n"
         "                  N 超出张数时自动夹回最后一张并给出警告。\n"
         "  --advance       每帧前进到下一张图 (跑到末尾自动回绕到第一张)\n"
+        "  --no-draw       不绘制、不合成覆盖层 (压测纯算法时去掉这部分开销)\n"
+        "  --no-log        不收集 SCUT_Log 输出 (长时间跑时避免日志刷屏)\n"
         "  --out DIR       帧图像输出目录 (默认 ./scut_frames)\n"
         "  --help          显示本帮助\n");
 }
@@ -261,6 +255,8 @@ static int parse_args(int argc, char **argv, options_t *o)
     o->frame_index = 1;
     o->frame_index_given = 0;
     o->advance     = 0;
+    o->no_draw     = 0;
+    o->no_log      = 0;
     /* ★ 先把 argv[0] 收到默认值，再进解析循环：
      *   循环里的任何分支（包括"未知参数"提前返回）都不会影响它，
      *   于是"路径解析永远拿得到一个可用的 argv[0]（或 NULL）"成为不变量。
@@ -284,6 +280,10 @@ static int parse_args(int argc, char **argv, options_t *o)
             o->advance = 1;
         } else if (strcmp(a, "--list-vars") == 0) {
             o->list_vars = 1;
+        } else if (strcmp(a, "--no-draw") == 0) {
+            o->no_draw = 1;
+        } else if (strcmp(a, "--no-log") == 0) {
+            o->no_log = 1;
         } else if (strcmp(a, "--frames") == 0 && i + 1 < argc) {
             o->frames = atoi(argv[++i]);
         } else if (strcmp(a, "--repeat") == 0 && i + 1 < argc) {
@@ -754,7 +754,7 @@ static int scut_exe_dir(const char *argv0, char *out, size_t cap)
  *  ★ 为什么必须做这件事（它不只是"好看"）：
  *      JSON 的 "pic" 字段是要显示在插件界面上的。修复路径解析之后，
  *      s_pic_dir 会变成一个绝对路径，于是界面上会出现
- *          D:/22车队管理/一轮考核/视觉组/集成仿真环境测试/scut71-project/pic/1/3.bmp
+ *          <你的工程>/pic/1/3.bmp
  *      这一长串把界面撑开、把真正有用的信息（第 3 张）挤到看不见的地方。
  *      用户需要的是"这一帧看的是哪张图"，而不是"这张图在磁盘的哪个角落"。
  *      所以显示层必须把它折回工程根的相对形式：pic/1/3.bmp。
@@ -1130,12 +1130,12 @@ static int pic_detect_first_index(const char *dir)
  *      依然黑屏。只有"第一张图真的在"才算命中，
  *      才真正回答了"图集到底在哪里"这个问题。
  *
- *  ★ 为什么命中判断用的是编号 1（而不是 --frame 指定的编号）：
- *      探测规则本身就是"编号从 1 起且连续"，编号 1 是这套约定的锚点。
+ *  ★ 为什么命中判断用的是【起始编号那张】（0 或 1，而不是 --frame 指定的编号）：
+ *      起始编号由 pic_detect_first_index 按目录实际内容决定。
  *      用 --frame 指定的编号去判断会让结果依赖用户翻页的位置：
  *      用户翻到第 30 张时，一个只有 5 张图的目录会被判成"不命中"，
  *      于是根被换掉、张数变成 0 —— 翻页反而把图集翻没了。
- *      锚在 1 上，探测结果就与 --frame 完全无关，稳定且可预期。
+ *      锚在起始编号上，探测结果就与 --frame 完全无关，稳定且可预期。
  * -------------------------------------------------------------------------- */
 static void resolve_pic_set(const options_t *o)
 {
@@ -1374,8 +1374,7 @@ static void resolve_pic_set(const options_t *o)
      *     ② 搜的【每一个】候选位置（★ 这一段是本轮新增的重点）；
      *     ③ 期望的【文件名模式】；
      *     ④ 后果（黑图）与【下一步怎么做】。
-     *   并把 SCUT_PIC_DIR / SCUT_PIC_EXT 两个宏名点出来——
-     *   用户拿这两个名字才能在 config.h 里搜到该改哪一行。
+     *   并说清目录与后缀分别来自哪个参数（--pic / --ext，或兜底默认值）。
      *
      * ★★ 为什么"把试过的路径全列出来"是必须的：
      *   修复前那条警告说"相对目录是相对进程当前工作目录解析的"。
@@ -1810,6 +1809,9 @@ static void json_escape(const char *s, char *dst, size_t cap)
     dst[o] = '\0';
 }
 
+static void build_vars_json(const options_t *o, char *out, size_t cap);
+static void emit_variables(const options_t *o);
+
 /* --------------------------------------------------------------------------
  * 变量快照输出
  *
@@ -1819,49 +1821,32 @@ static void json_escape(const char *s, char *dst, size_t cap)
  * -------------------------------------------------------------------------- */
 static void emit_variables(const options_t *o)
 {
-    char buf[1024];
-    int  i;
-    int  n = scut_watch_count();
-    int  first = 1;
+    /* ★ 直接复用每帧快照那套生成逻辑（build_vars_json）。
+     *   两处各自拼一遍 JSON，就必然有一处会漂移；一份实现不会。 */
+    /* 与每帧快照各用一份缓冲：两者生命周期不同，共用会互相覆写。 */
+    static char json[81920];
+    int n = scut_watch_count();
+    int i;
 
-    if (!o->json) {
-        printf("--- 变量 (%d 个) ---\n", n);
-    } else {
-        printf("{\"vars\":[");
+
+    build_vars_json(o, json, sizeof(json));
+    if (o->json) {
+        printf("{\"vars\":%s}\n", json);
+        return;
     }
-
+    printf("--- 变量 (%d 个) ---\n", n);
     for (i = 0; i < n; i++) {
         const scut_watch_entry_t *w = scut_watch_at(i);
+        char buf[1024];
         int  truncated = 0;
-        int  shown;
 
         if (w == 0) { continue; }
         if (!var_selected(w->name, o->select_vars)) { continue; }
-
-        shown = scut_watch_read(i, buf, (int)sizeof(buf), 24, &truncated);
-        (void)shown;
-
-        if (o->json) {
-            char name_esc[256];
-            char val_esc[2048];
-            json_escape(w->name, name_esc, sizeof(name_esc));
-            json_escape(buf, val_esc, sizeof(val_esc));
-            printf("%s{\"name\":\"%s\",\"kind\":%d,\"dim\":%d,\"total\":%d,"
-                   "\"values\":\"%s\",\"truncated\":%s}",
-                   first ? "" : ",", name_esc, (int)w->t, w->dim, w->n,
-                   val_esc, truncated ? "true" : "false");
-            first = 0;
-        } else {
-            printf("  %-24s [%d] = %s%s\n", w->name, w->n, buf,
-                   truncated ? " ..." : "");
-        }
+        (void)scut_watch_read(i, buf, (int)sizeof(buf), 24, &truncated);
+        printf("  %-24s [%d] = %s%s\n", w->name, w->n, buf,
+               truncated ? " ..." : "");
     }
-
-    if (o->json) {
-        printf("]}\n");
-    } else {
-        printf("\n");
-    }
+    printf("\n");
 }
 
 /* --------------------------------------------------------------------------
@@ -1876,23 +1861,23 @@ static void emit_variables(const options_t *o)
  *    现在把快照内嵌进【每帧】的 JSON 行（"vars" 字段，追加在 loadError
  *    之后、timing 之前），扩展每收一帧就更新一次面板 —— 数值与画面同步。
  *
- *  ★ 大小：--select 过滤后通常只有几个变量，每个值的显示上限 24 个元素
- *    （与 emit_variables 相同），4KB 缓冲足够；万一超长就截断并以 "…]"
- *    收尾——截断的是【显示用快照】，不是算法数据，安全。
+ *  ★ 大小：每个值的显示上限 24 个元素。缓冲由调用方给
+ *    （每帧快照是 80KB 的进程级缓冲）；放不下就整条跳过，
+ *    保证任何时刻写出的都是合法 JSON。
  * -------------------------------------------------------------------------- */
 static void build_vars_json(const options_t *o, char *out, size_t cap)
 {
-    char buf[1024];
-    size_t used = 0;
-    int  i;
-    int  n = scut_watch_count();
-    int  first = 1;
-    int  trunc_note = 0;
+    char   buf[1024];
+    size_t used;
+    int    i;
+    int    n = scut_watch_count();
+    int    first = 1;
 
-    out[0] = '\0';
     if (cap < 3) { return; }
-    used += (size_t)snprintf(out + used, cap - used, "[");
-    if (used >= cap) { return; }
+    out[0] = '[';
+    out[1] = ']';
+    out[2] = '\0';
+    used = 1;                       /* 已写下的长度，含开头的 '[' */
 
     for (i = 0; i < n; i++) {
         const scut_watch_entry_t *w = scut_watch_at(i);
@@ -1904,41 +1889,40 @@ static void build_vars_json(const options_t *o, char *out, size_t cap)
         (void)scut_watch_read(i, buf, (int)sizeof(buf), 24, &truncated);
 
         {
+            static const char *const tag_names[2] = { "false", "true" };
             char name_esc[256];
             char val_esc[2048];
             char one[2560];
+            const char *tag_s;
             int  wl;
+
             json_escape(w->name, name_esc, sizeof(name_esc));
             json_escape(buf, val_esc, sizeof(val_esc));
+            /* 来源标签：true = 自动发现的，false = 用户手写的。
+             * ★ 用数组下标而不是两条字符串分支：编译器不能把
+             *   "读静态数组 → 选字面量"折叠掉。 */
+            tag_s = tag_names[(scut_watch_auto_tagged(w->name) == 1) ? 1 : 0];
             wl = snprintf(one, sizeof(one),
                           "%s{\"name\":\"%s\",\"kind\":%d,\"dim\":%d,\"total\":%d,"
-                          "\"values\":\"%s\",\"truncated\":%s}",
+                          "\"values\":\"%s\",\"truncated\":%s,\"autoTag\":%s}",
                           first ? "" : ",", name_esc, (int)w->t, w->dim, w->n,
-                          val_esc, truncated ? "true" : "false");
-            if (wl < 0) { continue; }
-            if (used + (size_t)wl + 2 >= cap) { trunc_note = 1; break; }
+                          val_esc, truncated ? "true" : "false", tag_s);
+            if (wl < 0 || (size_t)wl >= sizeof(one)) {
+                continue;           /* 单条目本身就放不下：跳过，不影响其它条目 */
+            }
+            /* 还要给结尾的 ']' 和 '\0' 留位置。放不下就到此为止。 */
+            if (used + (size_t)wl + 2 > cap) {
+                break;
+            }
+            /* ★ 先拷条目，再把 ']' 和结束符补在它后面 ——
+             *   任何一次循环结束时 out 都是合法 JSON，不需要事后回退。
+             *   旧写法先拷条目、最后补 ']'，截断收尾时按 used 回退找 '}'，
+             *   恰好卡在缓冲末尾时会写到 out[cap] 之外。 */
             memcpy(out + used, one, (size_t)wl);
             used += (size_t)wl;
-            out[used] = '\0';
+            out[used]     = ']';
+            out[used + 1] = '\0';
             first = 0;
-        }
-    }
-
-    if (used + 2 < cap) {
-        used += (size_t)snprintf(out + used, cap - used, "]");
-        (void)trunc_note;   /* 截断时 out 已经合法（以 "]" 收尾前的部分），
-                             * 但 used 未含 "]" —— 这里补上 */
-        if (trunc_note) {
-            /* 超长：回退到安全位置并强制收尾，保证 JSON 合法 */
-            size_t k = (used > 0) ? used - 1 : 0;
-            /* 去掉可能残缺的最后一个条目：向前找最后一个 '}' */
-            while (k > 0 && out[k] != '}') { k--; }
-            if (out[k] == '}') {
-                out[k + 1] = ']';
-                out[k + 2] = '\0';
-            } else {
-                snprintf(out, cap, "[]");
-            }
         }
     }
 }
@@ -1984,7 +1968,7 @@ static int write_ppm(const char *path, const scut_u8 *rgb, int w, int h, int str
  *  ★ 为什么不直接返回 scut_pic_path()（绝对路径）：
  *      修复路径解析之后 s_pic_path 变成了绝对路径，而它要显示在
  *      插件的帧信息里。测试工程的实际路径长这样：
- *        D:/22车队管理/一轮考核/视觉组/集成仿真环境测试/scut71-project/pic/1/3.bmp
+ *        <你的工程>/pic/1/3.bmp
  *      这一长串会把界面撑开，把真正有用的"第 3 张"挤到看不见的地方。
  *      用户要看的是"这一帧用的是哪张图"，不是"这张图在磁盘的哪个角落"。
  *      折成 "pic/1/3.bmp" 之后，一眼就能对上号。
@@ -2223,7 +2207,7 @@ static void on_frame(void *user)
      *  取完清空缓冲：不清的话旧日志会在下一帧被再次取出（重复刷屏）。
      * ---------------------------------------------------------------------- */
     {
-        int ln = scut_log_line_count();
+        int ln = o->no_log ? 0 : scut_log_line_count();
         int k;
         for (k = 0; k < ln; k++) {
             const char *s = scut_log_line_at(k);
@@ -2516,6 +2500,14 @@ int main(int argc, char **argv)
      *   旧实现解析了 --repeat 却从未应用，属于"设置项是死的"那类缺陷。 */
     if (o.repeat >= 1) {
         scut_sched_set_repeat(o.repeat);
+    }
+
+    /* --no-draw / --no-log：调度器每帧从这两个开关取值，改完立即生效。 */
+    if (o.no_draw) {
+        scut_sched_set_draw_enabled(0);
+    }
+    if (o.no_log) {
+        scut_sched_set_log_enabled(0);
     }
 
     /* --- 4) 只列变量就退出（供 IDE 的变量面板初始化） ---

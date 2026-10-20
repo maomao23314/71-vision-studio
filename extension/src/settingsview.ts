@@ -47,6 +47,9 @@ export function showSettingsPanel(
         void vscode.window.showErrorMessage(`SCUT-71 ${error}`);
     }
 
+    // 打开面板时顺手核对 .vscode/extensions.json（推荐 clangd）。
+    ensureRecommendedExtensions(projectRoot);
+
     const panel = vscode.window.createWebviewPanel(
         'scut71.settings',
         'SCUT-71 配置',
@@ -120,6 +123,35 @@ export function showSettingsPanel(
     panel.onDidDispose(() => {
         current = undefined;
     });
+}
+
+/**
+ * 在工程的 .vscode/extensions.json 里推荐 clangd（幂等，不动其它条目）。
+ *
+ * 插件自己不起语言服务，但可以把"建议装什么"写进工程 ——
+ * VS Code 打开工程时会提示安装，这是成本最低的补全方案。
+ * 推荐扩展属于锦上添花：读不到/写不进都不影响任何功能。
+ */
+export function ensureRecommendedExtensions(projectRoot: string): void {
+    const dir = path.join(projectRoot, '.vscode');
+    const file = path.join(dir, 'extensions.json');
+    const CLANGD_ID = 'llvm-vs-code-extensions.vscode-clangd';
+    try {
+        let obj: { recommendations?: unknown } = {};
+        if (fs.existsSync(file)) {
+            const text = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '');
+            obj = JSON.parse(text) as { recommendations?: unknown };
+        }
+        const cur = Array.isArray(obj.recommendations) ? (obj.recommendations as unknown[]) : [];
+        if (cur.some((x) => typeof x === 'string' && x.toLowerCase() === CLANGD_ID)) {
+            return;                       // 已经有了，不碰文件
+        }
+        obj.recommendations = [...cur, CLANGD_ID];
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(file, JSON.stringify(obj, null, 2) + '\n', 'utf8');
+    } catch {
+        /* 忽略：与编译、仿真都无关 */
+    }
 }
 
 function msgText(e: unknown): string {

@@ -148,14 +148,19 @@ frame_c = read('core/src/scut_frame.c')
 host_c = read('backends/headless/scut_headless_main.c')
 ok('SCUT_FRAME_ERR_NOMEM 已定义', 'SCUT_FRAME_ERR_NOMEM' in frame_h)
 ok('错误码是 -17', '#define SCUT_FRAME_ERR_NOMEM           -17' in frame_h)
-ok('strerror 有对应文案', '内存不足：图片太大' in frame_c)
+# ★ 判据是"有这条代码路径"，不是"文件里出现过这句话"：
+#   前者改了分支才会红，后者注释里提到就假绿。
+ok('strerror 对 NOMEM 有独立分支',
+   re.search(r'case SCUT_FRAME_ERR_NOMEM:\s*return\s+"[^"]+"', frame_c) is not None)
 # 4 处分配失败都要用它：读文件 1 处 + PNG 3 处
 n_nomem = frame_c.count('SCUT_FRAME_ERR_NOMEM')
 ok('scut_frame.c 至少 4 处使用（1 读文件 + 3 PNG 缓冲）', n_nomem >= 4, n_nomem)
 ok('不再把内存不足归因为 PNG_FORMAT',
    '内存不足：按「数据无效」归因' not in frame_c)
 ok('宿主有 NOMEM 专门分支', 'case SCUT_FRAME_ERR_NOMEM:' in host_c)
-ok('宿主文案说明"图片本身没有问题"', '图片本身没有问题' in host_c)
+ok('宿主的 NOMEM 分支有独立文案',
+   re.search(r'case SCUT_FRAME_ERR_NOMEM:\s*(/\*.*?\*/\s*)?why\s*=\s*"[^"]{6,}"',
+             host_c, re.S) is not None)
 
 print('\n=== 6. 过时阶段注释不再断言错误顺序 ===')
 # PRE_FRAME / POST_FRAME / REPORT 都已不存在。
@@ -193,9 +198,11 @@ ok('代码里不再出现 .pgm 作为输出路径',
 _proto = host_c.split('输出协议')[1].split('====')[0] if '输出协议' in host_c else ''
 ok('协议示例的 img 字段指向 ppm 而非 pgm',
    '"img":"<path to ppm>"' in _proto)
-# 追加字段都要在文档里
+# 追加字段都要真的被 printf 出来（判"出现在文件里"会被注释骗过）
 for field in ('loadError', 'bench', 'vars'):
-    ok('协议文档提到 %s 字段' % field, field in host_c)
+    ok('帧行里真的有 %s 字段' % field,
+       re.search(r'"\\"%s\\"|"%s":|\{\\"%s\\"' % (field, field, field), host_c) is not None
+       or ('\\"%s\\"' % field) in host_c)
 
 print('\n=== 8. 用户可见的回绕文案按图集起点 ===')
 # 0 起图集要回到 0，说成"回到第 1 张"是错的（这条是直接打给用户看的）
@@ -260,12 +267,15 @@ ok('GBK 分支带 replace（永不抛）', 'raw.decode("gbk", errors="replace")'
 #   能把 0..255 一一映射到 U+0000..U+00FF 的编码）。
 #   所以判据只针对 decode_output 这一个函数体。
 _dc_body = src.split('def decode_output')[1].split('\ndef ')[0]
-# ★ 只判【代码体】，不判 docstring：docstring 里引用旧写法
-#   （"原先写的是 for enc in (...,latin-1)"）是正确的记录。
-_code_body = _dc_body.split('"""')[-1] if '"""' in _dc_body else _dc_body
+# ★ docstring 在函数【开头】，所以代码体是最后一个 '"'*3 之后的部分。
+#   （原来的写法取了最后一段，等于把代码当成了说明，还反过来要求
+#    "说明里有 latin-1" —— 结果那条断言恒假、却从来没人发现。）
+_parts = _dc_body.split('"""')
+_code_body = _parts[-1] if len(_parts) > 2 else _dc_body
+_doc_body = _parts[1] if len(_parts) > 2 else _dc_body
 ok('decode_output 代码里不再有 latin-1 候选链', 'latin-1' not in _code_body)
-ok('decode_output 的注释里说明了为什么去掉 latin-1',
-   'latin-1' in _dc_body)
+ok('decode_output 的说明里讲了为什么没有 latin-1 候选',
+   'latin-1' in _doc_body)
 ok('DWARF 规范化处的 latin-1 用法【保留】（那是正当的）',
    'raw.decode("latin-1")' in src)
 
@@ -393,7 +403,8 @@ _render_calls = len(re.findall(r'(?<![\w.])renderVariables\(\)', sv)) - 1
 ok('renderVariables() 有多个调用点（每处都该被 try 保护）',
    _render_calls >= 5, '实际 %d 个' % _render_calls)
 # vars 消息分支必须包 try/catch —— 它是每帧都会走的高频路径
-_vars_branch = re.search(r"case 'vars'\s*:\s*\{(.*?)\n      \}", sv, re.S)
+# ★ 结尾按"任意 6 空格缩进"匹配，不写死具体缩进：改格式化就会假红。
+_vars_branch = re.search(r"case 'vars'\s*:\s*\{(.*?)\n\s{6}\}", sv, re.S)
 if _vars_branch:
     ok("case 'vars' 分支有 try/catch 兜底",
        'try {' in _vars_branch.group(1))
@@ -481,6 +492,46 @@ if _picked:
     ok('renderStructDetail 不读一个没被传进来的字段',
        (not _reads_eb) or _has_eb,
        'picked 里没有 elemBytes，但 renderStructDetail 读了它')
+
+print('\n=== 16. 本轮修复的回归：元素宽度、包装单元、autoDownload ===')
+
+# H1：SCUT_Watch 必须按类型推导元素宽度，而不是全信调用方传的 sizeof。
+watch_c = read('core/src/scut_watch.c')
+ok('scut_watch.c 有按类型推导宽度的表',
+   re.search(r'static\s+int\s+type_width\s*\(', watch_c) is not None)
+ok('SCUT_Watch 对已知类型采用推导出的宽度',
+   re.search(r'type_width\s*\(\(int\)t\)\s*>\s*0', watch_c) is not None)
+
+# H2：包装单元在 #include 用户源码之后要重新锚定行号，防止未闭合注释吞掉构造函数。
+sym_src = read('tools/scut_symbols.py')
+ok('包装单元里有 #line 重新锚定',
+   '#line 1 "<scut_autoreg>"' in sym_src)
+
+# 4.2：手写注册的判据要覆盖 ARRAY 与用户包装宏。
+ok('手写注册扫描覆盖所有 SCUT_Watch 家族名字',
+   r"\b[A-Za-z_]\w*SCUT_Watch\w*\s*\(" in sym_src)
+
+# autoDownload：配置字段已删，任何一侧再引入都会被这条拦住。
+pc_ts = read('extension/src/projectconfig.ts')
+cfg_ts = read('extension/src/configfields.ts')
+sb_src = read('tools/scut_build.py')
+ok('ProjectConfig 里没有 autoDownload 字段',
+   not re.search(r'autoDownload\s*:', pc_ts) or '没有 autoDownload 字段' in pc_ts)
+ok('配置面板字段表里没有 autoDownload', 'autoDownload' not in cfg_ts)
+ok('scut_build.py 的 DEFAULT_CONFIG 没有 autoDownload',
+   '"autoDownload"' not in sb_src)
+
+# 后端的 --no-draw / --no-log 要真的接到调度器上（否则又是"能设不能生效"）。
+ok('后端解析 --no-draw', '"--no-draw"' in host_c)
+ok('后端解析 --no-log', '"--no-log"' in host_c)
+ok('--no-draw 会调 set_draw_enabled',
+   re.search(r'if\s*\(o\.no_draw\)\s*\{\s*scut_sched_set_draw_enabled\(0\)', host_c, re.S) is not None)
+ok('--no-log 会调 set_log_enabled',
+   re.search(r'if\s*\(o\.no_log\)\s*\{\s*scut_sched_set_log_enabled\(0\)', host_c, re.S) is not None)
+
+# build_vars_json 不允许"先拷条目、最后补 ']'"的越界收尾。
+ok('build_vars_json 不再有事后回退找 }',
+   'while (k > 0 && out[k]' not in host_c)
 
 print('\n' + '=' * 60)
 if FAIL == 0:

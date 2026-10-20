@@ -146,7 +146,7 @@ SCUT_DrawPoint(x, y, SCUT_RGB(g, g, g));   /* 灰度也用同一个宏 */
 | **钩子函数** | 开机函数 / 每帧处理函数 / 每帧后处理函数 | ✅ 要 |
 | **测试图集** | 图集目录、图集后缀、图集起始编号 | ❌ 立即生效 |
 | **运行期** | 每帧重复次数、连跑帧数、测速重复次数 | ❌ 立即生效 |
-| **工具链** | 工具链根目录、Python 解释器、允许自动下载、自动发现变量 | ❌ 立即生效 |
+| **工具链** | 工具链根目录、Python 解释器、自动发现变量 | ❌ 立即生效 |
 
 > **为什么尺寸必须重编译**：C 语言里数组大小必须是编译期常量，
 > 而算法里到处是 `int line[SCUT_IMAGE_H];`。这是语言的硬约束，
@@ -197,9 +197,9 @@ SCUT_DrawPoint(x, y, SCUT_RGB(g, g, g));   /* 灰度也用同一个宏 */
 |---|---|---|
 | `clang` / `clang++` | ✅ 编译必需 | [LLVM-MinGW](https://github.com/mstorsjo/llvm-mingw/releases)（自带 MinGW sysroot）——**插件可代下载** |
 | binutils `objdump` | ⚠️ 自动变量发现必需 | MinGW-w64 / MSYS2 / **Git for Windows** 自带 |
-| Python **3.7+** | ⚠️ 构建脚本必需 | python.org / Anaconda 均可；**不需要任何第三方库** |
+| Python **3.7+** | ✅ 构建脚本必需（插件不代下载） | python.org / Anaconda 均可；**不需要任何第三方库** |
 | `lldb-dap` | 可选（调试用） | LLVM-MinGW 自带 |
-| `clangd` | 可选（补全用） | LLVM-MinGW 自带 |
+| `clangd` | 可选（建议装） | LLVM-MinGW 自带；装 clangd 扩展后补全/跳转更准 |
 
 > **为什么 `objdump` 必须是 binutils 的，不能用 `llvm-objdump`：**
 > LLVM 21 移除了 `llvm-objdump --dwarf=info`（现在只支持 `--dwarf=frames`），
@@ -224,6 +224,10 @@ SCUT_DrawPoint(x, y, SCUT_RGB(g, g, g));   /* 灰度也用同一个宏 */
 插件通过 `configurationDefaults` 把 cpptools 的 IntelliSense 默认关掉，
 避免它和 clangd 互相打架。**这只是默认值**，你自己的设置优先级更高，
 不会被强制覆盖。
+
+> 插件**不会**自己启动语言服务：它只负责在「环境自检」里告诉你
+> 找没找到 clangd。想用补全就装 clangd 扩展（LLVM-MinGW 里自带 clangd.exe，
+> 也可以单独装），不装也不影响编译与仿真。
 
 ---
 

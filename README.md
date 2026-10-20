@@ -20,9 +20,16 @@
 本机没有编译器也没关系。第一次编译时插件会问你要不要下载一份精简版 LLVM-MinGW
 （约 165 MB，只下一次）；PATH 上已经有 clang 就不会重复下载。
 
+> **Python 3.7+ 需要你自己装**（插件不代下载）。构建脚本只依赖标准库，
+> python.org / Anaconda 装哪个都行；装完在配置面板的「工具链 › Python 解释器路径」
+> 里指过去即可。没有它编译脚本跑不起来。
+
 > **变量面板需要 binutils 的 `objdump`。** LLVM 21 移除了 `llvm-objdump --dwarf=info`，
 > 所以 llvm-mingw 自带的那个（其实是个转发脚本）用不了。装了 MinGW-w64 或
 > Git for Windows 就有了，插件会自动去找。缺了它不影响编译和运行，只是变量面板是空的。
+
+> **代码补全建议装 `clangd`**（可选）。插件自己不会起语言服务，只会在「环境自检」里
+> 告诉你找没找到它；想让补全和跳转更准，就装 clangd 扩展。不装不影响编译与仿真。
 
 ---
 
@@ -238,7 +245,7 @@ SCUT_DrawPoint(x, y, SCUT_RGB(g, g, g));   /* 灰度也用同一个宏 */
 
 ```
 SCUT-71: 环境自检          # 命令面板里执行，逐项报告工具链/工程结构/核心库
-python tests/run_all_tests.py   # 跑一遍回归（14 个套件）
+python tests/run_all_tests.py   # 跑一遍回归（15 个套件）
 ```
 
 ---
@@ -363,13 +370,18 @@ scut_project.json
 ## 测试
 
 ```
-python tests/run_all_tests.py                        # 14 个套件
+python tests/run_all_tests.py                        # 15 个套件
 python tests/run_all_tests.py --toolchain <根目录>    # 工具链不在默认位置时
 python tests/run_all_tests.py --also-cn              # 额外跑一遍中文路径端到端
 ```
 
+在终端里直接跑构建脚本时，`Ctrl+C` 会走一条"已中断"的收尾分支；
+但在 VS Code 里点取消，插件发的是终止信号，脚本可能来不及打印任何提示
+就被结束——这不影响正确性：`.scut` 里的目标是先写临时文件再原子替换的，
+重新构建即可。
+
 工具链定位顺序（实现在 `tests/toolchain.py`，与产品代码 `extension/src/toolchain.ts` 一致）：
-`--toolchain` → `SCUT71_TOOLCHAIN` 环境变量 → `PATH` 上的 clang → 常见位置兜底。
+`--toolchain` → `SCUT71_TOOLCHAIN` 环境变量 → `PATH` 上的 clang →（仅测试用）常见位置兜底。
 找不到时给出可执行的提示而不是后续一堆莫名报错。
 
 **测试材料全部在仓库内**：`tests/fixtures/pic/1`（36 张 BMP）。

@@ -31,7 +31,7 @@ typedef enum {
  * ★ 形式与 printf 完全一致（含 %d/%f/%s 与可变参数），零学习成本。 */
 void SCUT_Log(scut_log_level_t level, const char *fmt, ...);
 
-/* 清空日志缓冲。切换图片/重跑时环境会自动调用。 */
+/* 清空日志缓冲。headless 后端每帧取走日志后会调用它。 */
 void SCUT_LogClear(void);
 
 /* --- 核心内部使用：供呈现后端取出日志行 --- */

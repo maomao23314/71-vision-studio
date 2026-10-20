@@ -165,7 +165,7 @@ void scut_composite_overlay(scut_u8 *dst, int dst_stride,
  *      PNG（bit depth 8；灰度 / 真彩色 / 调色板；非交织；
  *           多个 IDAT；自带 RFC1951 inflate + RFC1950 zlib 包装）
  *  不支持（返回 SCUT_FRAME_ERR_UNSUPPORTED_FORMAT）：
- *      JPEG —— 计划用 stb_image 作为可选扩展接入，本任务不 vendor。
+ *      JPEG —— 需要时请先转成 BMP/PNG（没有内建 JPEG 解码器）。
  *  PNG 超出上述子集（16 位色深、RGBA、交织等）返回 SCUT_FRAME_ERR_PNG_FORMAT，
  *  文件损坏返回对应的 PNG_* 错误码 —— 都是【具体原因】而非笼统的"不支持"。
  *

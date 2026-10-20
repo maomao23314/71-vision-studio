@@ -563,6 +563,8 @@ int main(void)
         size_t k;
 
         if (out == NULL) { continue; }
+        /* 哨兵：合法输出只用到 cap 字节，写到 cap 之外会让这条报错 */
+        memset(out, 0x7f, cap);
         build_vars_json(&o, out, cap);
 
         /* 断言 1：缓冲内必须能找到 '\0'，否则调用方 strlen 会读飞 */
@@ -574,6 +576,12 @@ int main(void)
         /* 断言 2：首尾必须是方括号（合法 JSON 数组） */
         if (cap >= 4 && (out[0] != '[' || out[strlen(out) - 1] != ']')) {
             printf("BAD_SHAPE cap=%zu\n", cap);
+            fail = 1;
+        }
+        /* 断言 3：接收缓冲只剩 cap 字节，收尾时的方括号必须落在缓冲内
+         *   （旧写法在这里恰好卡界时会越界写 1~2 字节）。 */
+        if (cap >= 4 && strlen(out) + 1 > cap) {
+            printf("OVERFLOW cap=%zu\n", cap);
             fail = 1;
         }
         free(out);

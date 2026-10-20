@@ -31,12 +31,9 @@ extern "C" {
  *   实际却没有任何办法关掉 —— 那是"半死的配置"，比没有更误导。
  *   所以能设的就必须能改：与 repeat 一致，log/draw 也各给一个 setter。
  *
- * ★ 诚实备注（2026-10-11 复核时补）：这三个 setter 目前【还没有调用方】——
- *   插件与后端都没接。它们的存在意义是"让接口名实相符"：
- *   字段不再是一个改不了的死配置，将来要做"关日志压测""关绘制基准"
- *   时直接调即可，不必再改一遍核心。
- *   现状由 bind/scut_bind.c 的 scut_bind_apply() 把三者初值都置 1。
- *   （重复一遍免得误解：这不是"功能已做好"，是"入口已备好"。） */
+ * ★ 现状：bind/scut_bind.c 的 scut_bind_apply() 把三者初值都置 1；
+ *   后端用 --no-draw / --no-log 命令行开关调用对应的 setter。
+ *   插件面板目前没有对应开关。 */
 typedef struct {
     int  repeat;          /* 每帧重复调用 PROCESS 的次数（复杂度测试用） */
     int  log_enabled;     /* 是否允许 DRAW 阶段写日志（SCUT_Log） */

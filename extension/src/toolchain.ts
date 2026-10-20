@@ -573,26 +573,15 @@ function detectImpl(allowDownload: boolean): Promise<Toolchain> {
         const configured = configuredToolchainRoot();
         const envRoot = (process.env.SCUT71_TOOLCHAIN ?? '').trim();
 
-        // ---- 1) 工具链根目录：配置 > 环境变量 > 插件自下载 > 已知位置 ----
-        //
-        // ★ 顺序即优先级：
-        //   显式配置 > 环境变量 > 上次下载的 > PATH > （已刻意留空的候选）
-        //
-        // ★ 「插件自下载」排在 PATH 之前是有意的：
-        //   它是我们自己放的、确定可用的一份；但既然已经有 PATH 上的
-        //   clang 也在候选里，先用用户自己的那份更符合直觉。
-        //   —— 这一条是 2026-10-11 修的：原来下载排在 PATH 前面，
-        //   导致 PATH 兜底那段代码【永远执行不到】。
+        // ---- 1) 显式指定的位置：工程配置 > SCUT71_TOOLCHAIN ----
+        // ★ 这两处是用户自己说的，可信度最高；都不在时交给下面的"问用户"。
+        //   刻意不在 PATH 之前加任何猜出来的目录（猜目录被证伪过两次）。
         const roots: Array<{ root: string; from: string }> = [];
         if (configured) {
             roots.push({ root: configured, from: '工具链根目录（工程配置）' });
         }
         if (envRoot) {
             roots.push({ root: envRoot, from: 'SCUT71_TOOLCHAIN 环境变量' });
-        }
-        const fetched = findInstalledToolchain(effectiveStorageDir());
-        if (fetched) {
-            roots.push({ root: fetched, from: '插件自动下载（上次装好的）' });
         }
         for (const r of ROOT_CANDIDATES) {
             roots.push({ root: r, from: '默认安装位置' });
@@ -626,6 +615,25 @@ function detectImpl(allowDownload: boolean): Promise<Toolchain> {
         }
 
         if (!cc) {
+            // ---- 1b) 插件之前下载过的目录 ----
+            //   ★ 必须放在"问用户"之前：老用户已经装好的那份不该再问一遍。
+            //   ★ 不放进上面的 roots 列表：detectImpl(false) 是激活时的只读探测，
+            //     那时还没决定要不要用下载来的工具链。
+            const fetched = findInstalledToolchain(effectiveStorageDir());
+            const fb = fetched ? binOf(fetched) : undefined;
+            if (fb && firstExisting(fb, ['clang.exe', 'clang'])) {
+                root = fetched!;
+                rootFrom = '插件自动下载（上次装好的）';
+                binDir = fb;
+                cc = firstExisting(fb, ['clang.exe', 'clang']);
+                cxx = firstExisting(fb, ['clang++.exe', 'clang++']);
+                lldbDap = firstExisting(fb, ['lldb-dap.exe', 'lldb-dap']);
+                clangd = firstExisting(fb, ['clangd.exe', 'clangd']);
+                ld = firstExisting(fb, ['ld.lld.exe', 'ld.lld']);
+            }
+        }
+
+        if (!cc) {
             // ---- 2) PATH 兜底。【必须在下载之前】----
             //
             // ★★★ 2026-10-11 修掉的真 bug：下载抢在 PATH 前面 ★★★
@@ -638,7 +646,7 @@ function detectImpl(allowDownload: boolean): Promise<Toolchain> {
             //   后果实测：明明 PATH 上有 clang（或装在候选目录里，
             //   但因为某个候选判定细节没命中），用户却在下载。
             //
-            //   正确的优先级：显式配置 > 环境变量 > 自下载 > PATH > 候选 > 下载。
+            //   正确的优先级：显式配置 > 环境变量 > 候选 > PATH > 问用户。
             //   也就是【下载永远是最后手段】。
             cc = whichInPath(['clang.exe', 'clang']);
             if (cc) {
@@ -654,6 +662,8 @@ function detectImpl(allowDownload: boolean): Promise<Toolchain> {
 
         if (!cc && allowDownload) {
             // ---- 3) 本机确实没有 → 【问用户】，不替他决定 ----
+            //
+            // ★ 只会真正联网下载一次：上一次装好的那份在 1b) 就已经被找到。
             //
             // ★★★ 2026-10-11 用户报告的回归：明明有工具链却在下载 182MB ★★★
             //   根因是"探测失败 = 自动下载"这个设计本身：
@@ -735,7 +745,7 @@ function detectImpl(allowDownload: boolean): Promise<Toolchain> {
                 + 'ucrt-x86_64 包，解压到任意目录，'
                 + '再用配置面板的「工具链 › 工具链根目录」指向它（里面有 bin\\clang.exe 的那一层）；\n'
                 + '      2) 把 clang 的 bin 目录加进 PATH；\n'
-                + '      3) 检查配置面板的「工具链 › 允许自动下载工具链」是否被关掉了。');
+                + '      3) 检查网络能否连上 GitHub（自动下载走的是它的 release 接口）。');
         } else {
             // 版本探测失败【不算】探测失败，只记 undefined，不阻断流程
             const ver = await probeVersion(cc);
@@ -927,12 +937,14 @@ export async function runDoctor(): Promise<DoctorResult> {
 
     lines.push('【可选增强】');
     await row('调试适配器 lldb-dap', tc.lldbDap || undefined);
-    await row('语言服务 clangd', tc.clangd || undefined);
+    // clangd 只做「发现 + 建议」，本插件不会替你装它、也不会自己起语言服务。
+    await row('语言服务 clangd（可选，用于代码补全）', tc.clangd || undefined);
     if (!tc.lldbDap) {
         lines.push('  ! lldb-dap 缺失 → F5 调试降级，编译与仿真视图照常可用');
     }
     if (!tc.clangd) {
-        lines.push('  ! clangd 缺失 → 代码补全降级（本插件不依赖 clangd 也能工作）');
+        lines.push('  · 没找到 clangd（可选）。装了 clangd 扩展的话，它能让补全和跳转'
+            + '更准；本插件不依赖它，编译与仿真照常。');
     }
     lines.push('');
 

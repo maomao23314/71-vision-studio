@@ -29,7 +29,7 @@ python tools\scut_build.py clean --project .
 
 | 选项 | 默认 | 说明 |
 |---|---|---|
-| `--toolchain <根目录>` | 自动探测 | 例：`--toolchain D:\TOOLS\llvm-mingw`。探测顺序见下 |
+| `--toolchain <根目录>` | 自动探测 | 例：`--toolchain C:\llvm-mingw`（换成你自己那台机器上的位置）。探测顺序见下 |
 | `--core-lib <路径>` | `<工程>/.scut/lib/libscut_core.a` | 环境核心静态库的位置 |
 | `--no-watch` | 关 | **跳过自动符号发现**。构建更快，但变量面板会是空的 |
 | `--jobs N` | CPU 核数 | 并行编译的文件数 |
@@ -65,10 +65,10 @@ python tools\scut_build.py clean --project .
 ### 2. 每个 `.c` 编译两遍：探针 → 生成包装单元 → 编译包装单元
 
 ```
-[1] clang -g -O0 -c main.c -o main.probe.o          ← 探针：产出调试信息
-[2] python tools/scut_symbols.py --obj main.probe.o --src main.c \
-        --out-c main.wrapped.c --out-json main.vars.json   ← 生成
-[3] clang ... -c main.wrapped.c -o main.o           ← 编译【包装单元】，不是原文件
+[1] clang -g -O0 -c camera.c -o camera.probe.o        ← 探针：产出调试信息
+[2] python tools/scut_symbols.py --obj camera.probe.o --src camera.c \
+        --out-c camera.wrapped.c --out-json camera.vars.json   ← 生成
+[3] clang ... -c camera.wrapped.c -o camera.o         ← 编译【包装单元】，不是原文件
 ```
 
 **为什么必须编译「包装单元」而不是你的原文件？**
@@ -84,7 +84,7 @@ python tools\scut_build.py clean --project .
 包装单元长这样——先展开你的源码，再注册：
 
 ```c
-#include "main.c"          /* ① 先展开：所有声明（含 static）都可见了 */
+#include "camera.c"        /* ① 先展开：所有声明（含 static）都可见了 */
 #include "scut_watch.h"
 __attribute__((constructor))
 static void scut_autoreg(void)
@@ -120,9 +120,7 @@ static void scut_autoreg(void)
 | 情况 | 脚本怎么做 |
 |---|---|
 | **路径含空格与中文** | 全程用列表形式调用进程，**绝不**拼接命令字符串、**绝不** `shell=True`。这是"能用"的唯一可靠做法 |
-| 工程用 `config.h`，而 `bind` 里 `#include "scut_config.h"` | 在 `.scut/gen/` 生成一个**只做转发的** `scut_config.h`。**bind 源码一行都不用改**，两种命名都能用 |
-| 工程用 `scut_config.h` | 什么都不做，直接用你的 |
-| 两个都没有 | 可用环境变量 `SCUT_IMAGE_W` / `SCUT_IMAGE_H` 通过 `-D` 注入，但会**警告**你：IDE 里会满屏红波浪线，建议补 `config.h` |
+| **工程用 `config.h`，而 `bind` 里 `#include "scut_config.h"`** | `bind` 的 `__has_include` 会依次找 `scut_config.h`、`config.h`，两种命名都能编。旧工程不需要改 |
 | `objdump` 是 LLVM 的 `llvm-objdump` | **警告并自动关闭符号发现**（仍能构建）。原因：自动发现依赖 `objdump --dwarf=info`，而 **LLVM 21 已移除该选项** |
 | 生成文件写到一半被插件读到 | 先写同盘临时文件，再 `os.replace` **原子替换**。绝不会留下半截 JSON |
 | 编译出错 | 解析成结构化诊断（文件/行/列/严重级），并**把第一个错误单独醒目地讲一遍** |
@@ -152,7 +150,7 @@ python tools\scut_build.py --project . --json
     { "file": "C:\\...\\code\\camera.c", "line": 23, "column": 5,
       "severity": "error", "message": "use of undeclared identifier 'foo'" }
   ],
-  "manifest": { "source": "main.c", "count": 8, "variables": [ /* ... */ ] }
+  "manifest": { "source": "camera.c", "count": 8, "variables": [ /* ... */ ] }
 }
 ```
 

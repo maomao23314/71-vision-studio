@@ -40,7 +40,7 @@ export interface Toolchain {
     objdump: string;
     /** 调试适配器 lldb-dap（缺省时调试功能降级） */
     lldbDap?: string;
-    /** 语言服务 clangd（缺省时补全降级，不影响仿真） */
+    /** 语言服务 clangd（可选：只做发现与建议，插件自己不起语言服务） */
     clangd?: string;
     /** Python 解释器（跑自动符号发现脚本） */
     python?: string;
@@ -66,7 +66,7 @@ export interface ScutProject {
     root: string;
     /** 用户算法目录（默认 <root>/code） */
     codeDir: string;
-    /** 编译期契约头文件（默认 <root>/config.h） */
+    /** 老工程的编译期契约头文件（<root>/config.h）；新工程的契约在 .scut/gen/ 下 */
     configHeader: string;
     /** 测试图集目录 */
     picDir: string;

@@ -18,6 +18,7 @@ test_symbols.py -- scut_symbols.py 的回归测试。
 退出码 0 = 全部通过。
 """
 import argparse
+import io
 import os
 import re
 import shutil
@@ -174,6 +175,19 @@ def check(cc, objdump, tmp, label, failures):
         failures.append('%s: local static leaked' % label)
     else:
         print('  ✅ 函数内 static 局部变量已正确排除（陷阱 P-3）')
+
+    # --- 包装单元的结构：先 #include 源码，再 #line 锚定，然后才是构造函数 ---
+    #   ★ 没有 #line 的话，用户源码末尾一个未闭合的 /* 就会把构造函数吞掉，
+    #     表现为"这个文件的变量一个都不出现"，而且只留一条编译失败警告。
+    body = io.open(out_c, encoding='utf-8-sig').read()
+    i_inc = body.find('#include "fixtures.c"')
+    i_line = body.find('#line 1 "<scut_autoreg>"')
+    i_ctor = body.find('__attribute__((constructor))')
+    if i_inc >= 0 and i_line > i_inc and i_ctor > i_line:
+        print('  ✅ 包装单元顺序正确（#include → #line → constructor）')
+    else:
+        print('  ❌ 包装单元结构不对: inc=%d line=%d ctor=%d' % (i_inc, i_line, i_ctor))
+        failures.append('%s: wrapper structure' % label)
 
     # --- 生成的 C 必须可编译 ---
     inc = os.path.join(ROOT, 'core', 'include')

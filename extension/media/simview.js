@@ -3,7 +3,7 @@
  *  --------------------------------------------------------------------------
  *  设计理念对照：
  *    · 模拟单片机 → 这是一个「屏幕」：拿到 RGB 字节就画，不做任何处理
- *    · 上手即用   → 变量勾选、曲线、计时都在一个面板里
+ *    · 上手即用   → 变量勾选、数值查看、计时都在一个面板里
  *
  *  ★ 为什么不用框架、不引依赖：
  *    这里的逻辑只有「画 canvas / 收消息 / 发消息」三件事。
@@ -440,48 +440,46 @@
   function renderVariables() {
     var filter = (el.pickFilter && el.pickFilter.value || '').trim().toLowerCase();
 
-    /* ---------- 勾选区 ---------- */
+    /* ---------- 勾选区 ----------
+     *
+     * ★ 只列【自动捕获】的变量。
+     *   主动暴露（代码里显式 SCUT_Watch 注册的）本来就一定会显示，
+     *   再给一个勾选框只会让人以为"不勾就看不到"。
+     *   这一段只在勾选区里拉一条说明，不给控件。 */
     if (el.pickList) {
       el.pickList.textContent = '';
+      var autoList = [];
+      for (var ai = 0; ai < catalog.length; ai++) {
+        if (catalog[ai].manual !== true) { autoList.push(catalog[ai]); }
+      }
       if (el.pickCount) {
-        el.pickCount.textContent = catalog.length
-          ? ('已勾 ' + selected.size + ' / ' + catalog.length) : '';
+        var pickedAuto = 0;
+        for (var k = 0; k < autoList.length; k++) {
+          if (selected.has(autoList[k].name)) { pickedAuto++; }
+        }
+        el.pickCount.textContent = autoList.length
+          ? ('已勾 ' + pickedAuto + ' / ' + autoList.length) : '';
       }
       if (catalog.length === 0) {
         var e1 = document.createElement('li');
         e1.className = 'pick-empty dim';
         e1.textContent = '还没有变量清单 —— 先点「编译」。';
         el.pickList.appendChild(e1);
+      } else if (autoList.length === 0) {
+        var e2 = document.createElement('li');
+        e2.className = 'pick-empty dim';
+        e2.textContent = '没有需要勾选的变量（主动暴露的那些恒显示，不用勾）。';
+        e2.title = '主动暴露 = 代码里显式 SCUT_Watch / SCUT_WATCH_* 注册的变量。';
+        el.pickList.appendChild(e2);
       } else {
         var shown = 0;
-        /* ★ 分组显示：主动暴露的排前面，自动捕获的排后面。
-         *
-         *   catalog 已经由宿主侧排好序（主动在前，见 build.ts 的
-         *   augmentManifestFromRuntime），这里只需要在【分界处】插一个
-         *   小标题，让用户一眼看出两类变量的界线。
-         *
-         *   为什么用"插标题"而不是"渲染两遍列表"：
-         *     搜索过滤时同一段代码要同时作用于两组，渲染两遍会让过滤逻辑
-         *     重复一遍（很容易只改一处，造成两组行为不一致）。 */
-        var lastManual = null;
         for (var i = 0; i < catalog.length; i++) {
           var v = catalog[i];
+          if (v.manual === true) { continue; }
           if (filter && v.name.toLowerCase().indexOf(filter) < 0) { continue; }
-          var isManual = v.manual === true;
-          if (lastManual === null || isManual !== lastManual) {
-            if (shown > 0 || !filter) {
-              var sep = document.createElement('li');
-              sep.className = isManual ? 'pick-group manual' : 'pick-group auto';
-              sep.textContent = isManual
-                ? '主动暴露（代码里显式注册）'
-                : '自动捕获（编译期扫描到）';
-              el.pickList.appendChild(sep);
-            }
-            lastManual = isManual;
-          }
           shown++;
           var li = document.createElement('li');
-          li.className = 'pick-item' + (isManual ? ' is-manual' : ' is-auto');
+          li.className = 'pick-item is-auto';
           var lab = document.createElement('label');
           var cb = document.createElement('input');
           cb.type = 'checkbox';
@@ -520,8 +518,15 @@
     if (el.varsList) {
       el.varsList.textContent = '';
       if (el.varsCount) {
-        el.varsCount.textContent = catalog.length
-          ? (selected.size + ' / ' + catalog.length) : '';
+        // 只数"能勾的那种里勾了几个"，与勾选区保持一致。
+        var pickable = 0;
+        var picked = 0;
+        for (var pi = 0; pi < catalog.length; pi++) {
+          if (catalog[pi].manual === true) { continue; }
+          pickable++;
+          if (selected.has(catalog[pi].name)) { picked++; }
+        }
+        el.varsCount.textContent = pickable ? (picked + ' / ' + pickable) : '';
       }
       if (catalog.length === 0) {
         el.varsHint.textContent = '还没有变量清单。先点「编译」。';

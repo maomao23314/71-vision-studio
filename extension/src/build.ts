@@ -23,7 +23,7 @@ import type {
     BuildDiagnostic, BuildOptions, BuildResult, Toolchain, VariableManifest,
     WatchedVariable,
 } from './types';
-import { parseDiagnostics } from './protocol';
+import { parseDiagnostics, type VarLineEntry } from './protocol';
 import { detectToolchain } from './toolchain';
 
 /** 生成的仿真可执行文件名（与 tools/scut_build.py 的 EXE_NAME 一致）。 */
@@ -449,21 +449,35 @@ function augmentManifestFromRuntime(
         if (!line) {
             return manifest;
         }
-        const runtime = normalizeManifest(JSON.parse(line.trim()));
-        if (!runtime || runtime.variables.length === 0) {
+        const parsedVars = (JSON.parse(line.trim()) as { vars?: unknown }).vars;
+        const runtimeVars: VarLineEntry[] = Array.isArray(parsedVars) ? parsedVars as VarLineEntry[] : [];
+        if (runtimeVars.length === 0) {
             return manifest;
         }
 
         // 编译期已有的名字（DWARF 能看到的全局量）
         const known = new Set((manifest?.variables ?? []).map((v) => v.name));
 
-        // ★ 用户手写注册的名字（scut_symbols.py 扫源码得出，跨 TU 汇总）。
-        //   注意：手写注册最常见的是【结构体成员】，它在 DWARF 里没有独立条目，
-        //   所以这些名字往往【不在上面那个变量数组里】，而在下面的运行期列表里。
-        const manualNames = new Set(manifest?.manualWatches ?? []);
+        // ★ 用户手写注册的名字：由【运行期标签】判定。
+        //   生成的注册会给自动发现的变量打上 autoTag，用户手写的没有。
+        //   所以"注册表里有、但不是 autoTag"的就是手写的 —— 这也覆盖了
+        //   编译期看不到的结构体成员。
+        const runtimeNames = new Set(runtimeVars.map((v) => v.name));
+        // 判据与后端一致：清单里没有、注册表里却有 → 用户手写的。
+        // （autoTag 也发，但它只是辅助信息；两者一致时以"清单里没有"为准，
+        //   因为那是唯一不依赖后端行为的事实。）
+        const manualNames = new Set<string>(
+            runtimeVars.filter((v) => !known.has(v.name)).map((v) => v.name),
+        );
+        // 编译期清单里"看起来像手写"、但运行期没出现的名字（老工程 / --no-watch 才可能）保底算上。
+        for (const n of manifest?.manualWatches ?? []) {
+            if (!runtimeNames.has(n)) {
+                manualNames.add(n);
+            }
+        }
 
         const mark = (v: WatchedVariable): WatchedVariable =>
-            ({ ...v, manual: manualNames.has(v.name) || v.manual === true });
+            ({ ...v, manual: manualNames.has(v.name) });
 
         // 编译期清单：按是否手写分成两组，手写的排前面
         const all = (manifest?.variables ?? []).map(mark);
@@ -471,9 +485,19 @@ function augmentManifestFromRuntime(
         const auto = all.filter((v) => !v.manual);
 
         // 运行期有、编译期没有的条目补进来（DWARF 覆盖不到的结构体成员等）
-        const extra = runtime.variables
+        const extraAll: WatchedVariable[] = runtimeVars
             .filter((v) => !known.has(v.name))
-            .map(mark);
+            .map((v) => mark({
+                name: v.name,
+                kind: decodeWatchKind(v.kind),
+                dims: [],
+                total: v.total,
+                elemBytes: 4,
+                isStruct: false,
+                isPtr: false,
+                isStatic: false,
+                defaultSelected: true,
+            }));
 
         if (manual.length > 0) {
             ch.appendLine(`[变量] ${manual.length} 个是代码里主动注册的`
@@ -486,9 +510,14 @@ function augmentManifestFromRuntime(
         //   手写注册最常见的是结构体成员，它们不在 DWARF 清单里、
         //   只存在于 extra 里。若不合并这两组，它们会被排到最后 ——
         //   而它们恰恰是最该置顶的那几个。
-        const variables = [...manual, ...extra.filter((v) => v.manual),
-            ...auto, ...extra.filter((v) => !v.manual)];
-        return { source: manifest?.source ?? runtime.source, count: variables.length, variables };
+        const variables = [...manual, ...extraAll.filter((v) => v.manual),
+            ...auto, ...extraAll.filter((v) => !v.manual)];
+        return {
+            source: manifest?.source ?? '',
+            count: variables.length,
+            variables,
+            manualWatches: [...manualNames],
+        };
     } catch {
         return manifest;
     }

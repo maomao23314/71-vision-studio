@@ -116,6 +116,7 @@ def bootstrap_project(root, clang_root):
     with open(probe_h, "w", encoding="utf-8", newline="\n") as f:
         f.write("#ifndef MANUAL_PROBE_H\n#define MANUAL_PROBE_H\n"
                 "void manual_probe_watch(void);\n"
+                "void manual_probe_watch_local(void);\n"
                 "void manual_probe_step(void);\n"
                 "#endif\n")
     with open(probe_c, "w", encoding="utf-8", newline="\n") as f:
@@ -128,10 +129,25 @@ def bootstrap_project(root, clang_root):
                 'float  manual_probe_f;\n'
                 'int    manual_probe_i;\n'
                 '\n'
+                '#define PROBE_TAG(s) (s)\n'
+                '/* 名字经由宏的形参传入：模拟用户自己包一层宏的写法，\n'
+                '   这种写法按"字符串字面量"扫不到，必须靠运行期标签兜底。 */\n'
                 'void manual_probe_watch(void)\n{\n'
-                '    SCUT_WATCH_SCALAR("manual_probe_f", &manual_probe_f, SCUT_T_F32);\n'
-                '    SCUT_WATCH_SCALAR("manual_probe_i", &manual_probe_i, SCUT_T_I32);\n'
+                '    SCUT_Watch(PROBE_TAG("manual_probe_f"), &manual_probe_f,\n'
+                '               SCUT_T_F32, 1, (int)sizeof(manual_probe_f), 0);\n'
+                '    SCUT_Watch(PROBE_TAG("manual_probe_i"), &manual_probe_i,\n'
+                '               SCUT_T_I32, 1, (int)sizeof(manual_probe_i), 0);\n'
                 '}\n'
+                '\n'
+                '/* 函数内的 static 局部变量：自动发现只取文件作用域，\n'
+                '   所以它不会进变量清单；注册它，是为了让手写注册\n'
+                '   真的出现一个清单里没有、注册表里有的条目。 */\n'
+                'void manual_probe_watch_local(void)\n{\n'
+                '    static int s_probe_local = 7;\n'
+                '    SCUT_Watch(\"probe_local_only\", &s_probe_local,\n'
+                '               SCUT_T_I32, 1, (int)sizeof(s_probe_local), 0);\n'
+                '}\n'
+                '#undef PROBE_TAG\n'
                 '\n'
                 'void manual_probe_step(void)\n{\n'
                 '    manual_probe_f = 1.5f;\n'
@@ -142,6 +158,7 @@ def bootstrap_project(root, clang_root):
     with open(cfg_path, "r", encoding="utf-8-sig") as f:
         cfg = json.load(f)
     cfg["hooks"]["init"].append("manual_probe_watch")
+    cfg["hooks"]["init"].append("manual_probe_watch_local")
     cfg["hooks"]["frame"].append("manual_probe_step")
     with open(cfg_path, "w", encoding="utf-8", newline="\n") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)

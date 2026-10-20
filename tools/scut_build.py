@@ -37,17 +37,12 @@ scut_build.py —— SCUT-71 Vision Studio 构建编排层。
 
 【三】bind 单元是唯一知道编译期尺寸的地方
 ----------------------------------------------------------------------------
-    bind/scut_bind.c 包含 "scut_config.h"。而模板里的头文件叫 config.h。
-    为了【两种命名都能用】且【不改动仓库里的 bind 源码】，本脚本在
-    <project>/.scut/gen/ 下生成一个极薄的转发头 scut_config.h：
+    本脚本每次构建都把契约写进 <project>/.scut/gen/scut_config.h
+    （尺寸 + 输入数组名），并把这个目录放在 -I 的【最前面】。
+    bind/scut_bind.c 与用户代码都靠 __has_include 找到它，bind 源码不用改。
 
-        #include "config.h"
-
-    把它所在的目录放在 -I 的【最前面】，于是无论
-        · 工程提供 config.h         → 转发头补齐 scut_config.h
-        · 工程提供 scut_config.h    → 直接用工程的，不生成转发头
-        · 两者都没有               → 由 SCUT_IMAGE_W/H 环境变量生成契约头
-    bind 源码一行都不用改。
+    老工程自己带的 config.h 仍然能被找到（bind 的 __has_include 会退一步
+    去找它），但正常路径是生成的那一份。
 
 【四】为什么探针编译强制 -gdwarf-4（不是教条，是实测约束）
 ----------------------------------------------------------------------------
@@ -937,7 +932,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # 留空 = 插件自动探测；机器上装了多个 Python 时建议写死一个，
     # 因为自动探测可能挑中旧版本（实测：py -3 反查到 3.6）。
     "toolchain": {"path": "", "pythonPath": "",
-                  "autoDownload": True, "autoWatch": True,
+                  "autoWatch": True,
                   # 变量发现的两个过滤器（见 --exclude / --max-elems）。
                   # ★ 名字必须与 extension/src/projectconfig.ts 的
                   #   ProjectConfig 逐字一致 —— tests/test_extension_settings.py
@@ -976,8 +971,8 @@ def load_project_config(proj: "Project", reporter: "Reporter"
         except (OSError, ValueError) as exc:
             raise ConfigParseError(
                 "%s 读不出来：%s\n"
-                "    下一步：这个文件由插件设置界面维护；"
-                "若手改坏了，删掉它再在设置里重新填一次即可。"
+                "    下一步：这个文件由插件的配置面板维护；"
+                "若手改坏了，删掉它再用配置面板重新填一次即可。"
                 % (cfg_path, exc))
         if not isinstance(raw, dict):
             raise ConfigParseError("%s 的顶层必须是一个 JSON 对象。" % cfg_path)
@@ -993,7 +988,7 @@ def load_project_config(proj: "Project", reporter: "Reporter"
                 "ext": _read_macro_str(header, "SCUT_PIC_EXT") or "",
             },
         })
-        return cfg, "%s（老约定，建议改用设置界面）" % base
+        return cfg, "%s（老约定，建议改用配置面板）" % base
 
     return dict(DEFAULT_CONFIG), "内置默认值"
 
@@ -1078,7 +1073,7 @@ def _cfg_image(cfg: Dict[str, Any]) -> Tuple[int, int]:
         raise ConfigParseError(
             "配置里的图像尺寸不合理：%s x %s。\n"
             "    要求：1..4096 之间的整数。\n"
-            "    下一步：在插件设置里改「图像宽度/高度」。"
+            "    下一步：在插件配置面板里改「图像宽度/高度」。"
             % (img.get("width"), img.get("height")))
     return w, h
 
@@ -1116,7 +1111,7 @@ def write_generated_config(gen_dir: str, cfg: Dict[str, Any]) -> str:
     if not _is_c_identifier(in_name):
         raise ConfigParseError(
             "配置里的「输入图像数组名」不是合法的 C 标识符：%r\n"
-            "    下一步：在插件设置里改成一个像 mt9v03x_image 这样的名字。"
+            "    下一步：在插件配置面板里改成一个像 mt9v03x_image 这样的名字。"
             % in_name)
 
     text = (
@@ -1169,7 +1164,7 @@ GLUE_HEAD = '''/* ==============================================================
  *    用户代码必须能原样拷进车载工程，所以它里面【不能】出现
  *    任何仿真环境的注册宏。而仿真环境需要一个入口来驱动算法。
  *
- *    解法：让"谁调用谁"这件事留在环境侧。用户在设置界面里填函数名，
+ *    解法：让"谁调用谁"这件事留在环境侧。用户在配置面板里填函数名，
  *    构建时生成本文件，由它声明并调用那些函数。
  *
  *    车载工程里同样存在这件事 —— 它的 main() 里也是按顺序调用
@@ -1231,7 +1226,7 @@ def write_glue(gen_dir: str, cfg: Dict[str, Any]) -> str:
         if not _is_c_identifier(nm):
             raise ConfigParseError(
                 "钩子函数名不是合法的 C 标识符：%r\n"
-                "    下一步：在插件设置里填【函数名】（每行一个），"
+                "    下一步：在插件配置面板里填【函数名】（每行一个），"
                 "例如 image_process。" % nm)
 
     if out_array and not _is_c_identifier(out_array):
@@ -1305,7 +1300,7 @@ def write_glue(gen_dir: str, cfg: Dict[str, Any]) -> str:
     else:
         copy_call = (
             "    /* 未配置结果图数组 —— 画面显示的是输入图本身。\n"
-            "     * 想看到算法输出，请在设置里填「结果图数组名」。 */\n\n")
+            "     * 想看到算法输出，请在配置面板里填「结果图数组名」。 */\n\n")
 
     text = GLUE_HEAD.format(
         src=PROJECT_CONFIG_NAME,
@@ -2189,7 +2184,7 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
 
     # --- 3) 工程配置 → 生成编译期契约头 + 环境接线单元 ---------------------
     #
-    # ★ 配置的唯一入口是 scut_project.json（插件设置界面维护）。
+    # ★ 配置的唯一入口是 scut_project.json（由插件的配置面板维护）。
     #   没有它时回落到老的 config.h（迁移期不该强制用户改），
     #   两者都没有则用默认值 —— "什么都没有也能构建"是上手即用的一部分。
     #
@@ -2291,13 +2286,13 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
     if not os.path.isfile(core_lib):
         reporter.error(
             "找不到环境核心静态库：%s\n"
-            "    原因：环境核心（调度/注册表/计时/绘制/日志）是预编译成静态库"
-            "发布的，构建脚本本身不负责编译它——这样你改算法时环境零重编。\n"
+            "    原因：环境核心（调度/注册表/计时/绘制/日志）本应由构建脚本"
+            "从 core/src/ 现编并放到这个位置，这一步没有完成。\n"
             "    下一步（任选其一）：\n"
             "      1) 把 libscut_core.a 放到 %s\n"
             "      2) 用 --core-lib <path> 指定它的位置\n"
-            "      3) 若你是从源码构建环境：先用 core/ 产出 libscut_core.a，"
-            "再重跑本命令。"
+            "      3) 若 core/src/ 不存在，说明 SDK 不完整：重新安装插件，"
+            "或先在 extension/ 下执行 npm run sync-sdk。"
             % (core_lib, os.path.join(proj.root, DEFAULT_CORE_LIB_REL)))
         return finish(2)
     reporter.human("  核心库  : %s" % core_lib)
@@ -2382,6 +2377,35 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
             timer.report()
             return finish(1)
 
+    # --- 5b) 用户源码体检：两条最常见的"看起来正常、其实跑不起来" ---
+    #   ① code/ 里写了 main()：main 由呈现后端提供，两者一定撞车。
+    #   ② 钩子函数被写成了 static：接线单元在另一个编译单元里调不到它。
+    #   两条都只警告、不中断。
+    user_hook_names = _cfg_names(cfg, "init") + _cfg_names(cfg, "frame")
+    user_hook_names += _cfg_names(cfg, "post")
+    for src0 in sources:
+        try:
+            with open(src0, "r", encoding="utf-8", errors="replace") as f0:
+                body0 = f0.read()
+        except OSError:
+            continue
+        body0 = re.sub(r"/\*.+?\*/", " ", body0, flags=re.DOTALL)
+        body0 = re.sub(r"//[^\n]*", " ", body0)
+        if re.search(r"\bmain\s*\([^;]*\)\s*\{", body0):
+            reporter.warn(
+                "%s 里定义了 main()。仿真程序的 main 由后端提供，"
+                "两者会冲突（duplicate symbol: main）。"
+                "\n    code/ 里不该写 main：环境调用哪些函数由配置面板的"
+                "「钩子函数」决定。" % os.path.relpath(src0, proj.root))
+        for nm0 in user_hook_names:
+            pat0 = (r"\bstatic\b[^;{}]*\b" + re.escape(nm0)
+                    + r"\s*\(")
+            if re.search(pat0, body0):
+                reporter.warn(
+                    "%s 里的 %s 看起来是 static 函数。钩子函数必须是非 static 的"
+                    " void f(void)，否则接线单元调不到它（链接期会报未定义符号）。"
+                    % (os.path.relpath(src0, proj.root), nm0))
+
     # --- 6) 编译用户单元（两遍编译，多线程并行） ---------------------------
     jobs: List[UnitJob] = []
     for src in sources:
@@ -2419,7 +2443,7 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
                 shutil.rmtree(probe_dir, ignore_errors=True)
         if out_owner is None:
             reporter.error(
-                "设置里指定的「结果图数组名」在 code/ 里找不到：%s\n"
+                "配置面板里指定的「结果图数组名」在 code/ 里找不到：%s\n"
                 "    原因：没有哪个 code/*.c 能在文件作用域里看到这个名字，\n"
                 "    或者它指向的不是二维数组"
                 "（环境要按【%s】的图像去读它）。\n"
@@ -2497,7 +2521,7 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
                 continue
         if not defined:
             reporter.error(
-                "设置里指定的「结果图数组名」在 code/ 里找不到：%s\n"
+                "配置面板里指定的「结果图数组名」在 code/ 里找不到：%s\n"
                 "    原因：这个数组必须【定义】在某个 code/*.c 的\n"
                 "    文件作用域里（不能只声明在头文件里，也不能写成局部的）。\n"
                 "    下一步（任选其一）：\n"
@@ -2622,6 +2646,11 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
     #   用户代码是直接链接输入（不是库成员），不存在被丢弃的问题；
     #   而 libscut_core.a 里被引用的符号必然被拉取。
     #   （旧方案把用户代码打成 libuser.a 才需要该选项。）
+    # 钩子函数名（用于链接失败时判断"是不是钩子没定义"）。
+    all_hook_names = set(_cfg_names(cfg, "init")
+                         + _cfg_names(cfg, "frame")
+                         + _cfg_names(cfg, "post"))
+
     extra_libs, extra_libdirs = parse_extra_mk(proj.extra_mk, reporter)
     if extra_libs or extra_libdirs:
         reporter.human("  额外链接: %s" % " ".join(extra_libdirs + extra_libs))
@@ -2665,12 +2694,19 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
                 for m in missing:
                     if m not in uniq:
                         uniq.append(m)
-                hint = ("\n    缺失的符号：%s\n"
-                        "    原因：这些符号既不在你的 code/*.c 里，"
-                        "也不在核心库 %s 里。若它们是 scut_core_init / "
-                        "SCUT_Register / SCUT_Watch 之类，说明核心库不完整或"
-                        "根本不是本环境的核心库。"
-                        % (", ".join(uniq[:8]), os.path.basename(core_lib)))
+                hook_hit = [m for m in uniq if m in all_hook_names]
+                hint = "\n    缺失的符号：%s\n" % ", ".join(uniq[:8])
+                if hook_hit:
+                    hint += ("    原因：%s 是配置面板里填的钩子函数，"
+                             "但链接时找不到它的定义。\n"
+                             "    下一步：确认函数名拼写一致，"
+                             "并且函数是【非 static】的 void f(void)"
+                             "（static 的函数别的编译单元调不到）。\n"
+                             % "、".join(hook_hit))
+                else:
+                    hint += ("    原因：这些符号既不在你的 code/*.c 里，"
+                             "也不在核心库 %s 里。\n"
+                             % os.path.basename(core_lib))
             reporter.error("链接失败。" + hint + "\n    "
                            + (first_error_digest(link_diags).replace("\n", "\n    ")
                               or rl.out.strip()[:400]))
@@ -2876,8 +2912,8 @@ def do_doctor(args: argparse.Namespace, reporter: Reporter,
         if not (n_init or n_frame):
             errors.append(
                 "工程配置里没有填「图像处理函数」，环境无法运行你的算法。\n"
-                "    下一步：执行「SCUT-71: 配置本工程」，或在设置里搜索 "
-                "\"SCUT-71\" 填上「图像处理函数」。")
+                "    下一步：执行「SCUT-71: 配置本工程」，"
+                "或在配置面板的「钩子函数 › 每帧处理函数」里填上函数名。")
     except ConfigParseError as exc:
         say("  ❌ 工程配置   : 读不出来")
         errors.append(str(exc))

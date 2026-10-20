@@ -180,7 +180,7 @@ console.log('\n=== 7. 图集参数共享（simargs.ts）—— 防"调试与运�
         hooks: { init: [], frame: [], post: [] },
         pic: { dir: '', ext: '', start: 1 },
         run: { processRepeat: 1, runFrames: 60, benchRepeat: 1000 },
-        toolchain: { path: '', pythonPath: '', autoDownload: true, autoWatch: true },
+        toolchain: { path: '', pythonPath: '', autoWatch: true },
     }, over);
 
     // --- 默认配置：除 --pic 外什么都不该传 ---

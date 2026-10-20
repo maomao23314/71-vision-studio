@@ -165,10 +165,6 @@ export const FIELDS: FieldDef[] = [
             + '所以装了多个的话建议在这里写死一个',
     },
     {
-        path: ['toolchain', 'autoDownload'], label: '允许自动下载工具链', kind: 'bool',
-        hint: '找不到时可以下载一份（约 165MB），下载前一定会先问你',
-    },
-    {
         path: ['toolchain', 'autoWatch'], label: '自动发现全局变量', kind: 'bool',
         hint: '关闭可加快构建，但变量面板会是空的',
     },

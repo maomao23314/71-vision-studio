@@ -219,6 +219,11 @@ export interface VarLineEntry {
     total: number;
     values: string;
     truncated: boolean;
+    /**
+     * true = 构建时自动发现的；false = 用户在代码里手写 SCUT_Watch 注册的。
+     * 缺省（老后端不发这个字段）按 true 处理，免得把自动变量误标成主动暴露。
+     */
+    autoTag: boolean;
 }
 
 function num(v: unknown): number {
@@ -277,6 +282,7 @@ export function parseVariablesLine(line: string): VarLineEntry[] | undefined {
             total: num(v.total),
             values: typeof v.values === 'string' ? v.values : '',
             truncated: v.truncated === true,
+            autoTag: v.autoTag !== false,
         });
     }
     return out;

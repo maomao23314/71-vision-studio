@@ -34,8 +34,6 @@ import * as https from 'https';
 import { spawn, type ChildProcess } from 'child_process';
 import type { IncomingMessage } from 'http';
 import { URL } from 'url';
-import { detectProject } from './project';
-import { defaultConfig, readConfig } from './projectconfig';
 
 export interface FetchProgress { (message: string, percent?: number): void; }
 
@@ -56,7 +54,7 @@ const RELEASES_PAGE = 'https://github.com/mstorsjo/llvm-mingw/releases';
  * 查 release 的 API 地址，**可被环境变量覆盖**。
  *
  * ★★ 为什么要可配置（校园网的现实）★★
- *   官方端点在校园网/国内网络下经常不可达，此时 autoDownload 形同虚设，
+ *   官方端点在校园网/国内网络下经常不可达，此时自动下载形同虚设，
  *   用户只能自己手动下载解压 —— 而插件并没有给他别的选择。
  *   留一个环境变量出口，至少让有镜像的人（或 CI）能把它指过去，
  *   而不必改插件源码。
@@ -133,14 +131,6 @@ export async function ensureToolchain(
             root: existing,
             downloaded: false,
             message: `编译工具链已就绪：${existing}\n    说明：这是之前下载好的，本次直接复用，没有重复下载。`,
-        };
-    }
-
-    if (!autoDownloadEnabled()) {
-        return {
-            ok: false,
-            downloaded: false,
-            message: failureMessage('没有找到编译工具链，而且自动下载已被设置关掉（设置 › SCUT-71 › 工具链 › 允许自动下载）。'),
         };
     }
 
@@ -515,28 +505,6 @@ function removeQuietly(target: string): void {
     try {
         fs.rmSync(target, { recursive: true, force: true });
     } catch { /* 故意忽略 */ }
-}
-
-/**
- * 用户是否允许自动下载。
- *
- * ★ 默认允许，但不能因此把「到手即用」卡住 ★
- *   读不到工程配置（还没打开工程、文件坏了）时按允许处理 ——
- *   这个默认值让插件在"什么都不知道"时依然能用，
- *   而不是抛错或卡住。真正要拦下载的场合不多，
- *   而误拦一次的代价（用户以为插件坏了）比多下一个 165MB 更大。
- */
-function autoDownloadEnabled(): boolean {
-    try {
-        const project = detectProject();
-        if (!project) {
-            return true;
-        }
-        const { config } = readConfig(project.root);
-        return (config ?? defaultConfig()).toolchain.autoDownload;
-    } catch {
-        return true;
-    }
 }
 
 /** PowerShell 单引号字符串：内部的单引号要写两遍。 */

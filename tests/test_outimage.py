@@ -112,7 +112,7 @@ def make_project(work, name, user_c, output_array, pic_files):
         'pic': {'dir': 'pic/1', 'ext': '.bmp', 'start': 1},
         'run': {'processRepeat': 1, 'runFrames': 1, 'benchRepeat': 1},
         'toolchain': {'path': '', 'pythonPath': '',
-                      'autoDownload': False, 'autoWatch': False},
+                      'autoWatch': False},
     }
     with open(os.path.join(proj, 'scut_project.json'), 'w', encoding='utf-8') as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)

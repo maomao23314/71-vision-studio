@@ -82,6 +82,23 @@ typedef struct {
 void SCUT_Watch(const char *name, const void *p, scut_watch_type_t t,
                 int count, int elem_size, int dim);
 
+/* --------------------------------------------------------------------------
+ * 来源标签：给"已经注册过的变量"补一条"它是自动发现的"。
+ *
+ * ★ 为什么需要它：自动发现的注册是构建时生成的，和用户手写的一模一样，
+ *   光看注册表分不出谁写的。加上标签之后，宿主就能把
+ *   "注册表里有、却没有自动标签"的名字认成用户手写的。
+ *
+ * ★ 只在【已有同名注册】时生效，不会凭空新增一个变量；
+ *   重复打标签无副作用。
+ * -------------------------------------------------------------------------- */
+#define SCUT_WATCH_TAG_AUTO   "auto"
+
+void scut_watch_tag(const char *name, const char *tag);
+
+/* 查一个名字的来源标签：没有这个变量返回 -1，没有标签返回 0，自动注册返回 1。 */
+int  scut_watch_auto_tagged(const char *name);
+
 /* --- 供呈现后端/UI 遍历 --- */
 int                          scut_watch_count(void);
 const scut_watch_entry_t    *scut_watch_at(int index);

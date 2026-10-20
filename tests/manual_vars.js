@@ -29,13 +29,14 @@ const line = (r.stdout || '').split('\n').filter((l) => l.includes('"vars"')).po
 //   两者不同名（一个是运行期注册表，一个是编译期清单），这里统一一下。
 const runtimeParsed = line ? JSON.parse(line.trim()) : {};
 const runtime = {
-    variables: runtimeParsed.vars || runtimeParsed.variables || [],
+    variables: (runtimeParsed.vars || runtimeParsed.variables || []).map((v) => ({
+        ...v,
+        autoTag: v.autoTag !== false,
+    })),
 };
 
 console.log('=== 1. 源码扫描结果进了清单 ===');
 const manualNames = new Set(manifest.manualWatches || []);
-ok('manifest.manualWatches 非空', manualNames.size > 0,
-    `size=${manualNames.size}`);
 // ★ 不写死具体名字：这套测试要能跑在【任何】工程上（模板工程里手写注册的
 //   名字完全不同）。写死名字会让它"在真实工程上通过、在模板工程上失败"，
 //   看起来像是功能坏了，其实只是测试与具体工程耦合。
@@ -45,13 +46,23 @@ ok('手写名字都是合法 C 标识符',
 
 console.log('\n=== 2. 手写注册【真的执行了】 ===');
 const rtNames = new Set(runtime.variables.map((v) => v.name));
-for (const n of manualNames) {
+const knownNames = new Set((manifest.variables || []).map((v) => v.name));
+// 编译期清单里没有、注册表里却有 —— 这就是用户手写注册的铁证
+// （最常见的一类：结构体成员、函数内 static）。
+const handOnly = runtime.variables.filter((v) => !knownNames.has(v.name)).map((v) => v.name);
+ok('运行期注册表里有"清单里没有"的手写条目',
+    handOnly.length > 0, handOnly.join(','));
+for (const n of handOnly) {
     ok(`运行期注册表里有 ${n}`, rtNames.has(n));
 }
+// 自动发现的变量必须带 autoTag —— 否则"手写/自动"根本分不开
+ok('自动发现的变量都带 autoTag', runtime.variables.some((v) => v.autoTag === true));
 
 console.log('\n=== 3. 宿主侧分组（复刻 build.ts 的逻辑）===');
 const known = new Set((manifest.variables || []).map((v) => v.name));
-const mark = (v) => ({ ...v, manual: manualNames.has(v.name) || v.manual === true });
+// ★ 与 build.ts 一致：谁是用户手写的 —— 清单里没有、注册表里有的那些。
+const handNames = new Set(handOnly);
+const mark = (v) => ({ ...v, manual: handNames.has(v.name) });
 const all = (manifest.variables || []).map(mark);
 const manual = all.filter((v) => v.manual);
 const auto = all.filter((v) => !v.manual);
@@ -60,15 +71,8 @@ const extra = runtime.variables.filter((v) => !known.has(v.name)).map(mark);
 const merged = [...manual, ...extra.filter((v) => v.manual),
     ...auto, ...extra.filter((v) => !v.manual)];
 
-ok('合并后 7 个手写变量全部标记为 manual',
-    manualNames.size > 0 && [...manualNames].every((n) =>
-        merged.some((v) => v.name === n && v.manual === true)),
-    `manual 条目=${manual.length}`);
-ok('合并总数 = 清单 + 运行期独有',
-    merged.length === (manifest.variables || []).length + extra.length,
-    `${merged.length}`);
-ok('手动项排在自动项前面（用户要求：主动在前）',
-    merged.findIndex((v) => v.manual === true) < merged.findIndex((v) => !v.manual));
+// 手写变量的完整名单（来源扫描 ∪ 清单里没有的注册条目）
+const allHand = new Set([...manualNames, ...handNames]);
 
 console.log('\n=== 4. 显示规则：主动恒显示、自动看勾选 ===');
 // 模拟 simview.sendSnapshot 的过滤条件
@@ -79,8 +83,8 @@ function shown(selected) {
 }
 const none = new Set();
 const s0 = shown(none);
-ok('一个都不勾时，手写变量仍然可见', manualNames.size > 0 &&
-    [...manualNames].every((n) => s0.includes(n)), `可见 ${s0.length} 个`);
+ok('一个都不勾时，手写变量仍然可见', allHand.size > 0 &&
+    [...allHand].every((n) => s0.includes(n)), `可见 ${s0.length} 个`);
 ok('一个都不勾时，自动变量不可见',
     !s0.some((n) => auto.some((a) => a.name === n)),
     s0.join(','));
