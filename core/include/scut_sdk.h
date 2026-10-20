@@ -127,6 +127,8 @@ void SCUT_EnvCopyOutput(const scut_u8 *src, int src_w, int src_h);
  *  ★ 面板上要不要显示这一栏，由工程配置（scut_project.json 的
  *    display.secondImage）决定；代码里写了但配置没开，
  *    只是看不到，不影响运行。
+ *  ★ 这几个函数属于【显示设施】，和 SCUT_DrawPoint 一样：
+ *    拷到车载工程时把这几行调用删掉即可，算法主体不需要改。
  *  ★ 坐标越界、未绑定时一律静默忽略，与 OutImageSet / DrawPoint 同一套约定。
  * ========================================================================== */
 void SCUT_OutImage2Set(int x, int y, scut_u8 value);
