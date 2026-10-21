@@ -13,19 +13,22 @@
  *  ★ 协议（权威在宿主侧：src/simview.ts + src/simsesion.ts 的推送点。
  *    本清单必须与那里逐字对齐 —— 它曾经漂移过，见下面两条更正。）
  *
+ *    本文件只有一个宿主：侧边栏仿真视图。
+ *    （曾经还有过一个"独立监控窗口"，用 <body data-mode> 分形态共用本文件。
+ *      撤掉了 —— 见下面 PIC_MODE 那条注释的残留说明与 docs/改动流水账。）
+ *
  *    收到 {type:'frame',  index,width,height,rgb,rgb2?,timing,pic}
  *         ★ 曾漏写 pic（宿主 simview.ts 的 onFrame 会带它）。
  *         ★ rgb2 = 图片2（算法用 SCUT_OutImageSet(2, …) 画的那张）。
- *           没有这个字段就是"本帧没有图片2"，要么算法没画，
- *           要么配置里没开（宿主那边就不读它）。
+ *           没有这个字段就是"本帧没有图片2"（算法这一帧没画）。
  *    （曾经还有一条 {type:'display', secondImage} —— "要不要显示图片2"。
  *      用户要求删掉那个开关：两栏恒在，开合交给标题。宿主不再发它。）
  *    收到 {type:'vars',   snapshots:[{name,values[],truncated,total,
  *                                    dims,kind,manual}], frame, timing}
  *         ★ 曾漏写 dims/kind/manual（宿主 sendSnapshot 会补齐）。
  *    收到 {type:'catalog',variables:[...], selected:[...], hasManifest}
- *    收到 {type:'status', running, exePath}
  *    收到 {type:'log',    line}
+ *    收到 {type:'status', running, exePath}
  *
  *    发出 {type:'ack',    index}          ← 背压：必须发，否则会话会卡住
  *    发出 {type:'cmd',    cmd:'stop'|'build'|'debug'|'bench'
@@ -41,6 +44,12 @@
   'use strict';
 
   var vscode = acquireVsCodeApi();
+
+  /* ★ 这里曾经有一个 PIC_MODE（'sidebar' / 'monitor'），让本文件同时服务
+   *   侧边栏和"独立监控窗口"两个页面。窗口撤掉了（VS Code 插件开不出
+   *   真正的独立窗口，而多一个入口只会让"去哪看"变成一道选择题），
+   *   这个开关随之删除 —— 单页面不需要"我是谁"这种判断。
+   *   留这条注释只是为了让后来者知道：这里出现过、并且为什么没有了。 */
 
   // ---- 持久化状态（替代 retainContextWhenHidden，见技术要点 §四）----
   /**
@@ -154,6 +163,16 @@
 
   /* ------------------------------------------------------------ 日志 */
 
+  /**
+   * 日志保留上限。
+   *
+   * ★ 老环境是一个固定高度的滚动区；这里也一样，只留最近的若干行 ——
+   *   "看历史"是输出面板的事（完整、可搜索），这块是"扫一眼刚刚发生了什么"。
+   * ★ 超了砍掉最早的 100 行（而不是砍成 300）：每行都砍一次数组，
+   *   不如攒够一批再砍，省一次整表拷贝。
+   */
+  var LOG_MAX = 400;
+
   var logLines = [];
 
   /**
@@ -172,14 +191,26 @@
   function log(msg) {
     var stamp = new Date().toLocaleTimeString();
     logLines.push('[' + stamp + '] ' + msg);
-    if (logLines.length > 400) {
-      logLines = logLines.slice(-300);
+    if (logLines.length > LOG_MAX) {
+      logLines = logLines.slice(-(LOG_MAX - 100));
     }
-    if (el.log) {
-      el.log.textContent = logLines.join('\n');
-      el.log.scrollTop = el.log.scrollHeight;
-    }
+    renderLog();
     updateLogCount();
+  }
+
+  /**
+   * 把日志刷到 pre 里。
+   *
+   * ★ 抽出来是为了"补历史"：侧边栏里这块默认是折叠的，脚本启动那一刻
+   *   宿主早就推过来一堆行（翻页、测速、加载失败的原因），
+   *   而当时的 log() 全落进了本地数组、从没画到墙上 ——
+   *   用户展开看到的是一片空白，然后以为"根本没有日志"。
+   *   收尾时统一 renderLog() 一次，把攒下的都补上。
+   */
+  function renderLog() {
+    if (!el.log) { return; }
+    el.log.textContent = logLines.join('\n');
+    el.log.scrollTop = el.log.scrollHeight;
   }
 
   /* ==========================================================================
@@ -211,6 +242,30 @@
    *      手动缩放后不再自动改（否则精心放大的视野会被一次拖动毁掉），
    *      点「适应」或「1:1」可退回。
    */
+  /**
+   * 把一帧 RGB 填进 RGBA 缓冲。
+   *
+   * ★ 图像是 RGB 三通道（每像素 R/G/B 三字节）→ canvas 的 RGBA。
+   * ★ alpha 只写一次（缓冲区建好那一刻），之后每帧都不碰：
+   *   alpha 恒为不透明，每帧再写一遍纯属浪费，效果完全等价。
+   * ★ RGB 三字节直接抄进 RGBA 的前三槽即可，不需要任何换算 ——
+   *   这正是把输出缓冲从灰度改成真彩色之后最大的好处：
+   *   从"灰度扩成三通道"变成了"原样搬运"。
+   *
+   * ★ 为什么单独提出来：画面区（createPane）和左下角的缩略图条
+   *   画的是同一种东西，只有尺寸不同。缩略图若另写一份循环，
+   *   以后改颜色处理只改一处，两处画面就会长得不一样。
+   */
+  function paintRgb(rgba, rgb, width, height) {
+    var n = width * height;
+    for (var i = 0, j = 0, k = 0; i < n; i++, j += 4, k += 3) {
+      rgba[j] = rgb[k];
+      rgba[j + 1] = rgb[k + 1];
+      rgba[j + 2] = rgb[k + 2];
+      if (rgba[j + 3] !== 255) { rgba[j + 3] = 255; }
+    }
+  }
+
   function createPane(idx) {
     var key = PANE_KEYS[idx];
     var st = state.panes[key];
@@ -307,16 +362,7 @@
       }
     }
 
-    /**
-     * 画一帧。
-     *
-     * 图像是 RGB 三通道（每像素 R/G/B 三字节）→ canvas 的 RGBA。
-     * ★ alpha 一次性置 255（只在缓冲区重建时做）：每帧都写一遍纯属浪费，
-     *   而 alpha 恒为不透明，所以只写一次完全等价。
-     * ★ RGB 三字节直接抄进 RGBA 的前三槽即可，不需要任何换算 ——
-     *   这正是把输出缓冲从灰度改成真彩色之后最大的好处：
-     *   从"灰度扩成三通道"变成了"原样搬运"。
-     */
+    /** 画一帧（RGB → canvas 的 RGBA，见 paintRgb）。 */
     function draw(rgb, width, height) {
       if (!ctx || !dom.canvas) {
         return;
@@ -329,13 +375,7 @@
         imageData = ctx.createImageData(width, height);
         rgba = imageData.data;
       }
-      var n = width * height;
-      for (var i = 0, j = 0, k = 0; i < n; i++, j += 4, k += 3) {
-        rgba[j] = rgb[k];
-        rgba[j + 1] = rgb[k + 1];
-        rgba[j + 2] = rgb[k + 2];
-        rgba[j + 3] = 255;
-      }
+      paintRgb(rgba, rgb, width, height);
       ctx.putImageData(imageData, 0, 0);
       if (dom.placeholder) {
         dom.placeholder.style.display = 'none';
@@ -515,36 +555,51 @@
     notifySelection();
   }
 
+  /** 告诉宿主"我这边勾了哪些"。勾选的真值在宿主侧那份 `selected` 里。 */
   function notifySelection() {
     vscode.postMessage({ type: 'select', names: Array.from(selected) });
   }
 
   /* ==========================================================================
-   *  变量渲染 —— 勾选区与查看区【一次遍历同时产出】
+   *  变量渲染 —— 勾选区与查看区【同一个入口刷出来】
    *  --------------------------------------------------------------------------
-   *  ★ 为什么合成一个函数（历史教训）：
+   *  ★ 为什么只有一个入口（历史教训）：
    *    早期拆成 renderPickList / renderCatalog / renderSnapshots 三个函数，
    *    由 catalog 和 vars 两条消息分别触发。结果是时序竞态：
    *      · catalog handler 忘了调 renderPickList → 勾选区永远空白；
    *      · vars 先到 / catalog 后到 → 值刚填上就被重建清空；
    *      · 修了两次都是补丁，每次只堵住一条路径。
    *    根因是【同一份状态被三段代码各自渲染一遍】—— 只要消息顺序稍有变化，
-   *    三者就不同步。现在一条消息进来只调这一个函数，状态→UI 一锤定音。
+   *    三者就不同步。现在一条消息进来只调 renderVariables 一个入口。
+   *
+   *  ★ 为什么又拆成两半（renderPicks / renderVars）：
+   *    监控窗口只有"查看区"，没有勾选区和过滤框。两半都接受参数、
+   *    都不读全局变量，所以同一份实现能服务两个页面 ——
+   *    而不是为监控窗口再抄一份渲染。
    *
    *  两个区块的职责（用户要求拆开，但样式要一致）：
    *    · 勾选区（pick-list）：配置 —— 决定观察哪些，改一次放着不动
    *    · 查看区（vars-list）：数据 —— 显示当前帧的值，每帧都变
    * ========================================================================== */
-  function kindOf(name) {
-    for (var i = 0; i < catalog.length; i++) {
-      if (catalog[i].name === name) { return catalog[i]; }
+  function kindOf(list, name) {
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].name === name) { return list[i]; }
     }
     // 不在清单里的（运行期才注册出来的）：兜底元信息，保证不崩、能显示。
     // manual 缺省 false —— 没在源码里扫到注册调用，就按自动捕获处理。
     return { dims: [], kind: 'SCUT_T_I32', isStatic: false, manual: false };
   }
 
-  function renderVariables() {
+  /**
+   * 刷【勾选区】：只列自动捕获的变量，勾选决定查看区显示谁。
+   *
+   * ★ 监控窗口里没有这一区（getElementById 拿到 null），
+   *   函数一进门就退出了 —— 仍然是同一份实现。
+   */
+  function renderPicks() {
+    if (!el.pickList) {
+      return;
+    }
     var filter = (el.pickFilter && el.pickFilter.value || '').trim().toLowerCase();
 
     /* ---------- 勾选区 ----------
@@ -553,199 +608,244 @@
      *   主动暴露（代码里显式 SCUT_Watch 注册的）本来就一定会显示，
      *   再给一个勾选框只会让人以为"不勾就看不到"。
      *   这一段只在勾选区里拉一条说明，不给控件。 */
-    if (el.pickList) {
-      el.pickList.textContent = '';
-      var autoList = [];
-      for (var ai = 0; ai < catalog.length; ai++) {
-        if (catalog[ai].manual !== true) { autoList.push(catalog[ai]); }
+    el.pickList.textContent = '';
+    var autoList = [];
+    for (var ai = 0; ai < catalog.length; ai++) {
+      if (catalog[ai].manual !== true) { autoList.push(catalog[ai]); }
+    }
+    if (el.pickCount) {
+      var pickedAuto = 0;
+      for (var k = 0; k < autoList.length; k++) {
+        if (selected.has(autoList[k].name)) { pickedAuto++; }
       }
-      if (el.pickCount) {
-        var pickedAuto = 0;
-        for (var k = 0; k < autoList.length; k++) {
-          if (selected.has(autoList[k].name)) { pickedAuto++; }
-        }
-        el.pickCount.textContent = autoList.length
-          ? ('已勾 ' + pickedAuto + ' / ' + autoList.length) : '';
+      el.pickCount.textContent = autoList.length
+        ? ('已勾 ' + pickedAuto + ' / ' + autoList.length) : '';
+    }
+    if (catalog.length === 0) {
+      var e1 = document.createElement('li');
+      e1.className = 'pick-empty dim';
+      e1.textContent = '还没有变量清单 —— 先点「编译」。';
+      el.pickList.appendChild(e1);
+    } else if (autoList.length === 0) {
+      var e2 = document.createElement('li');
+      e2.className = 'pick-empty dim';
+      e2.textContent = '没有需要勾选的变量（主动暴露的那些恒显示，不用勾）。';
+      e2.title = '主动暴露 = 代码里显式 SCUT_Watch / SCUT_WATCH_* 注册的变量。';
+      el.pickList.appendChild(e2);
+    } else {
+      var shown = 0;
+      for (var i = 0; i < catalog.length; i++) {
+        var v = catalog[i];
+        if (v.manual === true) { continue; }
+        if (filter && v.name.toLowerCase().indexOf(filter) < 0) { continue; }
+        shown++;
+        var li = document.createElement('li');
+        li.className = 'pick-item is-auto';
+        var lab = document.createElement('label');
+        var cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = selected.has(v.name);
+        cb.addEventListener('change', (function (name) {
+          return function (ev) {
+            if (ev.target.checked) { selected.add(name); }
+            else { selected.delete(name); }
+            persist();
+            notifySelection();
+            /* 勾一下 = 勾选区和查看区都变：两半一起刷，不会出现
+             * "勾上了但下面没多出那一行"。 */
+            renderPicks();
+            renderVars(catalog, snapshots, selected);
+          };
+        })(v.name));
+        lab.appendChild(cb);
+        var nm = document.createElement('span');
+        nm.className = 'var-name';
+        nm.textContent = v.name;
+        lab.appendChild(nm);
+        var meta = document.createElement('span');
+        meta.className = 'var-meta';
+        meta.textContent = varMeta(v);
+        lab.appendChild(meta);
+        li.appendChild(lab);
+        el.pickList.appendChild(li);
       }
-      if (catalog.length === 0) {
-        var e1 = document.createElement('li');
-        e1.className = 'pick-empty dim';
-        e1.textContent = '还没有变量清单 —— 先点「编译」。';
-        el.pickList.appendChild(e1);
-      } else if (autoList.length === 0) {
-        var e2 = document.createElement('li');
-        e2.className = 'pick-empty dim';
-        e2.textContent = '没有需要勾选的变量（主动暴露的那些恒显示，不用勾）。';
-        e2.title = '主动暴露 = 代码里显式 SCUT_Watch / SCUT_WATCH_* 注册的变量。';
-        el.pickList.appendChild(e2);
-      } else {
-        var shown = 0;
-        for (var i = 0; i < catalog.length; i++) {
-          var v = catalog[i];
-          if (v.manual === true) { continue; }
-          if (filter && v.name.toLowerCase().indexOf(filter) < 0) { continue; }
-          shown++;
-          var li = document.createElement('li');
-          li.className = 'pick-item is-auto';
-          var lab = document.createElement('label');
-          var cb = document.createElement('input');
-          cb.type = 'checkbox';
-          cb.checked = selected.has(v.name);
-          cb.addEventListener('change', (function (name) {
-            return function (ev) {
-              if (ev.target.checked) { selected.add(name); }
-              else { selected.delete(name); }
-              persist();
-              notifySelection();
-              renderVariables();
-            };
-          })(v.name));
-          lab.appendChild(cb);
-          var nm = document.createElement('span');
-          nm.className = 'var-name';
-          nm.textContent = v.name;
-          lab.appendChild(nm);
-          var meta = document.createElement('span');
-          meta.className = 'var-meta';
-          meta.textContent = varMeta(v);
-          lab.appendChild(meta);
-          li.appendChild(lab);
-          el.pickList.appendChild(li);
-        }
-        if (filter && shown === 0) {
-          var none = document.createElement('li');
-          none.className = 'pick-empty dim';
-          none.textContent = '没有匹配 "' + filter + '" 的变量。';
-          el.pickList.appendChild(none);
-        }
+      if (filter && shown === 0) {
+        var none = document.createElement('li');
+        none.className = 'pick-empty dim';
+        none.textContent = '没有匹配 "' + filter + '" 的变量。';
+        el.pickList.appendChild(none);
       }
     }
+  }
 
-    /* ---------- 查看区 ---------- */
-    if (el.varsList) {
-      el.varsList.textContent = '';
-      if (el.varsCount) {
-        // 只数"能勾的那种里勾了几个"，与勾选区保持一致。
-        var pickable = 0;
-        var picked = 0;
-        for (var pi = 0; pi < catalog.length; pi++) {
-          if (catalog[pi].manual === true) { continue; }
-          pickable++;
-          if (selected.has(catalog[pi].name)) { picked++; }
-        }
-        el.varsCount.textContent = pickable ? (picked + ' / ' + pickable) : '';
+  /**
+   * 按快照刷新区。
+   *
+   * ★ 从 renderVariables 里拆出来，是为了让监控窗口【直接】刷值：
+   *   那一页没有勾选区和过滤框，只需要"值那一半"。
+   *   顺带修好了一个老毛病：侧边栏里这块默认是展开的、脚本启动时
+   *   宿主已经推过一份快照，可当时并没有人画它 ——
+   *   window 消息监听器是在脚本【末尾】才注册的，启动期到达的消息全丢了，
+   *   面板要等下一帧才有内容。收尾时补一次 renderVars() 就没有这个空窗。
+   *
+   * ★ 参数不许省：不传 catalog 就等于"不知道有哪些变量"，
+   *   一个都不会显示。调用方要么传全局 catalog，要么传一份精简的。
+   */
+  function renderVars(catalog, snapshots, selected) {
+    if (!el.varsList) {
+      return;
+    }
+    el.varsList.textContent = '';
+    if (el.varsCount) {
+      // 只数"能勾的那种里勾了几个"，与勾选区保持一致。
+      var pickable = 0;
+      var picked = 0;
+      for (var vi = 0; vi < catalog.length; vi++) {
+        if (catalog[vi].manual === true) { continue; }
+        pickable++;
+        if (selected.has(catalog[vi].name)) { picked++; }
       }
-      if (catalog.length === 0) {
-        el.varsHint.textContent = '还没有变量清单。先点「编译」。';
-        return;
-      }
-      var picked = [];
-      for (var k = 0; k < snapshots.length; k++) {
-        var s = snapshots[k];
-        var km = kindOf(s.name);
-        // ★ 显示规则：主动暴露的恒显示，自动捕获的看勾选。
-        //   用户在代码里写了 SCUT_Watch 就等于已经表达过"我要看它"，
-        //   不该再要求他去上面的列表里勾一遍。
-        var isManual = km.manual === true || s.manual === true;
-        if (!isManual && !selected.has(s.name)) { continue; }
-        // ★ 遍历【快照】而不是 catalog：
-        //   catalog 是自动发现的结果，但用户可以手动 SCUT_Watch 额外注册
-        //   （例如结构体里的关键成员），这些不在 catalog 里 ——
-        //   早期版本遍历 catalog，导致手动注册的变量【永远不显示】，
-        //   即使后端每帧都输出了它们的值。
-        //   catalog 里没有的用兜底元信息，保证不崩、能显示。
-        picked.push({
-          name: s.name,
-          dims: km.dims, kind: km.kind, isStatic: false,
-          total: s.total,
-          manual: isManual
-        });
-      }
-      if (picked.length === 0) {
+      el.varsCount.textContent = pickable ? (picked + ' / ' + pickable) : '';
+    }
+    if (catalog.length === 0) {
+      if (el.varsHint) { el.varsHint.textContent = '还没有变量清单。先点「编译」。'; }
+      return;
+    }
+    var picked2 = [];
+    for (var k = 0; k < snapshots.length; k++) {
+      var s = snapshots[k];
+      var km = kindOf(catalog, s.name);
+      // ★ 显示规则：主动暴露的恒显示，自动捕获的看勾选。
+      //   用户在代码里写了 SCUT_Watch 就等于已经表达过"我要看它"，
+      //   不该再要求他去上面的列表里勾一遍。
+      var isManual = km.manual === true || s.manual === true;
+      if (!isManual && !selected.has(s.name)) { continue; }
+      // ★ 遍历【快照】而不是 catalog：
+      //   catalog 是自动发现的结果，但用户可以手动 SCUT_Watch 额外注册
+      //   （例如结构体里的关键成员），这些不在 catalog 里 ——
+      //   早期版本遍历 catalog，导致手动注册的变量【永远不显示】，
+      //   即使后端每帧都输出了它们的值。
+      //   catalog 里没有的用兜底元信息，保证不崩、能显示。
+      picked2.push({
+        name: s.name,
+        dims: km.dims, kind: km.kind, isStatic: false,
+        total: s.total,
+        manual: isManual
+      });
+    }
+    if (picked2.length === 0) {
+      if (el.varsHint) {
         el.varsHint.textContent = '变量栏是空的：代码里没写 SCUT_Watch 主动注册，'
           + '也没在上面的「选择要观察的变量」里勾选。勾几个即可（不影响算法运行）。';
-        return;
       }
-      el.varsHint.textContent = '';
-
-      // ★ 主动暴露的排前面。快照的顺序来自后端注册顺序（自动注册在先、
-      //   手动 SCUT_Watch 在后），不排序的话"主动暴露"永远沉在最底下。
-      //   排序稳定：同类内部保持原顺序。
-      picked.sort(function (a, b) {
-        return (b.manual ? 1 : 0) - (a.manual ? 1 : 0);
-      });
-
-      var lastGroup = null;
-      for (var p = 0; p < picked.length; p++) {
-        var cv = picked[p];
-        // 分组标题：与勾选区同一套文案，让两个区一眼能对上
-        if (lastGroup === null || cv.manual !== lastGroup) {
-          var gsep = document.createElement('li');
-          gsep.className = 'pick-group ' + (cv.manual ? 'manual' : 'auto');
-          gsep.textContent = cv.manual
-            ? '主动暴露（代码里显式注册）'
-            : '自动捕获（编译期扫描到）';
-          el.varsList.appendChild(gsep);
-          lastGroup = cv.manual;
-        }
-        var li2 = document.createElement('li');
-        li2.className = 'var-item' + (cv.manual ? ' is-manual' : ' is-auto');
-        li2.setAttribute('data-name', cv.name);
-
-        var head = document.createElement('div');
-        head.className = 'var-head';
-        var nm2 = document.createElement('span');
-        nm2.className = 'var-name';
-        nm2.textContent = cv.name;
-        head.appendChild(nm2);
-        var meta2 = document.createElement('span');
-        meta2.className = 'var-meta';
-        meta2.textContent = varMeta(cv);
-        head.appendChild(meta2);
-        li2.appendChild(head);
-
-        var body = document.createElement('div');
-        body.className = 'var-body';
-
-        var val = document.createElement('div');
-        val.className = 'var-value';
-        val.setAttribute('data-role', 'value');
-        val.textContent = snapshotText(cv.name);
-        body.appendChild(val);
-
-        // ★ 判据必须容得下【数字 kind】（一条真实缺陷的修复）：
-        //   后端 printf 的 kind 是枚举数字，而编译期清单给的是字符串。
-        //   宿主侧现在会把数字反查成字符串（build.ts 的 decodeWatchKind），
-        //   但运行期独有的条目仍可能走到这里带上 ''（不在 catalog 里时）。
-        //   原先只比字符串，于是那些结构体永远不渲染「展开字段」按钮，
-        //   而 varMeta 还会把它们显示成 "I32"（错的类型，比缺按钮更误导）。
-        //   这里同时认字符串名与枚举数值（STRUCT=14、PTR=11，
-        //   与 core/include/scut_watch.h 的 scut_watch_type_t 一致）。
-        var kk = cv.kind;
-        if (kk === 'SCUT_T_STRUCT' || kk === 'SCUT_T_PTR'
-            || kk === 14 || kk === 11) {
-          var det = document.createElement('div');
-          det.className = 'struct-detail';
-          det.style.display = 'none';
-          body.appendChild(det);
-          var btn = document.createElement('button');
-          btn.className = 'ghost tiny';
-          btn.textContent = '展开字段';
-          btn.addEventListener('click', (function (node, button, vv) {
-            return function () {
-              var open = node.style.display !== 'none';
-              node.style.display = open ? 'none' : '';
-              button.textContent = open ? '展开字段' : '收起';
-              if (!open) { renderStructDetail(node, vv); }
-            };
-          })(det, btn, cv));
-          body.appendChild(btn);
-        }
-
-        li2.appendChild(body);
-        el.varsList.appendChild(li2);
-      }
+      return;
     }
+    if (el.varsHint) { el.varsHint.textContent = ''; }
+
+    // ★ 主动暴露的排前面。快照的顺序来自后端注册顺序（自动注册在先、
+    //   手动 SCUT_Watch 在后），不排序的话"主动暴露"永远沉在最底下。
+    //   排序稳定：同类内部保持原顺序。
+    picked2.sort(function (a, b) {
+      return (b.manual ? 1 : 0) - (a.manual ? 1 : 0);
+    });
+
+    var lastGroup = null;
+    for (var p = 0; p < picked2.length; p++) {
+      var cv = picked2[p];
+      // 分组标题：与勾选区同一套文案，让两个区一眼能对上
+      if (lastGroup === null || cv.manual !== lastGroup) {
+        var gsep = document.createElement('li');
+        gsep.className = 'pick-group ' + (cv.manual ? 'manual' : 'auto');
+        gsep.textContent = cv.manual
+          ? '主动暴露（代码里显式注册）'
+          : '自动捕获（编译期扫描到）';
+        el.varsList.appendChild(gsep);
+        lastGroup = cv.manual;
+      }
+      el.varsList.appendChild(varRow(cv, snapshots));
+    }
+  }
+
+  /**
+   * 刷变量：勾选区 + 查看区。
+   *
+   * 两半分开写（renderPicks / renderVars），但【永远一起刷】：
+   * 勾选区的勾选框回调里两半都调一次，消息驱动的刷新也是这一个入口。
+   * 早期版本把这段整块写在一个函数里，后来监控窗口要"只刷值那一半"，
+   * 才拆成两个 —— 拆完仍然只有一个对外入口，避免两处刷新逻辑漂移。
+   */
+  function renderVariables() {
+    try {
+      renderPicks();
+    } catch (e) {
+      log('[监控] 勾选区渲染失败（保留上次内容）：' + (e && e.message ? e.message : e));
+    }
+    renderVars(catalog, snapshots, selected);
+  }
+
+  /**
+   * 一行变量的 DOM（变量名 + 类型 + 这一帧的值）。
+   *
+   * ★ 抽出来是为了让「查看区」的刷新逻辑只写一遍：
+   *   原来这一整段嵌在渲染函数的三层 for 里，加一个监控窗口就得再抄一份。
+   */
+  function varRow(cv, snapshots) {
+    var li2 = document.createElement('li');
+    li2.className = 'var-item' + (cv.manual ? ' is-manual' : ' is-auto');
+    li2.setAttribute('data-name', cv.name);
+
+    var head = document.createElement('div');
+    head.className = 'var-head';
+    var nm2 = document.createElement('span');
+    nm2.className = 'var-name';
+    nm2.textContent = cv.name;
+    head.appendChild(nm2);
+    var meta2 = document.createElement('span');
+    meta2.className = 'var-meta';
+    meta2.textContent = varMeta(cv);
+    head.appendChild(meta2);
+    li2.appendChild(head);
+
+    var vb = document.createElement('div');
+    vb.className = 'var-body';
+
+    var val = document.createElement('div');
+    val.className = 'var-value';
+    val.setAttribute('data-role', 'value');
+    val.textContent = snapshotText(snapshots, cv.name);
+    vb.appendChild(val);
+
+    // ★ 判据必须容得下【数字 kind】（一条真实缺陷的修复）：
+    //   后端 printf 的 kind 是枚举数字，而编译期清单给的是字符串。
+    //   宿主侧现在会把数字反查成字符串（build.ts 的 decodeWatchKind），
+    //   但运行期独有的条目仍可能走到这里带上 ''（不在 catalog 里时）。
+    //   原先只比字符串，于是那些结构体永远不渲染「展开字段」按钮，
+    //   而 varMeta 还会把它们显示成 "I32"（错的类型，比缺按钮更误导）。
+    //   这里同时认字符串名与枚举数值（STRUCT=14、PTR=11，
+    //   与 core/include/scut_watch.h 的 scut_watch_type_t 一致）。
+    var kk = cv.kind;
+    if (kk === 'SCUT_T_STRUCT' || kk === 'SCUT_T_PTR'
+        || kk === 14 || kk === 11) {
+      var det = document.createElement('div');
+      det.className = 'struct-detail';
+      det.style.display = 'none';
+      vb.appendChild(det);
+      var btn = document.createElement('button');
+      btn.className = 'ghost tiny';
+      btn.textContent = '展开字段';
+      btn.addEventListener('click', (function (node, button, vv) {
+        return function () {
+          var open = node.style.display !== 'none';
+          node.style.display = open ? 'none' : '';
+          button.textContent = open ? '展开字段' : '收起';
+          if (!open) { renderStructDetail(node, vv); }
+        };
+      })(det, btn, cv));
+      vb.appendChild(btn);
+    }
+
+    li2.appendChild(vb);
+    return li2;
   }
 
   function varMeta(v) {
@@ -821,16 +921,21 @@
     node.appendChild(line2);
   }
 
-  function snapshotOf(name) {
-    for (var i = 0; i < snapshots.length; i++) {
-      if (snapshots[i].name === name) { return snapshots[i]; }
+  /**
+   * 取某个变量在当前快照里的显示文本；没有快照时返回占位符。
+   *
+   * ★ 显式传 snapshots：监控窗口的变量清单是"宿主过滤好的"，与全局那份
+   *   不是同一个数组。读全局的话，监控窗口里每一行都会停在"(等待数据…)"。
+   */
+  function snapshotOf(list, name) {
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].name === name) { return list[i]; }
     }
     return null;
   }
 
-  /** 取某个变量的显示文本；没有快照时返回占位符。 */
-  function snapshotText(name) {
-    var s = snapshotOf(name);
+  function snapshotText(list, name) {
+    var s = snapshotOf(list, name);
     if (!s) { return '(等待数据…)'; }
     return s.values.join(' ') + (s.truncated ? ' …（共 ' + s.total + ' 个，只显示前 24 个）' : '');
   }
@@ -880,7 +985,7 @@
   bind('btn-settings', function () { vscode.postMessage({ type: 'cmd', cmd: 'settings' }); });
   bind('btn-clear', function () {
     logLines = [];
-    if (el.log) { el.log.textContent = ''; }
+    renderLog();
     updateLogCount();
   });
 
@@ -1009,19 +1114,71 @@
     bindPaneInteractions(panes[pj], pj);
   }
 
-  // Ctrl+= / Ctrl+- 缩放（与 VS Code 自身的缩放快捷键一致的直觉）
-  // ★ 作用于【鼠标最后停留的那块画面】—— 两块图各有各的缩放。
+  /* ------------------------------------------------------------ 键盘 */
+  //
+  // ★★ 为什么这些键必须写在【页面里】，而不是 package.json 的 keybindings ★★
+  //
+  //   0.10.7 之前，翻页键 `←`/`→`（以及测速 F9、停止 Shift+F5）是绑在
+  //   keybindings 上的，条件是 `when: view == scut71.simview`。
+  //   **它们从来没生效过** —— 只是没人真的"只开侧边栏按一下"去验证。
+  //   文档还写着"需视图聚焦"，照着按没反应，只会让人以为插件坏了。
+  //
+  //   做独立监控窗口时反而灵了：那一版是页面 JS 直接处理这几个键的。
+  //   同一个键、两条路，一条通一条不通，说明问题在键位那条路上。
+  //   （`view` 是菜单上下文用的键，"哪个视图有焦点"另有其键；
+  //     也可能 VS Code 对 webview 的键盘转发对方向键不生效。两种结论一样。）
+  //
+  //   所以现在把键全部收进页面里：
+  //     · 页面在 iframe 里，键是它第一个拿到的，前面没有中间商；
+  //     · "没焦点就收不到"是浏览器白送的 —— 用户在代码里敲 + 永远是加号；
+  //     · 必须 preventDefault()，否则 VS Code 那边可能再匹配一次键位，
+  //       变成一次按键翻两页。
+  //
+  //   ★ 不要再把这些键绑回 keybindings。绑了要么不生效，要么双触发。
   window.addEventListener('keydown', function (e) {
-    if (!e.ctrlKey && !e.metaKey) { return; }
-    var target = paneOf(activePane);
-    if (e.key === '=' || e.key === '+') {
-      target.setZoom(target.st.zoom * 1.25);
+    var inField = e.target && (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName));
+    if (inField || e.defaultPrevented) {
+      return;   // 正在输入框里打字：一个键都不要抢
+    }
+
+    // ---- 缩放：Ctrl+= / Ctrl+- / Ctrl+0 ----
+    if (e.ctrlKey || e.metaKey) {
+      var target = paneOf(activePane);
+      if (e.key === '=' || e.key === '+') {
+        target.setZoom(target.st.zoom * 1.25);
+        e.preventDefault();
+      } else if (e.key === '-' || e.key === '_') {
+        target.setZoom(target.st.zoom / 1.25);
+        e.preventDefault();
+      } else if (e.key === '0') {
+        target.resetToFit();
+        e.preventDefault();
+      }
+      return;
+    }
+
+    // ---- 功能键：测速 F9 / 停止 Shift+F5 ----
+    if (e.key === 'F9') {
+      vscode.postMessage({ type: 'cmd', cmd: 'bench' });
       e.preventDefault();
-    } else if (e.key === '-' || e.key === '_') {
-      target.setZoom(target.st.zoom / 1.25);
+      return;
+    }
+    if (e.key === 'F5' && e.shiftKey) {
+      vscode.postMessage({ type: 'cmd', cmd: 'stop' });
       e.preventDefault();
-    } else if (e.key === '0') {
-      target.resetToFit();
+      return;
+    }
+
+    // ---- 翻页：+ 下一张 / - 上一张，←/→ 同义 ----
+    //
+    // 与老环境的"+- 缩略图"一个意思。`=` 和 `_` 也认 —— 它们就是不按 Shift
+    // 的 + 和 -，在美式键盘上还得按住 Shift 才打得出加号，收宽一点没坏处。
+    var key = e.key;
+    if (key === '+' || key === '=' || key === 'ArrowRight') {
+      vscode.postMessage({ type: 'cmd', cmd: 'nextPic' });
+      e.preventDefault();
+    } else if (key === '-' || key === '_' || key === 'ArrowLeft') {
+      vscode.postMessage({ type: 'cmd', cmd: 'prevPic' });
       e.preventDefault();
     }
   });
@@ -1185,6 +1342,13 @@
   setOpen('log');
   panes[0].apply();
   panes[1].apply();
+  /* 上面这些消息监听器都是【脚本末尾】才注册的，而宿主在页面加载时
+   * 就推过一次 frames/vars/log —— 那些消息全丢了。
+   * 这里补画一次，用户展开哪一块都是现成的内容，不用等下一帧。
+   * （日志尤其明显：展开一条空白，会让人以为"根本没有日志"。） */
+  renderVars(catalog, snapshots, selected);
+  renderPicks();
+  renderLog();
 
   // ★ 图片2 那一栏【恒在】，和图片1一样默认收起 —— 没有"要不要显示"这回事，
   //   所以这里不需要等任何消息，也就不用担心出现一帧闪烁。

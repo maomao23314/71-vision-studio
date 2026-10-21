@@ -2,7 +2,7 @@
   "name": "scut-71-vision-studio",
   "displayName": "SCUT-71 Vision Studio",
   "description": "智能车视觉仿真环境 —— 只写算法，其余交给环境",
-  "version": "0.10.6",
+  "version": "0.10.8",
   "publisher": "scut-racing",
   "license": "GPL-3.0",
   "engines": {
@@ -120,30 +120,6 @@
         "key": "ctrl+shift+b",
         "mac": "cmd+shift+b",
         "when": "!inDebugMode"
-      },
-      {
-        "command": "scut71.stop",
-        "key": "shift+f5",
-        "mac": "shift+f5",
-        "when": "view == scut71.simview"
-      },
-      {
-        "command": "scut71.bench",
-        "key": "f9",
-        "mac": "f9",
-        "when": "view == scut71.simview"
-      },
-      {
-        "command": "scut71.prevPic",
-        "key": "left",
-        "mac": "left",
-        "when": "view == scut71.simview"
-      },
-      {
-        "command": "scut71.nextPic",
-        "key": "right",
-        "mac": "right",
-        "when": "view == scut71.simview"
       }
     ],
     "menus": {
@@ -289,8 +265,9 @@
     "check-sdk": "node scripts/sync-sdk.js --check",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "prepackage": "npm run sync-sdk && npm run compile",
-    "package": "vsce package --no-dependencies --allow-missing-repository"
+    "prepackage": "npm run clean && npm run sync-sdk && npm run compile",
+    "package": "vsce package --no-dependencies --allow-missing-repository",
+    "clean": "node -e \"require('fs').rmSync('out',{recursive:true,force:true})\""
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

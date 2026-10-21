@@ -496,7 +496,9 @@ ok('README-pic.txt 说明扩展名由 pic.ext 决定',
 #   大小本来就显示在值栏里（C 侧渲染成 "<104B>"），
 #   详情区再说一遍是冗余。这条守住的是"别引入假数据"。
 sv2 = read('extension/media/simview.js')
-_picked = re.search(r'picked\.push\(\{(.*?)\}\)', sv2, re.S)
+# ★ 变量名从 picked 改成了 picked2（拆分 renderPicks / renderVars 时改的）。
+#   判据本身没变：那个对象里有哪些字段。
+_picked = re.search(r'picked2?\.push\(\{(.*?)\}\)', sv2, re.S)
 ok('renderVariables 传入的 picked 对象存在（判据前提）', _picked is not None)
 if _picked:
     _has_eb = 'elemBytes' in _picked.group(1)
@@ -638,14 +640,39 @@ ok('前端把 rgb2 画到第二块画布',
    re.search(r'panes\[1\]\.draw\(rgb2', sv3) is not None)
 ok('两块画面的缩放各自独立（不是一份全局 zoom）',
    'state.zoom' not in sv3 and 'st.zoom' in sv3)
+# ★ 默认开合只有一种：收起（用户要求）。
+#   0.10.7 曾让它随页面而变（监控窗口展开），那个窗口撤了，判断也就回到最简单。
 ok('两块画面默认【收起】',
    re.search(r'open:\s*false,\s*zoom: 1', sv3) is not None
    and re.search(r'd\.open = s\.open === true', sv3) is not None)
+# ★ 撤销得干净：那个窗口留下的东西一样都不许在。
+ok('独立监控窗口（0.10.7 试过又撤掉）没有残留',
+   'PIC_MODE' not in strip_comments(sv3)
+   and 'data-mode' not in strip_comments(sv3)
+   and not os.path.exists(os.path.join(ROOT, 'extension/src/monitorview.ts')))
 ok('两栏标题就是「图片1」「图片2」',
    '>图片1<' in read('extension/src/simview.ts')
    and '>图片2<' in read('extension/src/simview.ts'))
 ok('旧的单画面 id 已全部改名（防止半新半旧两套 DOM）',
    'screen-section' not in sv3)
+
+# ★★ 翻页/测速/停止这几个键【不许】再绑回 package.json 的 keybindings ★★
+#
+#   0.10.7 之前它们绑在那里（`when: view == scut71.simview`），结果从来没生效过：
+#   侧边栏聚焦时 `←`/`→`/`F9`/`Shift+F5` 一律没反应，而文档还写着"需视图聚焦"。
+#   现在它们由 media/simview.js 的 keydown 直接发命令（见 test_webview_js 的
+#   `keys` 场景）。绑回去的后果不是"多一层保险"，是**双触发**：
+#   页面自己发一次，VS Code 的键位再发一次，按一下翻两页。
+_pkg = json.loads(read('extension/package.json'))
+_view_keys = {k['command'] for k in _pkg['contributes'].get('keybindings', [])
+              if 'scut71.simview' in str(k.get('when', ''))}
+ok('翻页/测速/停止没有再绑 VS Code 键位（否则会和页面里的处理双触发）',
+   not (_view_keys & {'scut71.prevPic', 'scut71.nextPic',
+                      'scut71.bench', 'scut71.stop'}),
+   '仍在 keybindings 里：%s' % sorted(_view_keys))
+ok('页面自己认这些键（+ - ← → F9 Shift+F5）',
+   "'nextPic'" in sv3 and "'prevPic'" in sv3
+   and "'F9'" in sv3 and "e.shiftKey" in sv3)
 
 print('\n=== 19. 「运行 N 帧」已彻底删除（不留半截） ===')
 

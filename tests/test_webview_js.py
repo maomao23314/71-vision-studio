@@ -294,6 +294,72 @@ if (SCENARIO === 'pane_toggle') {
               + ' P0 ' + b0.classList.contains('collapsed'));
   process.exit(0);
 }
+
+/* ---- 键盘 ---- */
+
+function fireKey(ev) {
+  let prevented = false;
+  const evt = Object.assign({
+    ctrlKey: false, metaKey: false, shiftKey: false, defaultPrevented: false,
+    target: { tagName: 'BODY' },
+    preventDefault: () => { prevented = true; }
+  }, ev);
+  (listeners.keydown || []).forEach(fn => fn(evt));
+  return prevented;
+}
+
+function cmdsSince(n) {
+  return outbox.slice(n)
+    .filter(m => m && m.type === 'cmd')
+    .map(m => m.cmd);
+}
+
+if (SCENARIO === 'keys') {
+  /* 键盘：全部在页面 JS 里处理。
+   *
+   * ★ 为什么这条测试很重要（它守着一个真实的历史 bug）：
+   *   0.10.7 之前这几个键是绑在 package.json 的 keybindings 上的
+   *   （`when: view == scut71.simview`），而它们【从来没生效过】。
+   *   现在改成页面 JS 直接发命令，这条测试就是那个修复的锁。
+   *   如果有人"顺手"把它们绑回 keybindings，这里的断言不会红 ——
+   *   所以 tests/test_cleanup.py 另有一条守着 "keybindings 里不许再有它们"。
+   */
+  let mark = outbox.length;
+  fireKey({ key: '+' });
+  console.log('PLUS ' + JSON.stringify(cmdsSince(mark)));
+
+  mark = outbox.length;
+  fireKey({ key: '=' });
+  console.log('EQUALS ' + JSON.stringify(cmdsSince(mark)));
+
+  mark = outbox.length;
+  fireKey({ key: '-' });
+  console.log('MINUS ' + JSON.stringify(cmdsSince(mark)));
+
+  mark = outbox.length;
+  fireKey({ key: 'ArrowRight' });
+  fireKey({ key: 'ArrowLeft' });
+  console.log('ARROWS ' + JSON.stringify(cmdsSince(mark)));
+
+  mark = outbox.length;
+  fireKey({ key: 'F9' });
+  console.log('F9 ' + JSON.stringify(cmdsSince(mark)));
+
+  mark = outbox.length;
+  fireKey({ key: 'F5', shiftKey: true });
+  console.log('SHIFT_F5 ' + JSON.stringify(cmdsSince(mark)));
+
+  /* 在输入框里打字：一个键都不许抢 */
+  mark = outbox.length;
+  const eaten = fireKey({ key: '+', target: { tagName: 'INPUT' } });
+  console.log('IN_INPUT ' + JSON.stringify(cmdsSince(mark)) + ' prevented=' + eaten);
+
+  /* Ctrl+= 仍然是缩放，不是翻页 */
+  mark = outbox.length;
+  const z = fireKey({ key: '=', ctrlKey: true });
+  console.log('CTRL_EQ ' + JSON.stringify(cmdsSince(mark)) + ' prevented=' + z);
+  process.exit(0);
+}
 '''
 
 
@@ -372,6 +438,28 @@ def main():
     # ★ 关键：点第二块只该动第二块
     check('P1 false P0 true' in out,
           '折叠互不串台（点图片2不会展开图片1）', out)
+
+    # ---- 场景 4：键盘 ----
+    #
+    # ★ 这一组守着一个真实的历史 bug：这些键曾经绑在 package.json 的
+    #   keybindings 上（`when: view == scut71.simview`），【从来没生效过】。
+    #   现在全部由页面 JS 直接发命令，所以"按一下发一个命令"就是判据。
+    print('')
+    print('[4] 键盘：+ - ← → F9 Shift+F5 全部在页面里处理')
+    out, err, rc = run_node('keys')
+    print('    driver: %s' % (out or '(no output)'))
+    if err:
+        print('    stderr : %s' % err[:400])
+    check('PLUS ["nextPic"]' in out, '+ 发 nextPic', out)
+    check('EQUALS ["nextPic"]' in out, '= （不按 Shift 的 +）也翻页', out)
+    check('MINUS ["prevPic"]' in out, '- 发 prevPic', out)
+    check('ARROWS ["nextPic","prevPic"]' in out, '←/→ 与 +- 同义', out)
+    check('F9 ["bench"]' in out, 'F9 发 bench（测速）', out)
+    check('SHIFT_F5 ["stop"]' in out, 'Shift+F5 发 stop', out)
+    check('IN_INPUT [] prevented=false' in out,
+          '焦点在输入框里时一个键都不抢', out)
+    check('CTRL_EQ [] prevented=true' in out,
+          'Ctrl+= 仍然是缩放（页面自己吃掉），不是翻页', out)
 
     print('\n' + '=' * 60)
     if failures:
