@@ -68,10 +68,15 @@ const scut_u8 *SCUT_GetInputImage(int *w, int *h);
 
 /* 输出图像写入（结果图，RGB 三通道）。坐标越界自动忽略。
  *
- * ★ 第一个参数 img 选【哪一块输出图】：
- *       SCUT_IMG_1（=1）  图片1：最终画面（默认底图 + 你搬进来的结果图 + 彩色标注）
- *       SCUT_IMG_2（=2）  图片2：给你自己放的中间结果（二值化、俯视图、掩码…）
+ * ★ 第一个参数 img 选【哪一块输出图】，直接写数字：
+ *       1 = 图片1：最终画面（默认底图 + 你搬进来的结果图 + 彩色标注）
+ *       2 = 图片2：给你自己放的中间结果（二值化、俯视图、掩码…）
  *   传别的值 = 什么都不做（静默忽略，与坐标越界同一种约定）。
+ *
+ * ★ 为什么就给个 1 / 2，不设 SCUT_IMG_1 之类的宏：
+ *   这一层是"显示设施"，用户一辈子也只会填这两个数字之一。
+ *   宏并不能挡住写错（填 3 一样编得过），却要求用户多记一个名字、
+ *   多包含一次头文件的约定。能不学就不学。
  *
  * ★ 一般【不需要】用它：把结果写进自己的数组，由 SCUT_EnvCopyOutput 搬运即可。
  *   它只服务于"算法直接产出显示图"的场景。
@@ -83,17 +88,13 @@ const scut_u8 *SCUT_GetInputImage(int *w, int *h);
  *   两块输出图的语义完全一样（同一套边界、同一种搬运、同一种颜色规则），
  *   差别只有"画到哪一块"。两套名字（Set / Set2、EnvCopyOutput / EnvCopyOutput2）
  *   会让每个调用点都要重新判断"该用哪个"，而选错的表现还是静默的。
- *   一个参数把语义收在一处，也省掉了以后加第三块时的命名问题。
+ *   一个参数把语义收在一处：写 1 就是图片1，写 2 就是图片2，不用另查。
  *
  * ★ 输出图是真彩色。车载 IPS 是灰度屏，但那是【显示层】的属性；
  *   算法读到的输入图始终是灰度（与车载完全一致），
  *   而"显示"这一层恰恰最需要看清彩色标注 ——
  *   曾把颜色按亮度折算成单通道，结果红/绿/青在暗底图上无法分辨，
  *   表现为「绘制明明是彩色的，画面却变成灰度了」。 */
-#define SCUT_IMG_1 1   /* 图片1：最终画面 */
-#define SCUT_IMG_2 2   /* 图片2：算法自己的中间结果 */
-#define SCUT_IMG_COUNT 2
-
 void SCUT_OutImageSet(int img, int x, int y, scut_u8 value);
 void SCUT_OutImageSetRGB(int img, int x, int y, scut_u8 r, scut_u8 g, scut_u8 b);
 
@@ -103,7 +104,7 @@ scut_u8 SCUT_OutImageGet(int img, int x, int y);
 /* --------------------------------------------------------------------------
  *  把用户的结果图搬进环境输出图
  *
- *  img   : SCUT_IMG_1 / SCUT_IMG_2（见上）
+ *  img   : 1 = 图片1，2 = 图片2（见上）
  *  src   : 用户结果数组首地址（row-major，即 src[y*src_w + x]）
  *  src_w : 源行宽（像素）；传 0 = 用环境宽度
  *  src_h : 源行数；传 0 = 用环境高度
@@ -134,10 +135,10 @@ void SCUT_EnvCopyOutput(int img, const scut_u8 *src, int src_w, int src_h);
  *  典型写法：
  *      // ① 你已经有自己的数组（最常见）
  *      uint8_t binary_image[SCUT_IMAGE_H][SCUT_IMAGE_W];
- *      SCUT_EnvCopyOutput(SCUT_IMG_2, binary_image[0], 0, 0);   // 0 = 用环境宽高
+ *      SCUT_EnvCopyOutput(2, binary_image[0], 0, 0);   // 2 = 图片2；后两个 0 = 用环境宽高
  *
  *      // ② 想直接点着画（例如把掩码叠成红色）
- *      SCUT_OutImageSetRGB(SCUT_IMG_2, x, y, 255, 0, 0);
+ *      SCUT_OutImageSetRGB(2, x, y, 255, 0, 0);
  *
  *  ★ 面板上「图片2」这一栏默认就有（默认收起），不用额外配置；
  *    在配置面板的「显示」里可以关掉 —— 关掉只是不再读那张图，不影响运行。

@@ -15,12 +15,11 @@
  *
  *    收到 {type:'frame',  index,width,height,rgb,rgb2?,timing,pic}
  *         ★ 曾漏写 pic（宿主 simview.ts 的 onFrame 会带它）。
- *         ★ rgb2 = 图片2（算法用 SCUT_OutImageSet(SCUT_IMG_2, …) 画的那张）。
+ *         ★ rgb2 = 图片2（算法用 SCUT_OutImageSet(2, …) 画的那张）。
  *           没有这个字段就是"本帧没有图片2"，要么算法没画，
  *           要么配置里没开（宿主那边就不读它）。
- *    收到 {type:'display', secondImage}   ← 图片2 那一栏显不显示
- *         ★ 开关的真值在工程配置（scut_project.json 的 display.secondImage），
- *           面板不自己判断 —— 否则"配置里关着、面板却还显示"会成为第二个真值。
+ *    （曾经还有一条 {type:'display', secondImage} —— "要不要显示图片2"。
+ *      用户要求删掉那个开关：两栏恒在，开合交给标题。宿主不再发它。）
  *    收到 {type:'vars',   snapshots:[{name,values[],truncated,total,
  *                                    dims,kind,manual}], frame, timing}
  *         ★ 曾漏写 dims/kind/manual（宿主 sendSnapshot 会补齐）。
@@ -1096,24 +1095,6 @@
         return;
       }
 
-      case 'display': {
-        /* 图片2 那一栏显不显示。开关的真值在工程配置里（默认开），
-         * 面板只负责照着显示 —— 不在这里再判断一次"该不该显示"。 */
-        try {
-          var on = msg.secondImage === true;
-          var sec = panes[1].dom.section;
-          if (sec) {
-            sec.hidden = !on;
-            // 从隐藏变可见时容器宽度才第一次有效，重新自适应一次
-            // （收起状态下 canvas 没有尺寸，apply 会自己跳过）
-            if (on) { panes[1].apply(); }
-          }
-        } catch (e) {
-          log('[视图] 图片2 开关更新失败：' + (e && e.message ? e.message : e));
-        }
-        return;
-      }
-
       case 'vars': {
         snapshots = Array.isArray(msg.snapshots) ? msg.snapshots : [];
         if (msg.timing) {
@@ -1205,10 +1186,8 @@
   panes[0].apply();
   panes[1].apply();
 
-  // ★ 图片2那一栏的初始可见性仍然等宿主下发 display 消息再定：
-  //   那件事的真值在工程配置里（默认开），面板不该自己猜一个默认值。
-  //   HTML 里先按"显示"渲染，宿主若说关就把整个 section 藏起来 ——
-  //   这样默认配置下不会有一帧的闪烁。
+  // ★ 图片2 那一栏【恒在】，和图片1一样默认收起 —— 没有"要不要显示"这回事，
+  //   所以这里不需要等任何消息，也就不用担心出现一帧闪烁。
 
   // ★ 刻意不往日志区写"视图已就绪"这类环境消息：
   //   那一区现在只放【用户算法 SCUT_Log 的输出】，混进环境噪声会让

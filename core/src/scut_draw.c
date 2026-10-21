@@ -87,7 +87,7 @@ void scut_draw_clear_output_written(void)
 }
 
 /* 由 scut_input.c 的写入通路在真正写入后调用（见 scut_draw.h 的说明）。
- * ★ 0.10.6 起 SCUT_OutImageSet / SCUT_EnvCopyOutput 带"选哪块图"的参数，
+ * ★ SCUT_OutImageSet / SCUT_EnvCopyOutput 带"选哪块图"的参数，
  *   写入代码统一收在 scut_input.c（两块图共用一段），所以置位也从那里转告，
  *   本模块不再自己持有那两个函数 —— 记账点只有一个。 */
 void scut_draw_mark_output_written(void)
@@ -625,7 +625,7 @@ void SCUT_DrawText(int x, int y, scut_u32 color, const char *fmt, ...)
  *  本模块只负责【绑定】那块缓冲、把覆盖层合成进去、以及记「本帧算法
  *  有没有直接写过它」。真正的像素写入在 core/src/scut_input.c：
  *  SCUT_OutImageSet / SetRGB / OutImageGet / EnvCopyOutput 都带一个
- *  "选哪块图"的参数（SCUT_IMG_1 / SCUT_IMG_2），两块图共用一段代码。
+ *  "选哪块图"的参数（1 / 2），两块图共用一段代码。
  *
  *  ★ 为什么不在本文件再写一遍：那会变成两份边界检查、两份"步长 ×3"。
  *    而"步长必须乘 3"这件事本文件已经吃过一次亏 ——

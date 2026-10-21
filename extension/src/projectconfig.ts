@@ -96,34 +96,11 @@ export interface ProjectConfig {
         /** 每帧把算法跑几遍取平均（>1 时结果更稳，耗时也成倍）。 */
         processRepeat: number;
         /* ★ 这里原先还有一个 runFrames（「运行」按钮连着跑几帧）。
-         *   那项功能在 0.10.6 删掉了 —— 见 simview.ts 的说明。
+         *   那项功能已经删掉了 —— 见 simview.ts 的说明。
          *   字段也跟着删：留着一个没人读的配置项，正是本项目最反感的那种
          *   "配了没用"的死界面。 */
         /** 「测速」按钮对同一张图重复几遍取平均。 */
         benchRepeat: number;
-    };
-    /**
-     * 面板显示。
-     *
-     * ★ 与下面那段"故意没有 view 段"的历史不冲突，也不是它的复活：
-     *   那个 view 段的四个字段【没有任何代码读】，是纯摆设；
-     *   这里的 secondImage 有真实消费者 ——
-     *     · simview.ts 决定要不要把第二张图推给面板、要不要渲染那一栏；
-     *     · simsession.ts 据此决定要不要去读第二张图的 PPM。
-     *   加字段的规矩还是同一条：先确认有人读，再写进 UI。
-     */
-    display: {
-        /**
-         * 是否把第二张图（「图片2」那一栏）一起显示。
-         *
-         * 第二张图是算法用 SCUT_OutImage2Set / SCUT_EnvCopyOutput2 自己画的
-         * 中间结果（二值化、俯视图…）。
-         *
-         * ★ 默认【开】：两栏并排看是常态需求，而没写过第二张图的工程
-         *   只是多一栏"还没有内容"的空态提示，不受任何影响。
-         * ★ 关掉时省下的不是渲染，是【读文件】—— 宿主不再去读那张 PPM。
-         */
-        secondImage: boolean;
     };
     // ★ 这里【故意】没有旧的 view 段 ★
     //   0.9.4 曾加了 showTiming / showVariables / showLog / pickPersist
@@ -134,8 +111,9 @@ export interface ProjectConfig {
     //   不需要再在这里存一份 —— 两份数据就是两个真值。
     //
     //   教训：把字段名写进 UI 很容易，难的是确认有人真的读它。
-    //   ★ 上面的 display 段是后来加的，它【有人读】（见那里的说明），
-    //     所以不算违反这条教训 —— 判断标准是"有没有消费者"，不是"名字像不像"。
+    //   ★ 后来加过一版"要不要显示图片2"的开关，用户一句话又把它删了：
+    //     「不要选择开启」—— 两栏就摆在那里，开合由画面标题控制，
+    //     配置里不该出现第二个开关。这条和上面 view 段是同一类教训。
     //
     /** 本机工具链。path 空 = 依次探测环境变量 → 已下载的目录 → PATH。 */
     toolchain: {
@@ -187,9 +165,6 @@ export function defaultConfig(): ProjectConfig {
         hooks: { init: [], frame: [], post: [] },
         pic: { dir: '', ext: '', start: 1 },
         run: { processRepeat: 1, benchRepeat: 1000 },
-        // ★ 默认【开】：两栏并排看是常态；没写过第二张图的工程
-        //   只是多一栏"还没有内容"的提示，不受任何影响。
-        display: { secondImage: true },
         toolchain: { path: '', pythonPath: '', autoWatch: true,
                      watchExclude: '', watchMaxElems: 0 },
     };
@@ -235,7 +210,6 @@ export function normalizeConfig(raw: unknown): ProjectConfig {
     const hooks = asRecord(root.hooks) ?? {};
     const pic = asRecord(root.pic) ?? {};
     const run = asRecord(root.run) ?? {};
-    const disp = asRecord(root.display) ?? {};
     const tc = asRecord(root.toolchain) ?? {};
 
     const str = (v: unknown, fb: string): string =>
@@ -268,10 +242,6 @@ export function normalizeConfig(raw: unknown): ProjectConfig {
         run: {
             processRepeat: count(run.processRepeat, 1),
             benchRepeat: count(run.benchRepeat, 1000),
-        },
-        // 显示开关：默认【开】—— 两栏并排看是常态（见接口里 display 段的说明）。
-        display: {
-            secondImage: bool(disp.secondImage, true),
         },
         toolchain: {
             path: str(tc.path, ''),
@@ -334,7 +304,6 @@ export function writeConfig(projectRoot: string, cfg: ProjectConfig): void {
     merged.hooks = { ...(asRecord(merged.hooks) ?? {}), ...cfg.hooks };
     merged.pic = { ...(asRecord(merged.pic) ?? {}), ...cfg.pic };
     merged.run = { ...(asRecord(merged.run) ?? {}), ...cfg.run };
-    merged.display = { ...(asRecord(merged.display) ?? {}), ...cfg.display };
     merged.toolchain = { ...(asRecord(merged.toolchain) ?? {}), ...cfg.toolchain };
     merged.inputArray = cfg.inputArray;
     merged.outputArray = cfg.outputArray;

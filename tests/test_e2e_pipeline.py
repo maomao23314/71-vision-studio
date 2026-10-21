@@ -46,7 +46,7 @@ import toolchain as tc  # noqa: E402
 BUILD = os.path.join(ROOT, 'tools', 'scut_build.py')
 TEMPLATE = os.path.join(ROOT, 'templates', 'starter')
 # 测试图：用【仓库内自带的】tests/fixtures/pic/1（模板故意不带图）。
-# ★ 原先借仓库外的"集成仿真环境测试"工程 —— 别人 clone 下来没有那个目录，
+# ★ 原先借仓库外某个测试工程 —— 别人 clone 下来没有那个目录，
 #   这部分会静默少跑（而不是报错）。
 PIC_SRC = tc.fixture_pic_dir()
 

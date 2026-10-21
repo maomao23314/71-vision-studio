@@ -172,36 +172,33 @@ SCUT_DrawPoint(x, y, SCUT_RGB(g, g, g));   /* 灰度也用同一个宏 */
 
 ---
 
-## 想同时看两张图
+## 两张图：图片1 和 图片2
 
-侧边栏有两个画面栏：**图片1**、**图片2**（默认都收起，点标题展开）。
-图片1 是最终结果（底图 + 你的结果图 + 彩色标注）。
+侧边栏有两个画面栏，默认都收起，点标题展开。
 
-如果你的算法还想单独看某个中间结果（二值化图、逆透视俯视图、丢线掩码…），
-就把它画到**图片2**里。两块图用【同一组函数】，第一个参数选哪一块：
+**图片1** 是最终结果：底图 + 你的结果图 + 彩色标注。
+**图片2** 空着，用来放你算法里的中间结果，比如二值化图、逆透视俯视图、丢线掩码。
+
+两块图用同一组函数，第一个参数写 `1` 或 `2`：
 
 ```c
 void camera_draw(void)
 {
-    /* ① 已经有数组：整幅搬过去（0,0 = 用环境宽高） */
-    SCUT_EnvCopyOutput(SCUT_IMG_2, binary_image[0], 0, 0);
+    /* 整幅搬过去；后面两个 0 表示用环境的宽高 */
+    SCUT_EnvCopyOutput(2, binary_image[0], 0, 0);
 
-    /* ② 或者直接点着画，颜色原样显示 */
-    SCUT_OutImageSetRGB(SCUT_IMG_2, 10, 10, 255, 0, 0);
+    /* 或者直接点着画，颜色原样显示 */
+    SCUT_OutImageSetRGB(2, 10, 10, 255, 0, 0);
 }
 ```
 
-| 项 | 说明 |
-|---|---|
-| 环境做什么 | 只负责**每帧清黑**；不铺底图、不合成标注 |
-| 所以 | 想显示什么就每帧写；这一帧不写就是黑的（不会残留上一帧） |
-| 面板 | 两栏各自可展开/收起（默认收起），缩放、拖动、滚轮各管各的 |
-| 关掉时 | 连那张图都不生成 —— 不用这个功能不付任何开销 |
-| 改开关 | 立即生效，不用重新编译，也不用重启仿真 |
+图片2 不铺底图，也不合成标注，环境每帧只把它清黑。
+想显示什么就每帧写一遍；这一帧不写，它就是黑的，不会留着上一帧的内容。
 
-> 为什么不自动用第二次显示来"猜"你的意图：图片2 画什么是算法的事，
-> 环境只需要一个**不带任何预设**的缓冲。这样它就不会对"这张图应该长什么样"
-> 有任何意见。
+不写图片2 的工程不会为它多付出什么：后端发现没人往里写过，就不生成那张图，
+插件也不会去读。
+
+> 图片2 画什么是你的事，环境不替你猜。它只是一块够你用的缓冲。
 
 ---
 
@@ -240,8 +237,7 @@ void camera_draw(void)
 `.scut/gen/*` 是构建脚本生成的契约头与接线单元，不要手改。
 
 **改完立即生效**（运行期）：图集目录/后缀/起始编号、每帧重复次数、
-「测速」重复次数、是否显示图片2、工具链路径、
-Python 解释器、是否自动下载工具链、是否自动发现变量。
+「测速」重复次数、工具链路径、Python 解释器、是否自动发现变量。
 
 **改完要重编译**（编译期）：图像宽高、输入/结果图数组名、三个钩子函数名。
 
@@ -317,7 +313,7 @@ python tests/run_all_tests.py   # 跑一遍回归（15 个套件）
 
 | 分区 | 内容 |
 |---|---|
-| 移植契约 | `SCUT_GetInputImage`、`SCUT_OutImageSet`/`SetRGB`/`Get`、`SCUT_EnvCopyOutput` |
+| 移植契约 | `SCUT_GetInputImage`、`SCUT_OutImageSet`/`SetRGB`/`Get`、`SCUT_EnvCopyOutput`（后四个的第一个参数写 `1` 或 `2`，选图片1 / 图片2） |
 | 主机侧调试设施 | `SCUT_Draw*`、`SCUT_Log`、`SCUT_Watch` 及 `SCUT_WATCH_SCALAR`/`ARRAY` |
 | 编译期契约 | `SCUT_IMAGE_W/H`、`SCUT_INPUT_ARRAY`（由 `scut_project.json` 生成） |
 
@@ -327,11 +323,11 @@ python tests/run_all_tests.py   # 跑一遍回归（15 个套件）
 
 | 模块 | 职责 |
 |---|---|
-| `bind/scut_bind.c` | **唯一**知道编译期尺寸的 TU；持有输入图、输出图、覆盖层三块缓冲 |
+| `bind/scut_bind.c` | **唯一**知道编译期尺寸的 TU；持有输入图、图片1、图片2、覆盖层四块缓冲 |
 | `core/src/scut_sched.c` | 调度与计时；帧内顺序的唯一定义点 |
 | `core/src/scut_registry.c` | 回调注册表（role + priority 排序，插入排序保证全序） |
-| `core/src/scut_input.c` | 阶段门控、默认底图、结果图搬运 |
-| `core/src/scut_draw.c` | 绘制到覆盖层；8×8 ASCII 字库 |
+| `core/src/scut_input.c` | 阶段门控、默认底图、两块输出图的写入与搬运（`out_store` 是唯一的像素写入点） |
+| `core/src/scut_draw.c` | 绘制到覆盖层；8×8 ASCII 字库；「本帧输出图被直接写过」的记账 |
 | `core/src/scut_frame.c` | BMP/PNG 解码、覆盖层合成（**唯一带文件 IO 的核心 TU**） |
 | `core/src/scut_watch.c` | 变量观察表（定长 488 项，构造期注册） |
 | `core/src/scut_log.c` | 日志环形缓冲（256 行 × 192 字节） |
@@ -344,6 +340,7 @@ python tests/run_all_tests.py   # 跑一遍回归（15 个套件）
 
 配置：工程根 `scut_project.json`（唯一真值）。
 帧数据：后端 stdout 每帧一行 JSON，`timing` 内嵌；图像走临时目录的 PPM(P6)。
+一帧最多两张图：`img`（图片1）必有，`img2`（图片2）在算法往里画过之后才有。
 日志：C 侧环形缓冲 → 后端每帧抽干 → **stderr**（保持 stdout 是纯 JSON 通道）。
 
 关键点：**帧行必须先于变量行判断**（帧行有 `frame` 字段）。顺序反了会导致帧被变量解析器抢走，
@@ -399,6 +396,7 @@ scut_project.json
 | 三个钩子非 static | glue 是独立 TU，只能调外部链接函数（车载 `main` 同样要求） |
 | 合成由调度器做 | 后端各自记得合成 → 漏一个后端就标注静默消失 |
 | 覆盖层哨兵为 `0xFFFFFFFF` | `0` 是合法黑色；用 0 清屏会把整幅图涂黑 |
+| 图片2 每帧清黑 | 不清的话，这一帧没画却留着上一帧，看着像"这帧也算出了同样结果" |
 | `snprintf` 返回值不是写入量 | 它"本该写入的长度"，可大于缓冲。全项目规矩见 `scut_types.h` |
 
 ## 测试
@@ -428,7 +426,7 @@ python tests/run_all_tests.py --also-cn              # 额外跑一遍中文路�
 | e2e | `test_e2e_pipeline.py` | **设计理念本身**：模板建工程 → 零注册 → 构建 → 运行 → 输出图非黑/计时非零/日志可达 |
 | glue-edges | `test_glue_edges.py` | 接线单元三条"静默算错"（同函数填两阶段、`--no-watch` 重复定义、结果图指向标量） |
 | outimage | `test_outimage.py` | 算法直接写输出图 × 默认底图，**两侧都测**（只测一侧的话条件写反也照样绿）；图片2 的生成 / 每帧清空 / 零开销 |
-| second-session | `second_session.js` | 图片2 在**会话层**的通路：开关打开才读那张 PPM、关掉连文件都不读 |
+| second-session | `second_session.js` | 图片2 在**会话层**的通路：算法写过才有 `rgb2`；`without` 场景验证"这一帧没画就全黑" |
 | cleanup | `test_cleanup.py` | 死代码与过时注释**双向**守护（防回潮 + 防误删） |
 | webview-js | `test_webview_js.py` | 前端在最小 DOM 桩里**真的执行**（曾抓到 `renderStructDetail` 从未定义） |
 | symbols | `test_symbols.py` | DWARF 符号发现（clang 主 + gcc 副，跨工具链） |
@@ -436,7 +434,7 @@ python tests/run_all_tests.py --also-cn              # 额外跑一遍中文路�
 | mem-safety | `test_mem_safety.py` | ASan + 金丝雀抓栈越界（曾抓到 `json_escape` 越界写、`scut_watch_read` 越界读） |
 | settings | `test_extension_settings.py` | 配置一致性：TS 的 `ProjectConfig` 与 Python 的 `DEFAULT_CONFIG` 字段逐字对齐 |
 | extension | `extension_smoke.js` | 插件纯逻辑（协议解析 / PPM / 诊断）—— 不依赖 VS Code |
-| session | `run_frames.js` | 运行/测速/翻页的 **ACK 背压链路**（曾抓到 `runFrames(N)` 多跑一帧） |
+| session | `run_frames.js` | 单步/测速/翻页的 **ACK 背压链路**：一步只走一帧（背压多放行一次就会多出帧来） |
 | manual-vars | `manual_vars.js` | 主动暴露变量：源码扫描 → 分组 → 恒显示 |
 | dap | `dap_smoke.js` | 真实 lldb-dap DAP 会话（缺 lldb-dap 时**明确跳过**，不判失败） |
 | webview | `webview_render.js` | 真实 Chromium 渲染真实帧数据并截图 |

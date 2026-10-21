@@ -28,7 +28,6 @@ export type SectionKey =
     | 'hooks'
     | 'pic'
     | 'run'
-    | 'display'
     | 'toolchain';
 
 export type FieldKind = 'text' | 'number' | 'lines' | 'bool' | 'folder' | 'file';
@@ -61,7 +60,6 @@ export const SECTIONS: SectionDef[] = [
     { key: 'hooks', title: '钩子函数', note: '编译期契约 · 决定环境调用哪些函数' },
     { key: 'pic', title: '测试图集', note: '改完立即生效' },
     { key: 'run', title: '运行期', note: '改完立即生效' },
-    { key: 'display', title: '显示', note: '只影响面板 · 改完立即生效' },
     { key: 'toolchain', title: '工具链', note: '本机环境' },
 ];
 
@@ -142,13 +140,6 @@ export const FIELDS: FieldDef[] = [
     {
         path: ['run', 'benchRepeat'], label: '「测速」重复次数', kind: 'number',
         hint: '点「测速」时对同一张图重复几遍取平均周期数',
-    },
-    {
-        path: ['display', 'secondImage'], label: '显示「图片2」', kind: 'bool',
-        hint: '侧边栏默认有「图片1」「图片2」两栏（都没展开）。'
-            + '图片2 用来单独看你的中间结果（二值化图、逆透视俯视图之类），'
-            + '代码里用 SCUT_EnvCopyOutput(2, ...) / SCUT_OutImageSet(2, ...) 往里画。'
-            + '★ 关掉只是不再读那张图，不影响算法。改完立即生效，不用重启仿真。',
     },
     // ★ 这里【故意】没有 view 段 ★
     //   初版加了 showTiming / showVariables / showLog / pickPersist 四个开关，

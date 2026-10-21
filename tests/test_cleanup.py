@@ -591,9 +591,13 @@ ok('bind 头文件声明了第二块输出图',
 ok('bind 单元真的分配了第二块缓冲',
    'second_image' in bind_code and 'scut_bind_output2(void)' in bind_code)
 ok('sdk 头文件用"选图参数"统一了四个接口（不再有 *2 那套）',
-   all(n in sdk_h for n in ('SCUT_IMG_1', 'SCUT_IMG_2'))
-   and 'SCUT_OutImage2Set' not in sdk_h
+   'SCUT_OutImage2Set' not in sdk_h
    and 'SCUT_EnvCopyOutput2' not in sdk_h)
+# ★ 选图就是裸数字 1 / 2：不设 SCUT_IMG_1 之类的宏。
+#   判据只扫【代码】（去掉注释），因为解释"为什么不用宏"的注释里必然出现这个词。
+_sdk_code = strip_comments(sdk_h)
+ok('sdk 头文件不提供选图宏（用户直接写 1 / 2）',
+   'SCUT_IMG_' not in _sdk_code, '仍然定义了选图宏')
 ok('四个接口的签名都带 img 参数',
    re.search(r'void SCUT_OutImageSet\(int img,', sdk_h) is not None
    and re.search(r'void SCUT_OutImageSetRGB\(int img,', sdk_h) is not None
@@ -614,26 +618,22 @@ ok('后端只在用过之后才写那张图',
    'scut_bind_output2_used()' in host_c)
 ok('后端的帧 JSON 带 img2 字段', '"img2"' in host_c)
 ok('图片2 落盘文件名带 _b 后缀', 'frame_%04d_b.ppm' in host_c)
-ok('生成的接线单元用 SCUT_IMG_1 搬运结果图',
-   'SCUT_EnvCopyOutput(SCUT_IMG_1,' in read('tools/scut_symbols.py')
-   and 'SCUT_EnvCopyOutput(SCUT_IMG_1,' in read('tools/scut_build.py'))
+ok('生成的接线单元用 1（图片1）搬运结果图',
+   'SCUT_EnvCopyOutput(1,' in read('tools/scut_symbols.py')
+   and 'SCUT_EnvCopyOutput(1,' in read('tools/scut_build.py'))
 
-# 插件侧：配置项 → 会话读取 → 宿主转发 → 前端渲染，四段都要在。
-ok('projectconfig.ts 有 display.secondImage',
-   re.search(r'display:\s*\{[^}]*secondImage:\s*boolean', pc_ts, re.S) is not None)
-ok('secondImage 默认【开】（两栏并排看是常态）',
-   re.search(r'secondImage:\s*bool\(disp\.secondImage,\s*true\)', pc_ts) is not None
-   and re.search(r'"display": \{"secondImage": True\}', sb_src) is not None)
-ok('配置面板把 secondImage 列出来了',
-   re.search(r"path:\s*\['display',\s*'secondImage'\]", cfg_ts) is not None)
-ok('会话按开关决定读不读图片2',
-   'wantSecondImage' in read('extension/src/simsession.ts'))
+# 插件侧：会话读取 → 宿主转发 → 前端渲染，三段都要在。
+# ★ 这里【不再】断言任何"显示开关"：用户要求删掉它
+#   （「不要选择开启」），两栏恒在、开合只由标题控制。
+# ★ 只扫【代码】（去掉注释）：解释"为什么删掉那个开关"的注释里必然出现这些词。
+ok('工程配置里没有"要不要显示图片2"这类开关',
+   'secondImage' not in strip_comments(pc_ts)
+   and 'secondImage' not in strip_comments(cfg_ts, 'ts')
+   and '"display"' not in strip_comments(sb_src, 'py'))
+ok('会话读到 rgb2 就读（不再看开关）',
+   re.search(r'if\s*\(frame\.img2\)', read('extension/src/simsession.ts')) is not None)
 ok('宿主把 rgb2 转发给面板',
    re.search(r'if\s*\(f\.rgb2\)', read('extension/src/simview.ts')) is not None)
-ok('宿主有单独的 display 消息',
-   "type: 'display'" in read('extension/src/simview.ts'))
-ok('前端处理 display 消息（否则那一栏藏不起来）',
-   re.search(r"case\s+'display'", sv3) is not None)
 ok('前端把 rgb2 画到第二块画布',
    re.search(r'panes\[1\]\.draw\(rgb2', sv3) is not None)
 ok('两块画面的缩放各自独立（不是一份全局 zoom）',
@@ -685,6 +685,66 @@ ok('没有别的命令再用 $(play)',
 ok('仿真视图里的编译按钮带播放图标', '▶ 编译' in read('extension/src/simview.ts'))
 ok('F8 键位已删除（它绑的是被删掉的「运行」）',
    '"f8"' not in pkg_json)
+
+print('\n=== 20. 文档里不许写死测试工程的路径 ===')
+
+# ★ 守的是一类"别人 clone 下来就对不上"的缺陷：
+#   测试工程在仓库外，名字由用户定。把它写进文档，等于把开发机的目录结构
+#   带进仓库 —— 新人照着找，永远找不到那个目录，还以为是自己哪里没配。
+#   ★ 判据只查【路径形态】（相对上一级 + 工程名、盘符 + 用户目录名），
+#     不查"提到测试工程"这件事本身：文档里说"测试材料在仓库内，
+#     不依赖仓库外的目录"是正确的话，不该被这条挡住。
+docs = [n for n in os.listdir(ROOT) if n.lower().endswith('.md')] + \
+       [os.path.join('docs', n) for n in os.listdir(os.path.join(ROOT, 'docs'))
+        if n.lower().endswith('.md')] + \
+       [os.path.join('extension', 'README.md'), os.path.join('tools', 'README.md')]
+
+# 归一化：去掉 __pycache__ 噪音，任何盘符/用户名都算硬编码。
+# ★ 判据只用"具体工程名"这一条，不拿正则去猜"什么算路径" ——
+#   正则版第一稿把 `--toolchain C:\llvm-mingw` 这种【格式示例】也判成了泄漏：
+#   那句是"换成你自己那台机器上的位置"，本来就是给用户看的写法。
+#   宁可少拦，也不要拦错；真正要防的就是"把某个人的工程目录写进仓库"。
+# ★ 自己也要排除在外：本文件里必须写出这些名字，才算得出"哪儿泄漏了"。
+#   同理排除 test_mem_safety.py（它查的是另一个主题，且需要写出 anaconda3 这个名字）。
+BAD_NAMES = ('scut71-project', '集成仿真环境测试', '22车队管理', 'anaconda3')
+_SELF = {'test_cleanup.py', 'test_mem_safety.py'}
+# ★ 流水账是【个人逐轮记录】，本来就按时间记着当时在哪个目录里干了什么，
+#   而且它被 .gitignore 排除、不进仓库。要守的是"仓库里的文档别把
+#   开发机的目录结构当成事实写进去"，不是"私人笔记不许提自己的目录"。
+_NOT_SHIPPED = {'改动流水账.md'}
+_DOC_EXCLUDE = _SELF | _NOT_SHIPPED
+
+leaks = []
+for rel in docs:
+    path = os.path.join(ROOT, rel)
+    if not os.path.isfile(path):
+        continue
+    if os.path.basename(rel) in _DOC_EXCLUDE:
+        continue
+    text = io.open(path, encoding='utf-8').read()
+    for name in BAD_NAMES:
+        if name in text:
+            leaks.append('%s: 出现 %s' % (rel, name))
+for bad in leaks:
+    print('      ' + bad)
+ok('文档里没有写死外部测试工程的名字/路径', not leaks,
+   '共 %d 处' % len(leaks))
+
+# 代码侧：测试脚本也不许给"仓库外某个具体工程"兜底。
+code_files = [os.path.join('tests', n) for n in os.listdir(os.path.join(ROOT, 'tests'))
+              if n.endswith(('.py', '.js'))]
+code_leaks = []
+for rel in code_files:
+    if os.path.basename(rel) in _DOC_EXCLUDE:
+        continue
+    text = io.open(os.path.join(ROOT, rel), encoding='utf-8').read()
+    for name in BAD_NAMES:
+        if name in text:
+            code_leaks.append('%s: 出现 %s' % (rel, name))
+for bad in code_leaks:
+    print('      ' + bad)
+ok('测试脚本里没有写死外部测试工程的名字/路径', not code_leaks,
+   '共 %d 处' % len(code_leaks))
 
 print('\n' + '=' * 60)
 if FAIL == 0:

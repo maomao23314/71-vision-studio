@@ -33,8 +33,9 @@ test_outimage.py -- 输出图（图片1 / 图片2）与「默认底图」的相�
     C. 算法往图片2里画 → 帧 JSON 多一条 img2、目录多一个 *_b.ppm；
        第二帧不画 → 必须回到全黑（每帧清空，不残留上一帧）；
        主画面完全不受影响。
-    C2. 会话层（`tests/second_session.js`）：开关打开才读那张图、
-       关掉连文件都不读。这一段单独跑 Node，因为"读不读"是 TS 的决定。
+    C2. 会话层（`tests/second_session.js`）：算法写过 → 会话把 rgb2 组装出来；
+       算法没写 → 后端根本不发 img2，会话也就没有 rgb2。
+       这一段单独跑 Node，因为"读不读那张 PPM"是 TS 的决定。
     D. 算法不写图片2 → 一个字段、一个文件都不多（"选配"= 零开销）。
 
 用法:
@@ -146,7 +147,7 @@ void image_process(void)
     int x, y;
     for (y = 0; y < SCUT_IMAGE_H; y++) {
         for (x = 0; x < SCUT_IMAGE_W; x++) {
-            SCUT_OutImageSet(SCUT_IMG_1, x, y, 200);
+            SCUT_OutImageSet(1, x, y, 200);
         }
     }
 }
@@ -190,8 +191,8 @@ void image_process(void)
             second_buf[y][x] = 77;
         }
     }
-    SCUT_EnvCopyOutput(SCUT_IMG_2, second_buf[0], 0, 0);
-    SCUT_OutImageSetRGB(SCUT_IMG_2, 0, 0, 255, 0, 0);
+    SCUT_EnvCopyOutput(2, second_buf[0], 0, 0);
+    SCUT_OutImageSetRGB(2, 0, 0, 255, 0, 0);
 }
 '''
 
@@ -346,25 +347,25 @@ def main():
                     check(grey and not (px[0] == 77 and px[1] == 77),
                           'C 主画面不受图片2影响（仍是输入图底图）')
 
-        # ---- C2) 会话层：开关真的决定"读不读" ----
+        # ---- C2) 会话层：那位 TS 真的会把 rgb2 组装出来 ----
         #
         # ★ 为什么这一小段还要单独跑一次 Node：
         #   C/后端写对了，不代表会话会把 rgb2 组装出来（中间还差一段
-        #   "按开关决定读不读 PPM"的 TS 逻辑）。那一段坏掉的表现是
+        #   "读那张 PPM、解析、装进 FramePacket"的 TS 逻辑）。那一段坏掉的表现是
         #   "后端明明写了文件，面板永远没有图片2"，而且不报错。
-        print('\n[C2] 会话层：开关打开收到 rgb2 / 关闭连文件都不读')
+        print('\n[C2] 会话层：写过图片2 -> 有 rgb2；没写 -> 没有')
         node = shutil.which('node')
         if not node:
             print('  SKIP  找不到 node，跳过会话层验证')
         else:
-            for mode, needle in (('on', 'rgb2'), ('off', '没有 rgb2')):
+            for mode, needle in (('with', '带 rgb2'), ('without', '图片2 全黑')):
                 rr = run([node, os.path.join(HERE, 'second_session.js'),
                           projC, mode])
                 out = ((rr.stdout or '') + (rr.stderr or ''))
-                check(rr.returncode == 0, 'C2 会话层（开关 %s）通过' % mode,
+                check(rr.returncode == 0, 'C2 会话层（%s 图片2）通过' % mode,
                       out[-500:])
                 check(needle in out,
-                      'C2 开关 %s 时会话层确认了 rgb2 的有无' % mode,
+                      'C2 %s 图片2 时会话层确认了 rgb2 的有无' % mode,
                       out[-300:])
 
         # ---- D) 算法不写图片2 ⇒ 一点都不多付 ----

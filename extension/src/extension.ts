@@ -251,17 +251,6 @@ export function activate(context: vscode.ExtensionContext): void {
             return p && dirExists(p.picDir) ? p.picDir : undefined;
         },
         projectRoot: (): string | undefined => projectOf()?.root,
-        /* ★ 每次调用都读一遍 scut_project.json —— 但调用方（SimViewProvider）
-         *   把它缓存在自己的字段里，只在"会话启动 / 配置保存"时问一次，
-         *   不是每帧都读文件。这一点必须和 simview.ts 的 wantsSecond 一起看。 */
-        showSecondImage: (): boolean => {
-            const p = projectOf();
-            if (!p) {
-                return false;
-            }
-            const { config } = readConfig(p.root);
-            return (config ?? defaultConfig()).display.secondImage;
-        },
         log,
     });
 
@@ -303,8 +292,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('scut71.nextPic', () => simView.nextPic()),
         vscode.commands.registerCommand('scut71.gotoPic', () => commandGotoPic(simView)),
         vscode.commands.registerCommand('scut71.openSettings',
-            () => commandOpenSettings(context.extensionUri, log,
-                                      () => simView.refreshDisplay())),
+            () => commandOpenSettings(context.extensionUri, log)),
         vscode.commands.registerCommand('scut71.selectVariables', () => commandSelectVariables(simView)),
         vscode.commands.registerCommand('scut71.setupProject', () => commandSetupProject(log)),
         vscode.commands.registerCommand('scut71.showLog', () => getSimLogChannel().show(true)),
@@ -393,7 +381,6 @@ async function commandDoctor(): Promise<void> {
 function commandOpenSettings(
     extensionUri: vscode.Uri,
     log: (l: string) => void,
-    onSaved: () => void,
 ): void {
     const project = detectProject();
     if (!project) {
@@ -404,10 +391,6 @@ function commandOpenSettings(
     }
     showSettingsPanel(extensionUri, project.root, (sections) => {
         log(`[配置] 已更新：${sections.join(', ')}`);
-        /* ★ 显示开关（display.secondImage）改完立即生效：
-         *   面板缓存的那个值要作废重问，第二张图那一栏才会跟着开/关。
-         *   不重启仿真进程 —— 算法有前后帧状态，重启等于把状态清零。 */
-        onSaved();
         // 工具链改了要重新探测，否则界面还停在"未找到编译器"上。
         if (sections.includes('toolchain')) {
             resetToolchainCache();

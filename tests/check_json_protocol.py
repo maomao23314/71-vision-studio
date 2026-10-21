@@ -36,12 +36,11 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 import toolchain as tc  # noqa: E402
 
-# ★ 默认工程：优先用命令行传进来的（run_all_tests.py 会传），
-#   否则退回到"仓库外那个集成工程"的旧位置。
-#   两者都没有时本测试会走 SKIP 分支（没构建不算失败 ——
-#   它的职责是"校验协议"，不是"要求构建产物存在"）。
-_LEGACY_PROJECT = os.path.join(os.path.dirname(ROOT), '集成仿真环境测试',
-                               'scut71-project')
+# ★ 默认工程：用命令行传进来的（run_all_tests.py 会传）。
+#   ★ 不写任何"仓库外某个具体工程"的兜底路径 —— 那是开发机上的目录名，
+#     别人 clone 下来根本不存在。没有参数时走 SKIP 分支：
+#     本测试的职责是"校验协议"，不是"要求构建产物存在"。
+_DEFAULT_PROJECT = ''
 
 # 帧行的【必需字段】。★ 只增不改：老插件不认识新字段也应照常工作，
 # 所以这里只检查"必须存在"，不检查"不能有别的"。
@@ -51,8 +50,8 @@ REQUIRED_TIMING_FIELDS = ('processUs', 'drawUs', 'frameUs', 'cycles', 'cyclesVal
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--project', default=_LEGACY_PROJECT,
-                    help='用于产生协议输出的工程目录')
+    ap.add_argument('--project', default=_DEFAULT_PROJECT,
+                    help='用于产生协议输出的工程目录（如 .scut/bin/scut_sim.exe 所在的那一层）')
     ap.add_argument('--frames', type=int, default=3)
     args = ap.parse_args()
 

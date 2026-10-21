@@ -50,15 +50,6 @@ export interface SimViewDeps {
     getPicDir(): string | undefined;
     /** 工程根目录。仿真进程靠它读 scut_project.json 的运行期参数。 */
     projectRoot(): string | undefined;
-    /**
-     * 工程配置里「显示第二张图」是否打开。
-     *
-     * ★ 为什么由宿主问一次、在这里缓存，而不是每帧去读配置：
-     *   这个值要参与每帧的推送（决定推不推第二张图），
-     *   而 readConfig 是一次真实文件读 —— 每帧读一次配置纯属浪费。
-     *   配置面板保存后会调 refreshDisplay()，那时才重新问一次。
-     */
-    showSecondImage(): boolean;
     /** 环境日志（写进侧边栏日志折叠区）。 */
     log(line: string): void;
 }
@@ -78,11 +69,6 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
     private lastLoadError: string | undefined;
     /** 上次弹加载失败通知的时间戳（节流用，毫秒）。 */
     private lastLoadErrorAt = 0;
-    /**
-     * 「显示第二张图」的缓存值。
-     * undefined = 还没问过。refreshDisplay() 会把它清掉，下次重新问。
-     */
-    private secondImage: boolean | undefined;
     private disposables: vscode.Disposable[] = [];
 
     constructor(extensionUri: vscode.Uri, deps: SimViewDeps) {
@@ -135,7 +121,6 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
                 this.sendCatalog(attached);
                 this.sendSnapshot();
                 this.sendStatus();
-                this.sendDisplay(attached);
             }
         });
         // 被用户彻底隐藏（右键取消勾选）会 dispose，摘掉集合避免推给死 webview
@@ -168,43 +153,24 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
         this.sendSnapshot();
     }
 
-    /* ------------------------------------------------------ 显示配置 */
-
-    /** 「显示第二张图」的当前值（按需问一次 deps，之后用缓存）。 */
-    private wantsSecond(): boolean {
-        if (this.secondImage === undefined) {
-            this.secondImage = this.deps.showSecondImage();
-        }
-        return this.secondImage;
-    }
+    /* ------------------------------------------------------ 图片2 开关 */
 
     /**
-     * 配置面板保存后调用：重新读显示开关并推给面板。
+     * 图片2 这一栏【恒显示】。
      *
-     * ★ 为什么不重启仿真进程：这个环境从 0.7 起就把"翻页/改设置不重启"
-     *   当成硬约束（算法有前后帧状态，重启等于把状态清零）。
-     *   显示开关本来只影响"推不推那一张图"，与进程无关，
-     *   所以这里只是改一个缓存 + 发一条消息，下一帧就生效。
+     * ★ 这里原先是一个"显示开关"：host 每次问工程配置（display.secondImage），
+     *   关掉时连那张 PPM 都不读。用户一句话推翻了它：「不要选择开启」——
+     *   两栏就摆在那里，展开/收起由标题控制，配置里不该出现第二个开关。
+     *   所以现在读不读图片2 只看【本帧后端有没有发 img2】，
+     *   不用这个功能的工程自然就不会有多余的文件读写。
      */
-    public refreshDisplay(): void {
-        this.secondImage = undefined;
-        const on = this.wantsSecond();
-        this.deps.log(`[视图] 第二张图显示：${on ? '开' : '关'}`);
-        for (const v of this.views) {
-            v.post({ type: 'display', secondImage: on });
-        }
-    }
-
     /* ----------------------------------------------------------- 对外 API */
 
     /** 构建成功后调用：更新可执行文件路径与变量清单。 */
     public setBuildOutput(exePath: string | undefined, manifest: VariableManifest | undefined): void {
         if (exePath && exePath !== this.lastExePath) {
             this.lastExePath = exePath;
-            /* 换了二进制 → 旧会话必须结束（旧进程占着旧文件）。
-             * ★ 顺手把显示缓存也作废：换二进制多半意味着换了工程/重编译，
-             *   而"显示第二张图"是跟着工程配置走的，重新问一次最省心。 */
-            this.secondImage = undefined;
+            // 换了二进制 → 旧会话必须结束（旧进程占着旧文件）
             void this.stop();
         }
         if (manifest) {
@@ -455,10 +421,6 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
              *   那个选项从未被拼进 argv，已随 SimSessionOptions 一并删除。
              *   勾选只影响宿主侧的显示过滤，不需要传给子进程。 */
             projectRoot: this.deps.projectRoot(),
-            // 第二张图：面板开着才去读它的 PPM。
-            // 传函数而不是布尔值 —— 面板上勾选一下就该立即生效，
-            // 不该为了一个显示开关重启进程（见 wantSecondImage 的说明）。
-            wantSecondImage: (): boolean => this.wantsSecond(),
         });
         // ★ 只交给 pushLog 一处分流：它内部决定去 webview / 输出通道 /
         //   环境日志通道。此前这里先 deps.log 再 pushLog，非用户日志会被记两遍。
@@ -598,7 +560,6 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
                 // webview 脚本就位，把当前上下文补上
                 for (const v of this.views) {
                     this.sendCatalog(v);
-                    this.sendDisplay(v);
                 }
                 this.sendSnapshot();
                 this.sendStatus();
@@ -662,12 +623,7 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
         }
     }
 
-    /** 把「显示第二张图」的开关同步给面板（决定那一栏显不显示）。 */
-    private sendDisplay(v: AttachedView): void {
-        v.post({ type: 'display', secondImage: this.wantsSecond() });
-    }
-
-    private sendCatalog(v: AttachedView): void {
+        private sendCatalog(v: AttachedView): void {
         v.post({
             type: 'catalog',
             variables: (this.manifest?.variables ?? []).map((x) => ({ ...x })),
@@ -796,10 +752,10 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
         · 键盘 Ctrl+= / Ctrl+- 作用于【鼠标最后停留的那一块】。
       ★ 结构照抄一份，逻辑只有一份 —— 复制结构不会漂移，复制逻辑才会。
 
-      ★ 默认就有（不 hidden），但和图片1一样默认【收起】：
+      ★ 这一栏【恒显示】，和图片1一样默认【收起】：
         两栏都是"点一下才展开"，面板打开时先看到的是工具栏和变量。
-        这一栏的显隐仍归配置（display.secondImage，默认开）管 ——
-        关掉时宿主连那张 PPM 都不读，不是"隐藏但仍在传"。
+        没有"要不要显示图片2"的开关 —— 没写过图片2的工程，
+        它自己就是一条"还没有内容"的提示，不需要用户先去配什么。
     -->
     <section id="pane-1" class="image-pane collapsible">
       <header id="pane-1-head">
@@ -811,7 +767,7 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
         <div class="pane-view">
           <div id="pane-1-wrap" class="screen-wrap">
             <canvas id="pane-1-canvas" class="screen" width="188" height="120"></canvas>
-            <div id="pane-1-placeholder" class="placeholder">图片2 还没有内容<br><span class="dim">在算法里用 SCUT_EnvCopyOutput(SCUT_IMG_2, …)<br>或 SCUT_OutImageSet(SCUT_IMG_2, …) 画它<br>（每帧重画；这一帧不画就是黑的）</span></div>
+            <div id="pane-1-placeholder" class="placeholder">图片2 还没有内容<br><span class="dim">在算法里用 SCUT_EnvCopyOutput(2, …)<br>或 SCUT_OutImageSet(2, …) 画它<br>（每帧重画；这一帧不画就是黑的）</span></div>
           </div>
           <div class="pane-actions">
             <button id="pane-1-fit" title="适应窗口（默认行为：拖动边框后自动重新适应）">适应</button>

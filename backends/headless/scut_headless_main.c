@@ -18,7 +18,7 @@
  *    {"frame":1,"w":188,"h":120,"img":"<path to ppm>",
  *     "pic":"<path to source image>",
  *     ["loadError":"<短中文原因>",]        ← 仅当本帧加载失败时出现
- *     ["img2":"<path to ppm>",]            ← 仅当算法画过第二张图时出现
+ *     ["img2":"<path to ppm>",]            ← 仅当算法画过图片2时出现
  *     "bench":false,
  *     "vars":[{"name":..,"kind":..,"dim":..,"total":..,"values":"..",
  *              "truncated":bool}, ...],     ← 每帧内嵌，面板数值与画面同步
@@ -2062,14 +2062,14 @@ static void on_frame(void *user)
     const scut_timing_t *t = scut_timing_get();
     static int   frame_no = 0;
     char         path[512];
-    char         path2[512];        /* 第二张图（算法中间结果）的输出路径 */
+    char         path2[512];        /* 图片2（算法中间结果）的输出路径 */
     char         img_esc[1024];
     char         img2_esc[1024];
     char         pic_esc[SCUT_PATH_MAX * 2];
     char         err_esc[256];      /* loadError 转义缓冲（短语，够用） */
     char        *vars_json = s_vars_json;   /* 进程级缓冲（main 分配一次，见 VARS_JSON_CAP） */
     int          load_error;
-    int          has_img2 = 0;      /* 本帧有没有第二张图可报（见下面写盘那段） */
+    int          has_img2 = 0;      /* 本帧有没有图片2可报（见下面写盘那段） */
     int          is_bench;
     const scut_u8 *out;
     int          w, h;
@@ -2102,18 +2102,18 @@ static void on_frame(void *user)
     snprintf(path, sizeof(path), "%s/frame_%04d.ppm", o->out_dir, frame_no);
     write_ppm(path, out, w, h, w * 3);
 
-    /* ---- 第二张图：算法自己画的中间结果（可选） ----
+    /* ---- 图片2：算法自己画的中间结果（可选） ----
      *
      * ★ 什么时候写：整个进程里【从没被写过】就整条跳过。
-     *   判断依据是 bind 单元的记账（SCUT_OutImageSet(SCUT_IMG_2, …) /
-     *   SCUT_EnvCopyOutput(SCUT_IMG_2, …) 写像素时置位）。这样不用第二张图的工程，每帧不会多一次文件写 ——
+     *   判断依据是 bind 单元的记账（SCUT_OutImageSet(2, …) /
+     *   SCUT_EnvCopyOutput(2, …) 写像素时置位）。这样不用图片2的工程，每帧不会多一次文件写 ——
      *   而"要不要显示"是插件那边的事，后端不需要知道配置。
      *
-     * ★ 写盘失败不报错、只是不带 img2 字段：第二张图是附加信息，
+     * ★ 写盘失败不报错、只是不带 img2 字段：图片2 是附加信息，
      *   它写不出来不该让整帧失败（画面那一张才是必须的）。
      *
      * ★ 文件名带 _b 后缀（frame_0001_b.ppm），与主图同目录、同一套编号，
-     *   一眼能对上"第几帧的第二张图"。 */
+     *   一眼能对上"第几帧的图片2"。 */
     if (scut_bind_output2_used()) {
         snprintf(path2, sizeof(path2), "%s/frame_%04d_b.ppm",
                  o->out_dir, frame_no);
@@ -2197,7 +2197,7 @@ static void on_frame(void *user)
                load_error ? "\"loadError\":\"" : "",
                load_error ? err_esc : "",
                load_error ? "\"," : "",
-               /* ★ img2 同样只增不改：算法没动过第二张图时这一整段是空串，
+               /* ★ img2 同样只增不改：算法没动过图片2时这一整段是空串，
                 *   JSON 里就完全没有这个字段（与 loadError 一样的"可选字段"手法）。
                 *   老解析端看到不认识的字段会忽略，不会有任何影响。 */
                has_img2 ? "\"img2\":\"" : "",

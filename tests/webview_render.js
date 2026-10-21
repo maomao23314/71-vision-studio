@@ -22,7 +22,7 @@ const framesDir = process.argv[2];
 const posArgs = process.argv.slice(3).filter((a) => !a.startsWith('--'));
 // ★ 没显式给输出目录时用【临时目录】，而不是 CWD。
 //   否则 harness.html / webview_shot.png 会掉进【被测工程目录】里，
-//   把测试产物混进用户的工程（曾经真的掉进过 scut71-project/）。
+//   把测试产物混进用户的工程目录里（曾经真的发生过）。
 const outArgIdx = process.argv.indexOf('--out');
 const outDir = (outArgIdx >= 0 ? process.argv[outArgIdx + 1] : posArgs[0])
     || require('os').tmpdir();
@@ -275,10 +275,10 @@ const feed = `
       //   再喂一帧带 rgb2 的。rgb2 刻意用"整幅偏红"的数据，
       //   这样能区分两块画布 —— 如果渲染串了，断言会指出来。
       /* ★ 两栏默认【收起】（用户要求）。测试要验的是"画得对不对"，
-       *   所以先各点一次标题把它们展开 —— 顺便也验证了折叠能开。 */
+       *   所以先各点一次标题把它们展开 —— 顺便也验证了折叠能开。
+       * ★ 没有"显示开关"这回事了：图片2 那一栏恒在，宿主也不再发 display。 */
       document.getElementById('pane-0-head').click();
       document.getElementById('pane-1-head').click();
-      send({ type: 'display', secondImage: true });
       send({ type: 'frame', index: 2,
              width: ${img.width}, height: ${img.height},
              rgb: new Uint8Array(${JSON.stringify(img.rgb)}),

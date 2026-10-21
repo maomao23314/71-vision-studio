@@ -826,16 +826,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # 图集。dir 空 = 用工程下的 pic/；ext 空 = 交给后端按实际文件探测。
     "pic": {"dir": "", "ext": "", "start": 1},
     # 运行期行为：仿真进程启动参数与「测速」的次数。
-    # ★ 没有 runFrames：「运行（连续跑 N 帧）」在 0.10.6 删掉了，
-    #   功能与「测速」重复又给不出结论。schema 里也不留"没人读"的字段。
+    # ★ 没有 runFrames：「运行（连续跑 N 帧）」已删掉 —— 功能与「测速」
+    #   重复又给不出结论。schema 里也不留"没人读"的字段。
+    # ★ 也没有 display 段：图片1/图片2 两栏恒在，开合由面板标题控制，
+    #   没有"要不要显示"这种需要存进工程的开关。
     "run": {"processRepeat": 1, "benchRepeat": 1000},
-    # 面板显示开关。
-    # ★ 默认【开】：两栏并排看是常态。构建脚本自己不读它（第二张图是
-    #   纯运行期的东西），留着只是为了"两边的默认配置逐字一致"
-    #   （见下面 toolchain 的说明）。
-    # ★ 而【旧的 view 段】确实故意不存在：那四个开关当年没有任何代码读，
-    #   用户勾了却没有任何效果，留着只会让人怀疑自己用错了。宁缺毋滥。
-    "display": {"secondImage": True},
     # 本机工具链。path 空 = 依次探测：SCUT71_TOOLCHAIN 环境变量
     # → 插件自动下载过的目录 → PATH；都找不到时弹窗问用户。
     # pythonPath：跑本脚本用的解释器，只要求 3.7+，不依赖任何第三方库
@@ -1649,7 +1644,7 @@ def _thin_copy_fn(out_array: str) -> str:
         " * 换掉目标缓冲会让它们集体悬空。 */\n"
         "void scut_env_copy_output(void)\n"
         "{\n"
-        "    SCUT_EnvCopyOutput(SCUT_IMG_1, (const unsigned char *)%s, 0, 0);\n"
+        "    SCUT_EnvCopyOutput(1, (const unsigned char *)%s, 0, 0);\n"
         "}\n" % out_array)
 
 

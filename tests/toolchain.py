@@ -123,7 +123,7 @@ def require(explicit=None):
 #
 # ★ 为什么要有它：测试需要一组测试图，而它【就在本仓库里】
 #   （tests/fixtures/pic/1，36 张 BMP）。原先有几个测试去仓库外的
-#   "../集成仿真环境测试/scut71-project/pic/1" 拿图 —— 那是开发机上恰好
+#   仓库外某个测试工程的 pic/ 拿图 —— 那是开发机上恰好
 #   存在的目录，别人 clone 下来没有，测试就静默少跑一部分。
 # ---------------------------------------------------------------------------
 FIXTURE_PIC = os.path.join(os.path.dirname(os.path.abspath(__file__)),

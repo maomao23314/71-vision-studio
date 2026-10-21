@@ -69,7 +69,7 @@ void SCUT_DrawText(int x, int y, scut_u32 color, const char *fmt, ...);
 /* --- 输出图像：见 scut_sdk.h ---
  *
  * ★ 这里原先声明了 SCUT_OutImageSet / SetRGB / OutImageGet。
- *   0.10.6 起它们带一个"选哪块图"的参数（SCUT_IMG_1 / SCUT_IMG_2），
+ *   现在它们带一个"选哪块图"的参数（1 / 2），
  *   两块输出图共用一段写入代码，实现放在 core/src/scut_input.c，
  *   声明只留在 scut_sdk.h 一处 —— 用户包含的头只有一个，
  *   同一个函数却在两个头里各声明一遍，是改签名时最容易漏改的那种重复。
@@ -145,7 +145,7 @@ void scut_draw_clear_output_written(void);
  * 在真正写入后调用；写的是「图片2」时不碰这里 —— 那是另一块缓冲）。
  *
  * ★ 为什么要有这个"对外置位"的入口：
- *    SCUT_OutImageSet / SCUT_EnvCopyOutput 在 0.10.6 起带一个"选哪块图"的参数，
+ *    SCUT_OutImageSet / SCUT_EnvCopyOutput 带一个"选哪块图"的参数，
  *    两块图共用同一段写入代码（见 scut_input.c 的 out_store）。
  *    既然写入只有一处，记账也就该只有一处 —— 由那一处转告本模块，
  *    而不是让 draw 和 input 各自维护一半。

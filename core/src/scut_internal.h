@@ -57,7 +57,7 @@ scut_phase_t scut_input_get_phase(void);
  * 会覆盖它，覆盖层再叠在最上面。 */
 void scut_env_seed_output_from_input(void);
 
-/* --- 第二张图每帧清空（实现在 scut_input.c） ---
+/* --- 图片2 每帧清空（实现在 scut_input.c） ---
  * 调度器在每帧开头调用。只在该功能被用过之后才真的 memset
  * （见 scut_bind_output2_used 的说明），所以不用的工程零开销。
  * ★ 必须在 PROCESS 之前调用：算法在本帧里写的内容才不会被清掉。 */
