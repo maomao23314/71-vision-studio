@@ -50,6 +50,30 @@
   `WebviewPanel`，撤了：VS Code 插件开不出真正的独立窗口，
   而两个页面看同一份数据，只会让"去哪看"变成一道选择题。
   真要看大图，把侧边栏拖宽。
+- **配置面板里每个字段都必须有分组接收**。`configfields.ts` 的 `SectionDef`
+  有 `key`（DOM id）和 `keys`（负责哪些一级配置键）**两个**字段，别合并。
+  合并过一次，后果是 `outputArray`（结果图数组名）从 0.9.4 到 0.10.8
+  **从来没有显示过** —— 因为一个分组只能装一个一级键。
+  `tests/test_firstrun.py` §1 用【集合覆盖】守着（不是"分组名等于字段前缀"，
+  那个判据恰好让缺陷通过）。
+- **钩子候选扫描只做建议、不做决定**（`hookscan.ts`）。
+  扫不出来时必须返回空表、让用户手填 —— 静默填一个错的函数名，
+  用户会以为环境坏了。别为了"看起来更智能"去猜。
+- **「配置本工程」向导已删除，不要再加回来**。它和配置面板写同一个 JSON，
+  只问两项、其余仍要去面板改，用户得在两套界面之间来回。
+  新建工程时该问的已经问完了（尺寸 + 处理函数）。
+- **不要再写一份 `isFile` / `isDir`**。四份重复的实现已收敛到 `fsutil.ts`。
+  它们的语义是"任何异常都回答 false"，改这个语义会同时影响
+  工程识别、工具链探测、构建脚本定位三条链路。
+- **配置面板的自动保存是"延迟合并 + 宿主落盘"，别改成前端防抖**。
+  延迟计时器必须活在扩展宿主里：webview 的计时器随页面销毁而消失，
+  改完立刻关面板就会丢那次改动。落盘在 `settingsview.ts` 的
+  `flushPending()`，`onDidDispose` / `reload` / 关开关三处都要调它。
+  `tests/test_autosave.py` 用真实磁盘断言守着（10 条，含"关掉开关后不许再写"）。
+- **自动保存开关不许进 `scut_project.json`**。它是本机习惯，存
+  `context.globalState`。工程 JSON 只放"这个工程怎么跑"的事实。
+- **宿主侧必须自己判一次 `readAutoSave()`**，不能只信前端发来的 `autoSave`
+  消息。实测过：关开关的同一瞬间改一项，前端状态差一拍，消息照样发出来。
 
 ## 三、看起来像缺陷、其实不用修
 
@@ -98,6 +122,11 @@
 | `tools/scut_build.py` 的 `_core_fingerprint` | 核心库增量重建的判据。改了 `core/`、`bind/` 或编译器身份都会变；改了别的地方不会 |
 | `extension/scripts/sync-sdk.js` | 改了 `core/ bind/ backends/ tools/ templates/` **必须**跑一次 `npm run sync-sdk`，否则打出的 vsix 带旧代码 |
 | `tests/test_cleanup.py` | 很多断言用"文件里出现过某个词"当判据，容易假绿。新增断言请尽量精确到行/函数 |
+| `tests/test_firstrun.py` | 守的是"第一次用的人会不会卡住"。这类缺陷【不影响任何已有行为】，跑其它测试全绿也可能卡在第一步。改配置面板 / 引导页 / 新建流程后必须跑它 |
+| `tests/test_autosave.py` | 守的是自动保存的**行为**（真的跑 settingsview、对真实磁盘断言）。失效方式全是静默的：中间态被逐次写盘、关面板丢改动、reload 刷回旧值、关开关还在写。改这块必须跑 |
+| `extension/src/settingsview.ts` 的 `flushPending()` | 三处必须调它：`onDidDispose`（关面板）、`reload`（切回来）、`setAutoSave`（关开关）。漏任何一处都是静默丢改动 |
+| `extension/src/hookscan.ts` | 钩子候选扫描是**正则**，不是 C 解析器。判据只有三条：返回 `void`、形参 `void`、前面没有 `static`。放宽任何一条都会把不能当钩子的函数列进去 |
+| `extension/media/settingsview.js` 的 `render()` | 按分组的 `sec.keys` 过滤字段，**不要**改回 `f.path[0] === sec.key`（那会让一个分组只能装一个一级键，见 `outputArray` 那次） |
 | `extension/src/simargs.ts` | 侧边栏会话与「调试」两条入口共用它拼图集参数，改这里两边一起变 |
 | `extension/media/simview.js` 的 `createPane` | 两块画面是同一个组件的两个实例。**别把其中一块单独复制一份**改——那一定会漂移（本文件里已经有过"四个折叠区块各写一份"的同源教训） |
 | 图片2 的"有没有被用过" | 记在 `bind` 单元（它拥有那块缓冲）。后端据此决定要不要多写一张 PPM；**不要**改成"永远写"，那会让不用这个功能的工程白白多一次文件读写 |
@@ -117,6 +146,12 @@
 - **`--backend` 只有一个合法取值**：这一层是给未来后端预留的接口，不是漏填。
 - **`scut_sched_set_log_enabled` / `set_draw_enabled`**：后端已接 `--no-log` / `--no-draw`，
   命令行与 CI 可用；插件面板还没有对应开关。
+- **`ToolInfo` 接口没有消费者**：`toolInfos()` 已删（零调用、与 `runDoctor` 重叠），
+  但这个接口留着 —— 它是**数据形状**不是**开关**，将来做工具面板直接用得上。
+  与"死界面"（用户能看见却没人读）不是一类东西。
+- **引导页只在"跑不起来"时出现**：判据是 `ProjectInfo.hooksReady`，
+  与构建脚本的校验口径一致（`init_names or frame_names`）。
+  仿真正在跑时一律不挡画面。
 - **后端的 `--advance`（每帧自动换图）保留**：那是命令行/CI 的能力。
   插件侧删掉的只是"连续播放"那一层，不要因为删了按钮就把 `--advance` 也删了。
 - **会话接口里的 `step()` 目前没有按钮调用**（连续播放删了之后，"重跑当前图"

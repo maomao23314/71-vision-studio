@@ -31,6 +31,14 @@ import {
     writeConfig,
 } from './projectconfig';
 import { showSettingsPanel } from './settingsview';
+import { SimViewProvider, SIM_VIEW_ID } from './simview';
+import type { ProjectInfo } from './simview';
+import {
+    DEBUG_TYPE,
+    ScutDebugAdapterDescriptorFactory,
+    ScutDebugConfigurationProvider,
+} from './debug';
+import { isDir, isFile } from './fsutil';
 
 /**
  * 用户算法 SCUT_Log 的独立输出通道（VS Code 底部「输出」面板）。
@@ -51,12 +59,6 @@ export function disposeSimLogChannel(): void {
     simLogChannel?.dispose();
     simLogChannel = undefined;
 }
-import { SimViewProvider, SIM_VIEW_ID } from './simview';
-import {
-    DEBUG_TYPE,
-    ScutDebugAdapterDescriptorFactory,
-    ScutDebugConfigurationProvider,
-} from './debug';
 
 /** 构建产物相对工程根的路径（与 tools/scut_build.py 的 Project.exe_path 一致）。 */
 function exePathOf(project: ScutProject): string {
@@ -90,7 +92,10 @@ function ensureConfigOnActivate(log: (l: string) => void): void {
         writeConfig(project.root, defaultConfig());
         log(`[配置] 已为工程创建 ${CONFIG_FILENAME}。`);
         if (!hasHooks(defaultConfig())) {
-            log('[配置] 还没有填「每帧处理函数」——点面板上的 ⚙ 配置本工程。');
+            /* ★ 这里【不】提示"去点 ⚙ 配置本工程"—— 那个向导已删除。
+             *   真正的入口是侧边栏：没填钩子时它整块换成引导页，
+             *   并且只留「打开配置」一个按钮。日志只是给事后排查留痕。 */
+            log('[配置] 还没有填「每帧处理函数」——侧边栏会显示引导页，点「打开配置」即可。');
         }
     } catch (e) {
         log(`[配置] 创建 ${CONFIG_FILENAME} 失败：${e instanceof Error ? e.message : String(e)}`);
@@ -98,85 +103,54 @@ function ensureConfigOnActivate(log: (l: string) => void): void {
 }
 
 /**
- * 「配置本工程」向导。
+ * 「配置本工程」向导 —— **已删除**（2026-10-22）。
  *
- * ★ 为什么保留这个命令（面板里也能改）：
- *   新工程只有【图像处理函数】是必填的，其余都能用默认值跑起来。
- *   这个向导把这条必经之路用两个输入框走完，比在面板里翻找快。
+ * ★ 为什么删：它是配置面板的【第二个入口】，而且是个半截的入口 ——
+ *   只问「每帧处理函数」和「结果图数组名」两项，其余十几项仍然要去面板改。
+ *   用户于是要在两套界面之间来回：向导里改一项、面板里改一项，
+ *   而两者写的是同一个 scut_project.json。这正是本项目反复删的那类重复。
+ *
+ * ★ 它曾经的理由是"新工程只有处理函数是必填的，两个输入框比翻面板快"。
+ *   这个理由现在不成立了：配置面板第一组就是「钩子函数」，点开即填；
+ *   而「新建工程」已经改成把这一步直接问掉（见 commandNewProject），
+ *   用户拿到手的工程本来就是配好的 —— 不存在"还需要再跑一次向导"的场景。
  */
-async function commandSetupProject(log: (l: string) => void): Promise<void> {
-    const project = detectProject();
-    if (!project) {
-        void vscode.window.showWarningMessage(
-            'SCUT-71：没有找到仿真工程（需要含 code/ 的文件夹）。\n'
-            + '    下一步：用「文件 → 打开文件夹」打开你的工程。');
-        return;
-    }
 
-    const { config: existing, error } = readConfig(project.root);
-    if (error) {
-        void vscode.window.showErrorMessage(`SCUT-71：${error}`);
-        return;
-    }
-    const base = existing ?? defaultConfig();
-
-    const frameFn = await vscode.window.showInputBox({
-        title: 'SCUT-71：配置本工程（1/2）',
-        prompt: '哪一个是你的图像处理函数？填函数名（必须是非 static 的 void f(void)）',
-        value: base.hooks.frame.join('\n'),
-        placeHolder: '例如 image_process',
-        validateInput: (v) => v.trim().length === 0 ? '必须填一个处理函数名，否则环境无法运行' : undefined,
-    });
-    if (frameFn === undefined) {
-        return;
-    }
-
-    const outputArray = await vscode.window.showInputBox({
-        title: 'SCUT-71：配置本工程（2/2）',
-        prompt: '哪个数组存放你的结果图？（留空 = 画面显示输入图本身）',
-        value: base.outputArray,
-        placeHolder: '例如 binary_image',
-    });
-    if (outputArray === undefined) {
-        return;
-    }
-
-    const next = {
-        ...base,
-        outputArray: outputArray.trim(),
-        hooks: { ...base.hooks, frame: frameFn.split(/[\n,;]/).map((s) => s.trim()).filter(Boolean) },
+/**
+ * 数一数图集目录里有多少张能识别的图（给引导页判断"放图了没"）。
+ *
+ * ★ 为什么只数一层、且只认后端支持的扩展名：
+ *   图集约定是 pic/<组号>/<编号>.<ext>，一个组号一层。
+ *   递归数会把 pic/ 下所有组加起来，得出"有 200 张"却一张都跑不到
+ *   （后端只看当前组）。只数实际会被用的那一层才对得上。
+ * ★ 只认 bmp/png/jpg 之外还要认 jpg 吗：不认 —— 后端明确不支持 JPEG
+ *   （见 README「已知边界」）。数进来会让用户以为"图放好了"，
+ *   然后得到一张黑图。
+ */
+function countPictures(picDir: string): number {
+    const EXTS = new Set(['.bmp', '.png']);
+    const walk = (dir: string, depth: number): number => {
+        if (depth > 2) {
+            return 0;
+        }
+        let entries: fs.Dirent[];
+        try {
+            entries = fs.readdirSync(dir, { withFileTypes: true });
+        } catch {
+            return 0;
+        }
+        let n = 0;
+        for (const e of entries) {
+            const p = path.join(dir, e.name);
+            if (e.isDirectory()) {
+                n += walk(p, depth + 1);
+            } else if (EXTS.has(path.extname(e.name).toLowerCase())) {
+                n++;
+            }
+        }
+        return n;
     };
-    try {
-        writeConfig(project.root, next);
-    } catch (e) {
-        void vscode.window.showErrorMessage(
-            `SCUT-71：写入 ${CONFIG_FILENAME} 失败：${e instanceof Error ? e.message : String(e)}`);
-        return;
-    }
-    log(`[配置] 已保存：处理函数 ${next.hooks.frame.join(', ')}`
-        + `，结果图 ${next.outputArray || '(未设置)'}`);
-
-    const go = await vscode.window.showInformationMessage(
-        'SCUT-71：工程配置已保存。现在可以编译了。', '立即编译');
-    if (go === '立即编译') {
-        await vscode.commands.executeCommand('scut71.build');
-    }
-}
-
-function fileExists(p: string): boolean {
-    try {
-        return fs.statSync(p).isFile();
-    } catch {
-        return false;
-    }
-}
-
-function dirExists(p: string): boolean {
-    try {
-        return fs.statSync(p).isDirectory();
-    } catch {
-        return false;
-    }
+    return walk(picDir, 0);
 }
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -227,7 +201,7 @@ export function activate(context: vscode.ExtensionContext): void {
                 return undefined;
             }
             const exe = exePathOf(p);
-            return fileExists(exe) ? exe : undefined;
+            return isFile(exe) ? exe : undefined;
         },
         getToolchainBin: (): string | undefined => {
             // ★ 用同步缓存：这里跑在消息处理的热路径上，不能 await。
@@ -240,7 +214,7 @@ export function activate(context: vscode.ExtensionContext): void {
             }
             if (cached.root) {
                 const bin = path.join(cached.root, 'bin');
-                if (dirExists(bin)) {
+                if (isDir(bin)) {
                     return bin;
                 }
             }
@@ -248,9 +222,27 @@ export function activate(context: vscode.ExtensionContext): void {
         },
         getPicDir: (): string | undefined => {
             const p = projectOf();
-            return p && dirExists(p.picDir) ? p.picDir : undefined;
+            return p && isDir(p.picDir) ? p.picDir : undefined;
         },
         projectRoot: (): string | undefined => projectOf()?.root,
+        getProjectInfo: (): ProjectInfo | undefined => {
+            const p = projectOf();
+            if (!p) {
+                return undefined;
+            }
+            const { config } = readConfig(p.root);
+            const cfg = config ?? defaultConfig();
+            const exe = exePathOf(p);
+            return {
+                root: p.root,
+                // ★ 判据用 hasHooks（与 ensureConfigOnActivate 的提示同一个），
+                //   而不是"配置里有没有 frame 数组"：init 填了也算配好，
+                //   因为构建脚本的校验就是 `init_names or frame_names`。
+                hooksReady: hasHooks(cfg),
+                picCount: countPictures(p.picDir),
+                built: isFile(exe),
+            };
+        },
         log,
     });
 
@@ -292,14 +284,24 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('scut71.nextPic', () => simView.nextPic()),
         vscode.commands.registerCommand('scut71.gotoPic', () => commandGotoPic(simView)),
         vscode.commands.registerCommand('scut71.openSettings',
-            () => commandOpenSettings(context.extensionUri, log)),
+            () => commandOpenSettings(context, log)),
         vscode.commands.registerCommand('scut71.selectVariables', () => commandSelectVariables(simView)),
-        vscode.commands.registerCommand('scut71.setupProject', () => commandSetupProject(log)),
         vscode.commands.registerCommand('scut71.showLog', () => getSimLogChannel().show(true)),
     );
 
     // ---- 启动时确认工程配置存在 ----
     void ensureConfigOnActivate(log);
+
+    /* ---- 工作区变化 → 让面板重新判断"现在该显示什么" ----
+     *
+     * ★ 为什么必须有这一条：用户点了引导页的「新建工程」→ 在新窗口打开，
+     *   或者自己「打开文件夹」切到另一个工程。这两种情况都【不会】
+     *   触发任何帧或命令，面板会一直停在旧的引导页上。
+     *   监听工作区变化后补一次状态推送，面板就能自己切换过来。
+     */
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeWorkspaceFolders(() => simView.refresh()),
+    );
 
     // ★★ 0.9.4：不再监听 VS Code 设置变化 ★★
     //   配置的唯一真值是 scut_project.json，它【不在 VS Code 的配置系统里】，
@@ -379,7 +381,7 @@ async function commandDoctor(): Promise<void> {
  *   面板自己不持有状态：关掉再开、窗口重载，值都还在。
  */
 function commandOpenSettings(
-    extensionUri: vscode.Uri,
+    context: vscode.ExtensionContext,
     log: (l: string) => void,
 ): void {
     const project = detectProject();
@@ -389,7 +391,9 @@ function commandOpenSettings(
             + '    下一步：用「文件 → 打开文件夹」打开你的工程。');
         return;
     }
-    showSettingsPanel(extensionUri, project.root, (sections) => {
+    /* ★ 传 context 而不是 extensionUri：面板需要 globalState 存"自动保存"这个
+     *   偏好。它是【本机本用户】的操作习惯，不属于工程配置（见 settingsview.ts）。 */
+    showSettingsPanel(context, project.root, (sections) => {
         log(`[配置] 已更新：${sections.join(', ')}`);
         // 工具链改了要重新探测，否则界面还停在"未找到编译器"上。
         if (sections.includes('toolchain')) {
@@ -506,6 +510,30 @@ async function commandBuild(
     }
 }
 
+/**
+ * 新建工程。
+ *
+ * ★★ 为什么它比 0.10.8 多问了两个问题（用户原话：
+ *    "目前工程到手的配置还是有点麻烦，有没有可能简化一点"）★★
+ *
+ *   旧流程是：选父目录 → 填工程名 → 拷模板 → 提示"去 ⚙ 面板里填处理函数"。
+ *   于是新工程建出来是【跑不起来】的：模板的钩子函数名是
+ *   camera_init / camera_process（模板自带的示例代码），
+ *   一旦用户把自己的 camera.c 换进去，那两个名字就不存在了，
+ *   编译报 `undefined reference to camera_process` —— 用户完全不知道
+ *   这是配置问题，只会觉得"环境坏了"。
+ *
+ *   现在把这条必经之路在新建立时就问完：
+ *     ① 图像尺寸（默认 188×120，回车即可）—— 它决定算法里的数组大小，
+ *        换摄像头就必须改，而改晚了要连算法一起改；
+ *     ② 每帧处理函数（可从代码里选）—— 唯一必填项。
+ *   问完写进 scut_project.json，工程拿到手就是【能直接编译】的。
+ *
+ * ★ 为什么不是"建完再打开配置面板让用户自己填"：
+ *   那还是两步，而且面板里十几个字段会让人以为都要填。
+ *   新建时的两个问题只问"非问不可"的，其余全用默认值 ——
+ *   这正是"到手即用"与"可配置"的边界。
+ */
 async function commandNewProject(context: vscode.ExtensionContext): Promise<void> {
     const template = locateTemplateDir(context.extensionUri);
     if (!template) {
@@ -530,9 +558,9 @@ async function commandNewProject(context: vscode.ExtensionContext): Promise<void
     }
 
     const name = await vscode.window.showInputBox({
-        title: 'SCUT-71：工程名',
+        title: 'SCUT-71：新建工程（1/3）工程名',
         prompt: '会在上面选的目录下创建这个子文件夹，并把模板拷进去',
-        value: 'scut71-project',
+        value: 'vision-project',
         validateInput: (v) => {
             if (!v || v.trim().length === 0) {
                 return '工程名不能为空';
@@ -541,6 +569,59 @@ async function commandNewProject(context: vscode.ExtensionContext): Promise<void
         },
     });
     if (!name) {
+        return;
+    }
+
+    // ---- 2/3 图像尺寸 ----
+    //
+    // ★ 为什么要问：它是【编译期契约】，算法里到处是 `int line[SCUT_IMAGE_H]`。
+    //   默认 188×120 对应逐飞常见的 MT9V03x，换摄像头就得改。
+    //   先问清楚，比让用户编译一次、看到画面错位、再去翻面板要快得多。
+    const sizeRaw = await vscode.window.showInputBox({
+        title: 'SCUT-71：新建工程（2/3）图像尺寸',
+        prompt: '你的摄像头出图尺寸，格式 宽x高（回车用 188x120）',
+        value: '188x120',
+        placeHolder: '188x120',
+        validateInput: (v) => {
+            const m = /^\s*(\d{1,4})\s*[x×*,\s]\s*(\d{1,4})\s*$/i.exec(v);
+            if (!m) {
+                return '请写成 宽x高，例如 188x120';
+            }
+            const w = Number(m[1]);
+            const h = Number(m[2]);
+            if (w < 1 || w > 4096 || h < 1 || h > 4096) {
+                return '宽高要在 1..4096 之间';
+            }
+            return undefined;
+        },
+    });
+    if (sizeRaw === undefined) {
+        return;
+    }
+    const mm = /^\s*(\d{1,4})\s*[x×*,\s]\s*(\d{1,4})\s*$/i.exec(sizeRaw);
+    const width = mm ? Number(mm[1]) : 188;
+    const height = mm ? Number(mm[2]) : 120;
+
+    // ---- 3/3 每帧处理函数 ----
+    //
+    // ★ 模板里自带 camera.c，它的处理函数是 camera_process。
+    //   用户如果打算【换掉】这份示例代码，那个名字就不存在了 ——
+    //   所以这里给一个可留空的输入框：留空 = 用模板自带的，
+    //   等用户把自己的代码放进去之后，再到面板里改成自己的（面板有候选下拉）。
+    const frameFn = await vscode.window.showInputBox({
+        title: 'SCUT-71：新建工程（3/3）每帧处理函数',
+        prompt: '你算法的主入口函数名（回车用模板自带的 camera_process）',
+        value: 'camera_process',
+        placeHolder: '例如 image_process',
+        validateInput: (v) => {
+            const t = v.trim();
+            if (t.length === 0) {
+                return undefined;       // 留空 = 用模板自带的
+            }
+            return /^[A-Za-z_]\w*$/.test(t) ? undefined : '函数名必须是合法的 C 标识符';
+        },
+    });
+    if (frameFn === undefined) {
         return;
     }
 
@@ -553,8 +634,31 @@ async function commandNewProject(context: vscode.ExtensionContext): Promise<void
         return;
     }
 
+    // ---- 把刚才问到的两项写进 scut_project.json ----
+    //
+    // ★ 失败不算新建失败：工程文件已经拷好了，配置写不进去只是退回默认值，
+    //   用户到面板里改一样能用。所以这里只记日志、不弹错、不中断流程。
+    let cfgNote = '';
+    try {
+        const { config } = readConfig(target);
+        const base = config ?? defaultConfig();
+        const next = {
+            ...base,
+            image: { width, height },
+            hooks: {
+                ...base.hooks,
+                frame: frameFn.trim().length > 0 ? [frameFn.trim()] : base.hooks.frame,
+            },
+        };
+        writeConfig(target, next);
+        cfgNote = `图像 ${width}×${height}，每帧处理函数 ${next.hooks.frame.join(', ') || '(未设置)'}。`;
+    } catch (e) {
+        cfgNote = `配置写入失败（${e instanceof Error ? e.message : String(e)}），`
+            + '请打开配置面板确认「钩子函数」那一组。';
+    }
+
     const open = await vscode.window.showInformationMessage(
-        `SCUT-71：${r.message}`,
+        `SCUT-71：工程已创建（${cfgNote}）`,
         '在新窗口打开',
     );
     if (open === '在新窗口打开' && r.root) {

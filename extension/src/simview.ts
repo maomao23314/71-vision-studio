@@ -50,8 +50,35 @@ export interface SimViewDeps {
     getPicDir(): string | undefined;
     /** 工程根目录。仿真进程靠它读 scut_project.json 的运行期参数。 */
     projectRoot(): string | undefined;
+    /**
+     * 工程就绪度（给"还没配好"时的引导用）。没有工程时返回 undefined。
+     *
+     * ★ 为什么单独一项而不是让前端去问三次：前端是沙箱里的页面，
+     *   它只能知道宿主告诉它的事。"有没有工程 / 钩子填了没 / 图放了没"
+     *   这三件事合起来决定【该引导用户做哪一步】，所以一次给全。
+     */
+    getProjectInfo(): ProjectInfo | undefined;
     /** 环境日志（写进侧边栏日志折叠区）。 */
     log(line: string): void;
+}
+
+/**
+ * 工程就绪度快照。
+ *
+ * ★ 为什么是"三个布尔 + 一个数字"而不是直接给配置：
+ *   前端不该知道 scut_project.json 长什么样（那是宿主的真值），
+ *   它只需要知道"现在能不能跑、不能跑缺哪一步"。多给一份配置，
+ *   就多一处"前端也有自己的配置副本"的机会。
+ */
+export interface ProjectInfo {
+    /** 工程根目录（绝对路径），用于在引导页上显示"当前是哪个工程" */
+    root: string;
+    /** 是否已填「每帧处理函数」—— 没填就编译不过 */
+    hooksReady: boolean;
+    /** 图集里能识别的图片张数（0 = 用户还没放图） */
+    picCount: number;
+    /** 是否已经有构建产物（决定「下一张」能不能点） */
+    built: boolean;
 }
 export class SimViewProvider implements vscode.WebviewViewProvider {
     extensionUri: vscode.Uri;
@@ -326,13 +353,27 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
         }
         this.session = undefined;
         await s.stop();
-        for (const v of this.views) {
-            v.post({ type: 'status', running: false, exePath: this.lastExePath ?? null });
-        }
+        // ★ 走 sendStatus 而不是自己拼一条 {type:'status'}：
+        //   那条消息现在还要带"工程就绪度"，手拼一份就少一个字段，
+        //   前端于是会显示"未运行"却拿不到该引导哪一步。
+        this.sendStatus();
     }
 
     public isRunning(): boolean {
         return this.session !== undefined && this.session.running;
+    }
+
+    /**
+     * 让面板重新问一遍"现在是什么状态"。
+     *
+     * ★ 什么时候需要：用户中途打开了另一个文件夹 / 新建完工程切过去，
+     *   此时工程根变了，但【没有任何帧、没有任何命令】触发状态推送 ——
+     *   面板会一直停在"还没有打开工程"的引导页上，直到用户点一下别处。
+     *   由 extension.ts 在工作区变化时调用。
+     */
+    public refresh(): void {
+        this.sendStatus();
+        this.sendCatalogToAll();
     }
 
     /**
@@ -417,9 +458,7 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
         s.onFrame((f) => this.onFrame(f));
         s.onVariables((v) => this.pushSnapshot(v));
         s.onExit(() => {
-            for (const v of this.views) {
-                v.post({ type: 'status', running: false, exePath: this.lastExePath ?? null });
-            }
+            this.sendStatus();
         });
         try {
             await s.start();
@@ -519,15 +558,20 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
     }
 
     /**
-     * 是否应该产帧（至少有一个可见视图）。
+     * 视图可见性变化时调用。
      *
      * ★ 这里只放行、不产帧：真正的暂停发生在 SimSession 内部 ——
      *   不可见时它【不写 stdin 那一行】，仿真进程就停在 getchar() 上。
      *   所以切回来看到的一定是最新状态，而不是一堆过期帧。
+     *
+     * ★ 注意这个函数【不控制任何开关】：不可见时宿主不 ACK，
+     *   背压自然把进程按停。原来这里还调 setProductionPaused，
+     *   那个字段全文件没人读 —— 已删（见 simsession.noteVisibility 的说明）。
+     *   现在这次调用只是为了在日志里留一个时间点。
      */
     private updateProduction(): void {
         const anyVisible = [...this.views].some((v) => v.visible());
-        this.session?.setProductionPaused(!anyVisible);
+        this.session?.noteVisibility(anyVisible);
     }
 
     /* --------------------------------------------------------- 消息处理 */
@@ -553,8 +597,7 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
                 this.sendSnapshot();
                 this.sendStatus();
                 break;
-            }
-            case 'select': {
+            }            case 'select': {
                 const names = Array.isArray(msg.names)
                     ? msg.names.filter((n): n is string => typeof n === 'string')
                     : [];
@@ -595,6 +638,18 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
                     /* 设置入口。与「编译」一样走命令 —— 这样 webview 按钮、
                      * 命令面板、快捷键三条路共用同一份实现，不会各自漂移。 */
                     void vscode.commands.executeCommand('scut71.openSettings');
+                } else if (cmd === 'newProject') {
+                    /* 引导页的「新建工程」。走扩展主命令，与命令面板同一个入口。 */
+                    void vscode.commands.executeCommand('scut71.newProject');
+                } else if (cmd === 'openFolder') {
+                    /* 引导页的「打开已有文件夹」。
+                     * ★ 直接调 VS Code 自己的命令，不自己实现一遍选目录 ——
+                     *   打开文件夹要连带切换工作区、重启扩展宿主，
+                     *   自己拼一遍必然漏掉其中一半。 */
+                    void vscode.commands.executeCommand('workbench.action.files.openFolder');
+                } else if (cmd === 'doctor') {
+                    /* 引导页的「环境自检」：工具链没装好时这是第一步。 */
+                    void vscode.commands.executeCommand('scut71.doctor');
                 }
                 break;
             }
@@ -607,8 +662,18 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
 
     private sendStatus(): void {
         const running = this.isRunning();
+        /* ★ 每次发状态都顺带把"工程就绪度"带上（一次拿全，见 ProjectInfo）。
+         *   为什么不单开一条消息：前端要的是"现在该显示什么"，
+         *   而状态与就绪度是同一次判断的两个结果 —— 分开推会出现
+         *   "状态说未运行、就绪度还说没工程"这种自相矛盾的中间帧。 */
+        const info = this.deps.getProjectInfo();
         for (const v of this.views) {
-            v.post({ type: 'status', running, exePath: this.lastExePath ?? null });
+            v.post({
+                type: 'status',
+                running,
+                exePath: this.lastExePath ?? null,
+                project: info ?? null,
+            });
         }
     }
 
@@ -697,6 +762,37 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
 <title>SCUT-71 仿真视图</title>
 </head>
 <body>
+  <!--
+    ★★ 引导页：只在"还没有工程"或"工程还缺必要一步"时出现 ★★
+
+    用户原话：「目前工程到手的配置还是有点麻烦，有没有可能简化一点，
+    也做图形界面，比如未加载工程时图形界面引导新建什么的」。
+
+    所以这里不是"再画一块面板"，而是【同一块地方的空态】：
+    没有工程时它替掉整个工具栏，给出三步（新建 / 打开 / 自检），
+    点一下就走到位 —— 用户不需要知道命令面板里有哪些命令、
+    也不需要先读懂 README 才敢按第一个按钮。
+
+    ★ 为什么引导页要【顶掉】工具栏，而不是在工具栏下面加一条提示：
+      没有工程时，"编译 / 调试 / 下一张"全都点了没用。留着它们
+      等于给用户四个必然失败、且失败原因各不相同的按钮 ——
+      这正是"配置很麻烦"的体感来源。让它只剩三个能成功的按钮。
+    ★ 为什么三种情况共用一块 DOM（data-step 切换文案）：
+      它们要说的都是"下一步做什么"，只是当前缺的东西不同。
+      分成三块的话，改一次文案要改三处，很快就会不一致。
+  -->
+  <section id="guide" class="hidden">
+    <div id="guide-title" class="guide-title"></div>
+    <div id="guide-body" class="guide-body"></div>
+    <div id="guide-actions" class="guide-actions">
+      <button id="guide-new" class="primary">新建工程</button>
+      <button id="guide-open" class="ghost">打开已有文件夹</button>
+      <button id="guide-doctor" class="ghost">环境自检</button>
+      <button id="guide-settings" class="ghost hidden">打开配置</button>
+    </div>
+    <div id="guide-note" class="guide-note dim"></div>
+  </section>
+
   <div id="app">
     <section id="pane-0" class="image-pane collapsible">
       <header id="pane-0-head">

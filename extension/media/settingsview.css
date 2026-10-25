@@ -217,6 +217,21 @@ input.bad, textarea.bad { border-color: var(--vscode-inputValidation-errorBorder
 .row-inline input { flex: 1; }
 .unit { color: var(--vscode-descriptionForeground, rgba(128,128,128,.9)); font-size: .9em; }
 
+/* 钩子字段的候选下拉框：紧跟在 textarea 下面，宽度与它对齐。
+ * 不弹层、不搜索 —— 候选通常只有几个，一个原生 select 就够。 */
+.hook-pick {
+    width: 100%;
+    box-sizing: border-box;
+    margin-top: 4px;
+    padding: 3px 6px;
+    font-family: inherit;
+    font-size: .92em;
+    color: var(--vscode-input-foreground);
+    background: var(--vscode-dropdown-background, var(--vscode-input-background));
+    border: 1px solid var(--vscode-dropdown-border, var(--vscode-input-border, rgba(128,128,128,.35)));
+    border-radius: var(--radius);
+}
+
 /* 开关：用原生 checkbox，不自绘 —— 自绘的开关在不同主题下很容易糊。 */
 .switch { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; }
 .switch input { width: 15px; height: 15px; margin: 0; cursor: pointer; }
@@ -236,6 +251,37 @@ input.bad, textarea.bad { border-color: var(--vscode-inputValidation-errorBorder
 }
 #foot .spacer { flex: 1; }
 .dim { color: var(--vscode-descriptionForeground, rgba(128,128,128,.9)); font-size: .86em; }
+
+/* 自动保存开关：底栏最左边，用原生 checkbox（与字段里的开关同一个手感）。
+ * ★ 为什么放在【底栏】而不是某个分组里：它不是工程的配置项，
+ *   是"这个面板怎么工作"的偏好。放进「工具链」「运行期」任何一个分组
+ *   都会让人以为它跟着工程走（它其实是跟机器走的，见 settingsview.ts 的说明）。 */
+#autosave-box {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    user-select: none;
+    font-size: .9em;
+    flex-shrink: 0;
+}
+#autosave-box input { width: 14px; height: 14px; margin: 0; cursor: pointer; }
+
+#autosave-tip {
+    flex-shrink: 0;
+    max-width: 40%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* 底栏中间的说明会被挤扁时优先压缩它，别让开关和按钮变形 */
+#foot-note {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
 
 /* 保存成功时给底栏一次绿色闪动，让"已经落盘"这件事有反馈。
  * 不弹通知：改配置是高频动作，弹窗会变成噪音。 */

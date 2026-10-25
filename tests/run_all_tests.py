@@ -256,6 +256,23 @@ def main():
     #   不能靠"跑绿了"来说明。
     run("webview-js", [PY, os.path.join(HERE, "test_webview_js.py")])
 
+    banner("5.5/16 到手就能用（配置面板字段全覆盖 / 钩子候选 / 引导页）")
+    # ★ 这条盯的是"第一次用的人会不会卡住"，而它【不影响任何已有行为】——
+    #   跑其它 15 条全是绿的，用户照样可能卡在第一步。所以必须单独一条。
+    #   它已经抓到过一个从 0.9.4 就存在、一直没人发现的真实缺陷：
+    #   配置面板里「结果图数组名」从来没有显示过（分组只能装一个一级键）。
+    run("firstrun", [PY, os.path.join(HERE, "test_firstrun.py")])
+
+    banner("5.6/16 配置面板自动保存（延迟合并 / 关面板不丢 / 开关）")
+    # ★ 这条与 firstrun §6 的分工：
+    #   firstrun 是【静态】断言（代码长这样），这条是【行为】断言
+    #   （真的把 settingsview 跑起来，对真实磁盘文件看最后是什么值）。
+    #   自动保存的失效方式全是静默的：中间态被逐次写盘、关面板丢改动、
+    #   reload 刷回旧值、关掉开关还在写 —— 四种都不报错。
+    #   它抓到过两个真 bug：重复的 onDidDispose 注册、
+    #   宿主侧没有把关（关掉开关后仍会写盘）。
+    run("autosave", [PY, os.path.join(HERE, "test_autosave.py")])
+
     # ★★ primary 必须是 clang，gcc 降为 --also（第 12 轮复核修正）★★
     #
     #   以前 primary 是 gcc、clang 走 --also。看上去"两个都测了"，

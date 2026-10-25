@@ -17,7 +17,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { execFile } from 'child_process';
-import type { DoctorResult, Toolchain, ToolInfo } from './types';
+import type { DoctorResult, Toolchain } from './types';
 import { ensureToolchain, findInstalledToolchain, currentReleaseApi, toolchainApiOverrideRejected } from './toolchainfetch';
 import { pickStorageDir } from './storagedir';
 import { detectProject } from './project';
@@ -850,22 +850,9 @@ export async function runDoctor(): Promise<DoctorResult> {
     };
 }
 
-/** 把工具链里各工具的绝对路径列成 ToolInfo（供其它模块显示/日志）。 */
-export async function toolInfos(): Promise<ToolInfo[]> {
-    const tc = await detectToolchain();
-    const items: Array<[string, string | undefined]> = [
-        ['clang', tc.cc],
-        ['clang++', tc.cxx],
-        ['ld', tc.ld],
-        ['lldb-dap', tc.lldbDap],
-        ['clangd', tc.clangd],
-        ['python', tc.python],
-    ];
-    const out: ToolInfo[] = [];
-    for (const [name, p] of items) {
-        if (p && exists(p)) {
-            out.push({ name, path: p, version: await probeVersion(p) });
-        }
-    }
-    return out;
-}
+/* ★ 这里原先还有一个 export toolInfos() —— 把各工具的绝对路径列成 ToolInfo[]。
+ *   已删除：全树零调用点（包括测试）。它和 runDoctor 是同一件事的两份实现：
+ *   runDoctor 列得更全（还带版本、还给出"下一步怎么办"），
+ *   而 toolInfos 只是把路径摊平，没人用。
+ *   types.ts 里的 ToolInfo 接口暂时保留 —— 它是 DoctorResult 之外
+ *   唯一描述"一个工具"的形状，将来要做工具面板时直接用得上。 */

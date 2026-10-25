@@ -1144,10 +1144,11 @@ def write_glue(gen_dir: str, cfg: Dict[str, Any]) -> str:
             "没有配置任何钩子函数。\n"
             "    原因：环境需要一个「图像处理函数」才能跑起来 —— "
             "它就是你算法的主入口。\n"
-            "    下一步：打开插件的配置面板（侧边栏 ⚙ 按钮，\n"
-            "    或命令面板执行「SCUT-71: 配置本工程」），在\n"
-            "    「每帧处理函数」里填你代码里的函数名（每行一个），\n"
-            "    例如 image_process。\n"
+            "    下一步：打开插件的配置面板（侧边栏工具栏最右边的 ⚙ 按钮，\n"
+            "    或命令面板执行「SCUT-71: 打开设置」），在\n"
+            "    「钩子函数 › 每帧处理函数」里选你代码里的函数名\n"
+            "    （那一栏有候选下拉框，列的是 code/ 里真实存在且非 static 的\n"
+            "    void f(void)），例如 image_process。\n"
             "    说明：用户代码里【不需要】写任何注册宏 —— "
             "那样代码才能保持与车载工程一致、直接可移植。")
 
@@ -2733,8 +2734,8 @@ def do_doctor(args: argparse.Namespace, reporter: Reporter,
         if not (n_init or n_frame):
             errors.append(
                 "工程配置里没有填「图像处理函数」，环境无法运行你的算法。\n"
-                "    下一步：执行「SCUT-71: 配置本工程」，"
-                "或在配置面板的「钩子函数 › 每帧处理函数」里填上函数名。")
+                "    下一步：打开配置面板的「钩子函数 › 每帧处理函数」，"
+                "从候选下拉框里选一个（或直接填函数名）。")
     except ConfigParseError as exc:
         say("  ❌ 工程配置   : 读不出来")
         errors.append(str(exc))

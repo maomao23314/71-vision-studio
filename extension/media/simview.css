@@ -40,6 +40,82 @@ html, body {
 
 /* ------------------------------------------------------------ 画面区域 */
 
+/* ★★ 引导页（还没工程 / 还缺必要一步时占满整个面板）★★
+ *
+ * 为什么它【顶掉】整个 #app 而不是插在工具栏下面：
+ *   没有工程时「编译 / 调试 / 下一张」全都点了没用。留着它们，
+ *   用户会依次点一遍、依次失败、每次失败的说法还不一样 ——
+ *   这正是"配置很麻烦"的来源。让它只剩三个能成功的按钮。
+ *
+ * ★ 用 display:none 而不是 visibility：引导页里没有需要保留布局的东西，
+ *   而 #app 里有一堆 canvas，留着它们还会白跑 ResizeObserver。 */
+#guide {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 14px;
+  box-sizing: border-box;
+}
+
+#guide.hidden { display: none; }
+
+/* 引导页出现时，把整个仿真面板收起来 */
+body[data-guide='1'] #app { display: none; }
+
+.guide-title {
+  font-size: 1.05em;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.guide-body {
+  font-size: .92em;
+  line-height: 1.65;
+  color: var(--vscode-descriptionForeground, rgba(128, 128, 128, .95));
+  white-space: pre-wrap;
+}
+
+.guide-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.guide-actions button {
+  padding: 5px 12px;
+  border-radius: 3px;
+  font-family: inherit;
+  font-size: .95em;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+
+.guide-actions button.primary {
+  background: var(--vscode-button-background, #0e639c);
+  color: var(--vscode-button-foreground, #fff);
+}
+.guide-actions button.primary:hover {
+  background: var(--vscode-button-hoverBackground, #1177bb);
+}
+
+.guide-actions button.ghost {
+  background: transparent;
+  color: var(--vscode-foreground, #ccc);
+  border-color: var(--vscode-panel-border, rgba(128, 128, 128, .4));
+}
+.guide-actions button.ghost:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, .12));
+}
+
+.guide-actions button.hidden { display: none; }
+
+.guide-note {
+  font-size: .84em;
+  line-height: 1.6;
+  margin-top: 2px;
+}
+
 /* 一块画面 = 折叠标题 + 画布 + 浮层按钮。
  * 图片1 与图片2 用的是同一个结构，所以这里全是类选择器，没有 id。 */
 .image-pane {

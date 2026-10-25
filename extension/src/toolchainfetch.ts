@@ -28,6 +28,7 @@
 
 import * as vscode from 'vscode';
 import * as fs from 'fs';
+import { isFile } from './fsutil';
 import * as path from 'path';
 import * as os from 'os';
 import * as https from 'https';
@@ -492,13 +493,8 @@ function isToolchainRoot(root: string): boolean {
     return isFile(path.join(root, 'bin', 'clang.exe')) || isFile(path.join(root, 'bin', 'clang'));
 }
 
-function isFile(p: string): boolean {
-    try {
-        return fs.statSync(p).isFile();
-    } catch {
-        return false;
-    }
-}
+/* ★ isFile 已抽到 fsutil.ts（原来 build / project / extension /
+ *   toolchainfetch 四个文件各有一份一字不差的实现）。 */
 
 /** 清理是尽力而为：删不掉也不能让整个流程失败。 */
 function removeQuietly(target: string): void {

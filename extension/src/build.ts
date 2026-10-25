@@ -16,7 +16,6 @@
  */
 
 import * as vscode from 'vscode';
-import * as fs from 'fs';
 import * as path from 'path';
 import { spawn, spawnSync } from 'child_process';
 import type {
@@ -25,6 +24,7 @@ import type {
 } from './types';
 import { parseDiagnostics, type VarLineEntry } from './protocol';
 import { detectToolchain } from './toolchain';
+import { isDir, isFile } from './fsutil';
 
 /** 生成的仿真可执行文件名（与 tools/scut_build.py 的 EXE_NAME 一致）。 */
 const EXE_NAME = 'scut_sim.exe';
@@ -162,21 +162,8 @@ function runProcess(
  *  路径工具
  * ========================================================================== */
 
-function isFile(p: string): boolean {
-    try {
-        return fs.statSync(p).isFile();
-    } catch {
-        return false;
-    }
-}
-
-function isDir(p: string): boolean {
-    try {
-        return fs.statSync(p).isDirectory();
-    } catch {
-        return false;
-    }
-}
+/* ★ isFile / isDir 已抽到 fsutil.ts：原来 build / project / extension /
+ *   toolchainfetch 四个文件各抄了一份一模一样的实现。 */
 
 /**
  * 定位 SDK 根（里面有 core/、bind/、backends/、tools/）。
@@ -820,7 +807,10 @@ function normalizeManifest(raw: unknown): VariableManifest | undefined {
     };
 }
 
-/** 供 UI 用的二进制路径（不触发构建）。 */
-export function expectedExePath(projectRoot: string): string {
-    return projectDirs(projectRoot).exePath;
-}
+/* ★ 这里原先还有一个 export expectedExePath(projectRoot) ——
+ *   它就是 projectDirs(root).exePath 的一行包装，注释写着"供 UI 用"。
+ *   已删除：全树零调用点。真正的 exe 路径有三处来源，各有各的理由：
+ *     · 构建结果  → BuildResult.exePath（脚本报回来的真实路径）
+ *     · 运行会话  → extension.ts 的 exePathOf()（用 detectProject 的 outDir）
+ *     · 调试      → debug.ts 的 resolveProgram()（自己拼 .scut/bin/）
+ *   再多一个"不触发构建的 exe 路径"只会让人以为它们是同一个真值。 */

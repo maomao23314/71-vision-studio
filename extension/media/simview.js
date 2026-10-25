@@ -152,14 +152,167 @@
     varsList: document.getElementById('vars-list'),
     varsCount: document.getElementById('vars-count'),
     varsHint: document.getElementById('vars-hint'),
-    log: document.getElementById('log'),
-    toolbar: document.getElementById('toolbar')
+    log: document.getElementById('log')
   };
 
   var catalog = [];
   var snapshots = [];
   var selected = new Set(state.selected || []);
   var selectedInitialised = state.selected !== null;
+
+  /* ==========================================================================
+   *  引导页（还没工程 / 还缺必要一步）
+   *  --------------------------------------------------------------------------
+   *  用户原话：「未加载工程时图形界面引导新建什么的」。
+   *
+   *  ★ 判据只有一条：**现在能不能直接按「编译」跑起来**。
+   *    能 → 显示正常面板；不能 → 显示引导，并且只显示"能成功的那几个按钮"。
+   *
+   *  ★ 三种状态按【缺哪一步】排优先级，一次只显示最靠前的那一个：
+   *      ① 没有工程          → 新建 / 打开文件夹 / 环境自检
+   *      ② 有工程但没填钩子  → 打开配置（并说明为什么要填）
+   *      ③ 有钩子但没图/没编译 → 立即编译（或提示放图）
+   *    同时显示三条"你还缺…"只会让人不知道先做哪个。
+   * ========================================================================== */
+
+  var guideEl = document.getElementById('guide');
+  var guideTitle = document.getElementById('guide-title');
+  var guideBody = document.getElementById('guide-body');
+  var guideNote = document.getElementById('guide-note');
+  var guideBtns = {
+    newProject: document.getElementById('guide-new'),
+    open: document.getElementById('guide-open'),
+    doctor: document.getElementById('guide-doctor'),
+    settings: document.getElementById('guide-settings')
+  };
+
+  /**
+   * 按工程就绪度刷新引导页。
+   *
+   * @param project 宿主发来的 ProjectInfo；null = 没有识别到工程
+   * @param running 仿真是否在跑（跑着的时候不显示引导，否则会挡住画面）
+   */
+  function renderGuide(project, running) {
+    if (!guideEl) { return; }
+    // 正在跑的时候一律不挡：用户已经跑起来了，再提示"你还没配好"就是噪音
+    var needGuide = !project || !project.hooksReady;
+    if (running) { needGuide = false; }
+
+    guideEl.classList.toggle('hidden', !needGuide);
+    document.body.setAttribute('data-guide', needGuide ? '1' : '0');
+    if (!needGuide) { return; }
+
+    function show(btn, on) {
+      if (btn) { btn.classList.toggle('hidden', !on); }
+    }
+
+    if (!project) {
+      guideTitle.textContent = '还没有打开仿真工程';
+      guideBody.textContent =
+        '这个面板需要一个"仿真工程"文件夹才能工作（里面要有 code/ 放你的算法）。\n'
+        + '两种方式，选一个即可 —— 都不需要你先读懂文档：';
+      show(guideBtns.newProject, true);
+      show(guideBtns.open, true);
+      show(guideBtns.doctor, true);
+      show(guideBtns.settings, false);
+      if (guideNote) {
+        guideNote.textContent =
+          '「新建工程」会问你两个问题（图像尺寸、你的处理函数名），'
+          + '然后在空目录里建好一个能直接编译的工程。';
+      }
+      return;
+    }
+
+    // 有工程，但没填「每帧处理函数」—— 这是唯一一个"不填就编译不过"的项
+    guideTitle.textContent = '还差一步：告诉环境哪个函数是处理函数';
+    guideBody.textContent =
+      '工程目录：' + project.root + '\n'
+      + '环境要靠这个函数名去调用你的算法（它必须是非 static 的 void f(void)）。\n'
+      + '打开配置面板，在「钩子函数 › 每帧处理函数」里选一个即可 —— '
+      + '面板会把你代码里真实存在的候选列出来，不用手打。';
+    show(guideBtns.newProject, false);
+    show(guideBtns.open, false);
+    show(guideBtns.doctor, true);
+    show(guideBtns.settings, true);
+    if (guideNote) {
+      guideNote.textContent =
+        '填完保存，再按「编译」就能看到画面。';
+    }
+  }
+
+  function bindGuide() {
+    bind('guide-new', function () {
+      vscode.postMessage({ type: 'cmd', cmd: 'newProject' });
+    });
+    bind('guide-open', function () {
+      vscode.postMessage({ type: 'cmd', cmd: 'openFolder' });
+    });
+    bind('guide-doctor', function () {
+      vscode.postMessage({ type: 'cmd', cmd: 'doctor' });
+    });
+    bind('guide-settings', function () {
+      vscode.postMessage({ type: 'cmd', cmd: 'settings' });
+    });
+  }
+
+  /* ---- 状态栏文案 ---- */
+
+  /**
+   * 状态栏那一行写什么。
+   *
+   * ★ 抽成函数是因为它有三个来源（运行中 / 已编译未运行 / 未编译），
+   *   而且都要带上"工程在哪"。写在内联三元里会有四层嵌套，
+   *   加一个情况就要重排整行。
+   */
+  function statusText(msg) {
+    if (msg.running) {
+      return '运行中' + (msg.exePath ? ' · ' + msg.exePath : '');
+    }
+    if (msg.exePath) {
+      return '未运行 · 可执行：' + msg.exePath;
+    }
+    return '未运行 · 尚未编译';
+  }
+
+  /**
+   * 画面占位文字：按"现在缺什么"说清楚，而不是一句"尚未收到帧"。
+   *
+   * ★ 为什么值得改：新工程第一次打开时，画面区是空的。原文案是
+   *   "尚未收到帧 / 点「编译」后「下一张」开始" —— 用户照着做，
+   *   但如果图集里一张图都没有，编译能过、画面还是黑的，
+   *   而界面上没有任何字提到"图还没放"。
+   *   这里把 picCount 用起来：图集是 0 张时直接说"先放图"。
+   *
+   * ★ 只改【还没收到过帧】的那一块（收到帧后占位层就 display:none 了），
+   *   所以不会在运行中反复覆盖用户的画面。
+   */
+  function updatePlaceholder(project) {
+    var ph = panes[0].dom.placeholder;
+    if (!ph || panes[0].hasFrame()) {
+      return;
+    }
+    if (!project) {
+      ph.textContent = '还没有打开工程';
+      return;
+    }
+    if (project.picCount === 0) {
+      ph.textContent = '图集里还没有测试图';
+      var hint = document.createElement('span');
+      hint.className = 'dim';
+      hint.textContent = '把 1.bmp / 2.bmp… 放进工程的 pic/1/，再点「编译」';
+      ph.appendChild(document.createElement('br'));
+      ph.appendChild(hint);
+      return;
+    }
+    ph.textContent = '尚未收到帧';
+    var h2 = document.createElement('span');
+    h2.className = 'dim';
+    h2.textContent = project.built
+      ? '点「下一张」开始（图集里已有 ' + project.picCount + ' 张图）'
+      : '点「编译」，然后点「下一张」';
+    ph.appendChild(document.createElement('br'));
+    ph.appendChild(h2);
+  }
 
   /* ------------------------------------------------------------ 日志 */
 
@@ -391,6 +544,9 @@
       key: key,
       dom: dom,
       st: st,
+      /* 这一块收到过帧没有。占位层要靠它判断"该不该继续盖着" ——
+       * 画过一帧之后占位层已经 display:none，再去改它的文字毫无意义，
+       * 而且会在每帧的 status 里白改一次 DOM。 */
       hasFrame: function () { return w > 0; },
       apply: apply,
       resetToFit: resetToFit,
@@ -940,17 +1096,10 @@
     return s.values.join(' ') + (s.truncated ? ' …（共 ' + s.total + ' 个，只显示前 24 个）' : '');
   }
 
-
-  // 变量名来自 C 标识符，理论上是安全的；但这里是拼 CSS 选择器，
-  // 用 CSS.escape 兜一层（老版本 VS Code 的 Chromium 可能没有，做个退化）。
-  function cssEscape(s) {
-    if (window.CSS && typeof window.CSS.escape === 'function') {
-      return window.CSS.escape(s);
-    }
-    return String(s).replace(/[^a-zA-Z0-9_-]/g, function (ch) {
-      return '\\' + ch;
-    });
-  }
+  /* ★ 这里原先还有一个 cssEscape()，用于"按变量名拼 CSS 选择器"。
+   *   已删除：全文件零调用点 —— 变量行现在是 appendChild 出来的 DOM 节点，
+   *   不再用 querySelector('[data-name=…]') 去查，所以拼选择器这件事
+   *   连同它的转义需求一起消失了。 */
 
   /* ---------------------------------------------------------- 工具栏 */
 
@@ -988,6 +1137,9 @@
     renderLog();
     updateLogCount();
   });
+
+  // ---- 引导页按钮（没有工程时它是唯一能点的东西） ----
+  bindGuide();
 
   // ---- 折叠区块（统一组件；两块画面也走这一份） ----
   bindCollapsible('p0');
@@ -1304,10 +1456,13 @@
       case 'status': {
         try {
           if (el.status) {
-            el.status.textContent = msg.running
-              ? ('运行中' + (msg.exePath ? ' · ' + msg.exePath : ''))
-              : ('未运行' + (msg.exePath ? ' · 可执行：' + msg.exePath : ' · 尚未编译'));
+            el.status.textContent = statusText(msg);
           }
+          /* ★ 引导页与状态同源：宿主每次发 status 都带着"工程就绪度"，
+           *   所以引导页不会出现"工程已经建好了但引导还在"这种滞留。
+           *   msg.project 为 null 表示没识别到工程。 */
+          renderGuide(msg.project || null, msg.running === true);
+          updatePlaceholder(msg.project || null);
         } catch (e) {
           log('[视图] 状态更新失败：' + (e && e.message ? e.message : e));
         }

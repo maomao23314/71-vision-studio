@@ -26,15 +26,42 @@ import {
     CONFIG_FILENAME,
 } from './projectconfig';
 import { FIELDS, SectionKey, SECTIONS } from './configfields';
+import { scanHookCandidates } from './hookscan';
 
 /** 面板当前唯一实例。用户改完再点一次不会开出第二扇窗。 */
 let current: vscode.WebviewPanel | undefined;
 
+/**
+ * 「自动保存」开关的存储键。
+ *
+ * ★★ 为什么它【不】放进 scut_project.json ★★
+ *   工程 JSON 里放的是"这个工程怎么跑"（尺寸、钩子、图集）——
+ *   那是能进 git、能发给同学、换台机器必须一样的**工程事实**。
+ *   而"我要不要自动保存"是**我这个人**在**这台机器**上的操作习惯，
+ *   和工程本身无关。把它塞进工程 JSON 会让别人 clone 下来
+ *   莫名其妙多一个和他无关的开关，也让"配置只有一个真值"这句话变形。
+ *   所以它进 context.globalState —— VS Code 给扩展自己的偏好存储。
+ *
+ * ★ 默认 true：用户原话"不方便的话就默认自动"。
+ *   自动保存省掉的正是"改完忘了按保存、然后疑惑为什么没生效"这一步，
+ *   而这一步是新手最常踩的。
+ */
+const AUTO_SAVE_KEY = 'settings.autoSave';
+
+/** 自动保存的落盘延迟（毫秒）。见下方 flush 的说明。 */
+const AUTO_SAVE_DELAY_MS = 600;
+
+function readAutoSave(context: vscode.ExtensionContext): boolean {
+    const v = context.globalState.get<boolean>(AUTO_SAVE_KEY);
+    return v === undefined ? true : v === true;
+}
+
 export function showSettingsPanel(
-    extensionUri: vscode.Uri,
+    context: vscode.ExtensionContext,
     projectRoot: string,
     onChanged: (sections: SectionKey[]) => void,
 ): void {
+    const extensionUri = context.extensionUri;
     // 已开着就把它拉回前面，而不是再开一扇。
     if (current) {
         current.reveal(vscode.ViewColumn.Active, true);
@@ -63,13 +90,130 @@ export function showSettingsPanel(
     );
     current = panel;
 
+    /**
+     * 代码里真实存在的 void f(void) 函数（非 static），供钩子字段下拉选。
+     *
+     * ★ 为什么每次打开都重扫，不缓存：用户改完代码回来重新打开面板，
+     *   正是"我刚加了个函数，想去填上"的时刻 —— 缓存会让新函数不出现。
+     *   扫描只读 code/ 下几个 .c 文件，是毫秒级的事。
+     */
+    const hookCandidates = (): Array<{ name: string; file: string }> => {
+        try {
+            return scanHookCandidates(projectRoot);
+        } catch {
+            return [];   // 扫不出来就不给建议，面板照旧可手填
+        }
+    };
+
     panel.webview.html = html(panel.webview, extensionUri, projectRoot);
 
+    /**
+     * 自动保存的延迟计时器 + 挂起的那份配置。
+     *
+     * ★★ 为什么是"延迟合并"而不是"每次 input 立刻写盘" ★★
+     *   用户在「图像宽度」里从 188 改成 1024，会触发 4 次 input
+     *   （1 → 10 → 102 → 1024）。逐次写盘意味着：
+     *     · 写 4 次文件（每次都 rename，杀毒软件会跟着扫 4 次）；
+     *     · 中间态 `1` / `10` / `102` 也是合法配置，会各被写进去一次。
+     *       如果这时恰好有一次构建在跑，它可能读到 `1` 这个宽度 ——
+     *       构建出 1×120 的契约头，而用户想的是 1024。
+     *   合并到 600ms 之后再写，等于"用户停手了才落盘"，
+     *   中间态一次都不会被写出去。
+     *
+     * ★ 为什么 600ms 而不是更长：面板里改完一项，用户会立刻
+     *   切去按「编译」。落盘必须在那之前完成，否则编译读到旧值。
+     *   600ms 够合并连续按键，又短到用户来不及切窗口。
+     */
+    let autoSaveTimer: NodeJS.Timeout | undefined;
+    /**
+     * 挂起（还没落盘）的那份配置。
+     *
+     * ★ 必须存下来，不能只存计时器：面板被关掉时计时器会被取消，
+     *   如果这时手里没有值，那次改动就永远丢了 ——
+     *   这正是"自动保存"最典型的那种 bug：看起来保存了，最后一下没保存。
+     */
+    let pendingValue: unknown;
+    let pendingSections: SectionKey[] = [];
+
+    /** 把挂起的改动立刻落盘（没有挂起就什么也不做）。 */
+    const flushPending = (): void => {
+        if (autoSaveTimer) {
+            clearTimeout(autoSaveTimer);
+            autoSaveTimer = undefined;
+        }
+        if (pendingValue === undefined) {
+            return;
+        }
+        const value = pendingValue;
+        const sections = pendingSections;
+        pendingValue = undefined;
+        pendingSections = [];
+        save(projectRoot, value);
+        onChanged(sections);
+    };
+
     panel.webview.onDidReceiveMessage((raw: unknown) => {
-        const msg = raw as { type?: string; value?: unknown; path?: string[] };
+        const msg = raw as {
+            type?: string; value?: unknown; path?: string[]; autoSave?: unknown;
+        };
         if (msg?.type === 'save') {
+            // 显式保存（按钮 / Ctrl+S）：先丢掉挂起的，避免写两遍。
+            if (autoSaveTimer) {
+                clearTimeout(autoSaveTimer);
+                autoSaveTimer = undefined;
+            }
+            pendingValue = undefined;
+            pendingSections = [];
             save(projectRoot, msg.value);
             onChanged(Array.isArray(msg.path) ? (msg.path as SectionKey[]) : []);
+            return;
+        }
+        if (msg?.type === 'autoSave') {
+            /* 自动保存的改动。value 是整份配置（面板不持有真值，
+             * 每次都是全量发回），所以这里和显式保存走同一个 save()。
+             *
+             * ★★ 为什么宿主还要再判一次开关 ★★
+             *   前端 queueAutoSave() 里已经有 `if (!autoSave) return`，
+             *   但那只防"正常路径"。用户在关掉开关的同一瞬间改一项时，
+             *   页面上的 autoSave 变量和宿主 globalState 的更新可能差一拍 ——
+             *   前端以为还开着，消息照样发出来。
+             *   实测过：关掉后改一项，磁盘仍被写入。
+             *   偏好是宿主存的，就该由宿主把关；只在前端判等于把正确性
+             *   押在"两个进程的状态永远同步"上，那不是能保证的事。 */
+            if (!readAutoSave(context)) {
+                return;
+            }
+            if (autoSaveTimer) {
+                clearTimeout(autoSaveTimer);
+            }
+            pendingValue = msg.value;
+            pendingSections = Array.isArray(msg.path) ? (msg.path as SectionKey[]) : [];
+            autoSaveTimer = setTimeout(() => {
+                autoSaveTimer = undefined;
+                const value = pendingValue;
+                const sections = pendingSections;
+                pendingValue = undefined;
+                pendingSections = [];
+                if (value === undefined) {
+                    return;
+                }
+                save(projectRoot, value);
+                onChanged(sections);
+                // 回一条确认，让底栏能显示"已自动保存"而不是一直挂着"未保存"
+                void panel.webview.postMessage({ type: 'autoSaved' });
+            }, AUTO_SAVE_DELAY_MS);
+            return;
+        }
+        if (msg?.type === 'setAutoSave') {
+            /* 开关本身：写进 globalState，并回显给面板。
+             * ★ 关掉开关时【先把挂起的改动落盘】—— 否则用户刚改了一项
+             *   立刻关掉自动保存，那一项就永远停在内存里了。 */
+            const on = msg.autoSave === true;
+            if (!on) {
+                flushPending();
+            }
+            void context.globalState.update(AUTO_SAVE_KEY, on);
+            void panel.webview.postMessage({ type: 'autoSaveState', on });
             return;
         }
         if (msg?.type === 'openJson') {
@@ -81,8 +225,22 @@ export function showSettingsPanel(
             return;
         }
         if (msg?.type === 'reload') {
+            /* ★★ 先落盘、再回读 —— 顺序不能反 ★★
+             *
+             *   面板会在窗口重新获得焦点时发 reload（为了让用户看到
+             *   "在外部改了 JSON"的结果）。而自动保存的改动是延迟 600ms 写的。
+             *   如果直接回读磁盘：用户改了一项、切出去、又切回来，
+             *   这次 reload 拿到的是【改动之前】的配置 —— 界面上那一项
+             *   变回旧值，而 600ms 后磁盘才被写成新值。
+             *   用户看到的是"我改的东西自己变回去了"，然后多半会再改一遍。
+             *
+             *   先 flushPending() 保证磁盘已经是最新的，回读才和用户
+             *   刚才的改动一致。这是"延迟写 + 定期回读"必须配对的那一步。
+             */
+            flushPending();
             void panel.webview.postMessage({
                 type: 'config', config: loadFor(projectRoot), error,
+                hooks: hookCandidates(), autoSave: readAutoSave(context),
             });
             return;
         }
@@ -97,9 +255,18 @@ export function showSettingsPanel(
                         return;
                     }
                     try {
+                        // ★ 恢复默认之前先丢掉挂起的改动：
+                        //   否则 600ms 后它会把刚恢复的默认值又盖回用户的改动。
+                        if (autoSaveTimer) {
+                            clearTimeout(autoSaveTimer);
+                            autoSaveTimer = undefined;
+                        }
+                        pendingValue = undefined;
+                        pendingSections = [];
                         writeConfig(projectRoot, defaultConfig());
                         void panel.webview.postMessage({
                             type: 'config', config: defaultConfig(),
+                            autoSave: readAutoSave(context),
                         });
                         onChanged([]);
                         void vscode.window.showInformationMessage(
@@ -118,9 +285,18 @@ export function showSettingsPanel(
 
     panel.webview.postMessage({
         type: 'config', config: config ?? defaultConfig(), error,
+        hooks: hookCandidates(), autoSave: readAutoSave(context),
     });
 
+    /* ★ 面板被关掉 / 窗口切走时，把挂起的自动保存落盘。
+     *
+     *   为什么必须在这里做：webview 的延迟计时器只在【页面活着】时有效。
+     *   用户改完一项立刻点右上角 ×，页面先被销毁，计时器根本不会触发 ——
+     *   那一次改动就没了，而用户以为自动保存了。
+     *   宿主侧的 onDidDispose 一定会触发，所以兜底放在这里，
+     *   而且 pendingValue 让"落盘"是真的落，不是丢弃。 */
     panel.onDidDispose(() => {
+        flushPending();
         current = undefined;
     });
 }
@@ -261,8 +437,11 @@ function html(webview: vscode.Webview, extensionUri: vscode.Uri,
 
     // 分组外壳由脚本填，静态部分只留骨架 —— 字段表在 configfields.ts 里，
     // TS 和 webview 共用同一份定义，不会两边写歪。
+    // ★ data-keys 把"这个分组负责哪几个一级键"一并交出去：脚本按它过滤字段，
+    //   而不是自己猜"path[0] 等于分组名"。这两者不是一回事（见 SectionDef.key）。
     const groups = SECTIONS.map((s, i) => `
-      <section class="group${i === 0 ? ' open' : ''}" data-group="${s.key}">
+      <section class="group${i === 0 ? ' open' : ''}" data-group="${s.key}"
+               data-keys="${s.keys.join(',')}">
         <header class="group-head">
           <span class="chevron">▸</span>
           <span class="group-title">${s.title}</span>
@@ -309,9 +488,14 @@ function html(webview: vscode.Webview, extensionUri: vscode.Uri,
   <main id="groups">${groups}</main>
 
   <footer id="foot">
-    <span id="foot-note" class="dim">改动写入 <code>${CONFIG_FILENAME}</code>；文件不存在会自动创建</span>
+    <label id="autosave-box" title="开着时改完自动写入 scut_project.json；关掉则需点「保存」或按 Ctrl+S">
+      <input id="chk-autosave" type="checkbox" checked>
+      <span>自动保存</span>
+    </label>
+    <span id="autosave-tip" class="dim"></span>
     <span class="spacer"></span>
-    <button id="btn-save" class="primary" title="写入 scut_project.json (Ctrl+S)">保存</button>
+    <span id="foot-note" class="dim">改动写入 <code>${CONFIG_FILENAME}</code>；文件不存在会自动创建</span>
+    <button id="btn-save" class="ghost" title="写入 scut_project.json (Ctrl+S)">保存</button>
   </footer>
 
   <script nonce="${nonce}">

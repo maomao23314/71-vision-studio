@@ -14,13 +14,13 @@
  *   lines     多行文本，每行一项 → 字符串数组（钩子函数名用）
  *   bool      开关
  *   folder    目录（点按钮走系统对话框）
+ *   file      单个文件（Python 解释器用）
  */
 
-import { ProjectConfig } from './projectconfig';
+/* ★ 这里原先 import 了 ProjectConfig —— 随 pickValue/setValue 一起删掉后
+ *   它就没有消费者了。本文件只描述"字段长什么样"，不读写配置。 */
 
-/** 顶层分组。值即 scut_project.json 的一级键。
- *
- *  ★ 没有 view —— 那四个显示开关没人读，见 FIELDS 里的说明。 */
+/** 一级配置键（与 projectconfig.ts 的 ProjectConfig 字段一一对应）。 */
 export type SectionKey =
     | 'image'
     | 'inputArray'
@@ -46,21 +46,40 @@ export interface FieldDef {
 }
 
 export interface SectionDef {
-    key: SectionKey;
+    /**
+     * 分组的稳定 id —— **只**用于 DOM 的 `data-group`，与配置键无关。
+     *
+     * ★ 为什么它不再等于"配置的一级键"（一次真实缺陷的修复）：
+     *   原先一个分组只能装【一个】一级键（`f.path[0] === s.key`），
+     *   于是 `inputArray` 与 `outputArray` 这两个同一类的字段
+     *   只能有一个分组接收 —— 结果是 `outputArray`（结果图数组名）
+     *   从 0.9.4 起【从来没有在面板上出现过】：用户翻遍面板都找不到
+     *   "结果图数组名"这一项，只能靠手改 JSON 或那个一次性输入框向导。
+     *   现在分组用 `keys` 声明它负责哪几个一级键，想装几个装几个。
+     */
+    key: string;
+    /** 这个分组负责显示哪些一级配置键。FIELDS 里每个 path[0] 必须被【恰好一个】分组覆盖。 */
+    keys: string[];
     title: string;
     note: string;
 }
 
 export const SECTIONS: SectionDef[] = [
     {
-        key: 'image', title: '图像尺寸',
+        key: 'image', keys: ['image'], title: '图像尺寸',
         note: '编译期契约 · 改动需重新编译',
     },
-    { key: 'inputArray', title: '图像数组', note: '编译期契约' },
-    { key: 'hooks', title: '钩子函数', note: '编译期契约 · 决定环境调用哪些函数' },
-    { key: 'pic', title: '测试图集', note: '改完立即生效' },
-    { key: 'run', title: '运行期', note: '改完立即生效' },
-    { key: 'toolchain', title: '工具链', note: '本机环境' },
+    {
+        key: 'array', keys: ['inputArray', 'outputArray'], title: '图像数组',
+        note: '编译期契约 · 输入图与结果图',
+    },
+    {
+        key: 'hooks', keys: ['hooks'], title: '钩子函数',
+        note: '编译期契约 · 决定环境调用哪些函数',
+    },
+    { key: 'pic', keys: ['pic'], title: '测试图集', note: '改完立即生效' },
+    { key: 'run', keys: ['run'], title: '运行期', note: '改完立即生效' },
+    { key: 'toolchain', keys: ['toolchain'], title: '工具链', note: '本机环境' },
 ];
 
 /**
@@ -184,23 +203,8 @@ export const FIELDS: FieldDef[] = [
     },
 ];
 
-/** 按路径取值，取不到返回 undefined。 */
-export function pickValue(cfg: ProjectConfig, p: string[]): unknown {
-    let cur: unknown = cfg;
-    for (const k of p) {
-        if (cur === null || typeof cur !== 'object') {
-            return undefined;
-        }
-        cur = (cur as Record<string, unknown>)[k];
-    }
-    return cur;
-}
-
-/** 按路径写值。沿途对象由 normalizeConfig 保证存在。 */
-export function setValue(cfg: ProjectConfig, p: string[], v: unknown): void {
-    let cur = cfg as unknown as Record<string, unknown>;
-    for (let i = 0; i < p.length - 1; i++) {
-        cur = cur[p[i]] as Record<string, unknown>;
-    }
-    cur[p[p.length - 1]] = v;
-}
+/* ★ 这里原先还有 pickValue() / setValue()（按路径读写的两个辅助函数）。
+ *   已删除：全树零调用点。面板真正的读写发生在 media/settingsview.js ——
+ *   webview 里拿不到 TS 的函数，那一份只能自己实现一遍。
+ *   宿主侧这两个从来没人调用，留着就是"同一件事两份实现"，
+ *   而且会让人以为面板的读写出自这里。 */

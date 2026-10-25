@@ -16,7 +16,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
-import { LineSplitter, parseFrameLine, parsePpm, parseVariablesLine, repairLooseJson } from './protocol';
+import { LineSplitter, parseFrameLine, parsePpm, parseVariablesLine } from './protocol';
 import type { FramePacket, SimSession, TimingInfo, VariableSnapshot } from './types';
 import { defaultConfig, readConfig } from './projectconfig';
 import { picArgsFromConfig, picArgsToArgv } from './simargs';
@@ -96,11 +96,9 @@ export class SimSessionImpl implements SimSession {
      */
     private frameWaiters: Array<(f: FramePacket) => void> = [];
 
-    private runGeneration = 0;
-    /** 视图不可见时为 true：此时【不再放行下一帧】，把仿真进程按在 getchar 上。 */
-    private productionPaused = false;
-
     private stopping = false;
+    /** 上一次记日志时的可见性（只用于日志去重，不参与任何控制流）。 */
+    private lastVisible = true;
 
     constructor(opts: SimSessionOptions) {
         this.opts = opts;
@@ -276,7 +274,6 @@ export class SimSessionImpl implements SimSession {
             return;
         }
         this.stopping = true;
-        this.runGeneration++;
         this.emitLog('[会话] 正在停止…');
         try {
             child.stdin.end();
@@ -671,26 +668,30 @@ if (!rgb) {
     }
 
     /**
-     * 视图可见性变化时调用。
+     * 视图可见性变化时调用 —— 只记一条日志，【不控制任何东西】。
      *
-     * ★ 为什么必须做这件事：
-     *   webview 隐藏时 postMessage 的可用性在 vscode.d.ts 里自相矛盾
-     *   （一处说可以，另一处说不可以）。所以【设计上不依赖它】：
-     *   隐藏即停止产帧，可见即恢复。
+     * ★★ 这个函数原来叫 setProductionPaused(bool)，并且存了一个
+     *    productionPaused 字段。那个名字和字段都是骗人的：
+     *    全文件没有任何地方读它，真正"暂停产帧"的机制在别处 ——
+     *    视图不可见时宿主不 ACK，completeAck 就不会往下走，
+     *    仿真进程停在 getchar() 上。也就是说：删掉这个字段，行为一模一样。
      *
-     * ★ 恢复可见时原本还要在这里补写一行（把隐藏期间攒下的连续运行放出去）。
-     *   「运行 N 帧」删掉之后没有"攒下的帧"这回事了，所以只剩记日志。
+     *    留着它最坏的地方不是多几行代码，而是它让读代码的人以为
+     *    "暂停是靠这个布尔量实现的"，于是去改它、去信它。
+     *    这正是本项目反复删的那类"配了没用"的开关。
+     *
+     *    现在只保留它唯一真实的产出：一条诊断日志（切走切回时能对上时间点）。
+     *    ★ 去重状态仍要留一个，但它只服务于"别把同一行日志刷屏"，
+     *      不参与任何控制流 —— 所以名字就叫 lastVisible，不叫 paused。
      */
-    setProductionPaused(paused: boolean): void {
-        if (this.productionPaused === paused) {
+    noteVisibility(anyVisible: boolean): void {
+        if (this.lastVisible === anyVisible) {
             return;
         }
-        this.productionPaused = paused;
-        this.emitLog(paused ? '[会话] 视图不可见，已暂停产帧。' : '[会话] 视图恢复可见，继续产帧。');
-    }
-
-    get isProductionPaused(): boolean {
-        return this.productionPaused;
+        this.lastVisible = anyVisible;
+        this.emitLog(anyVisible
+            ? '[会话] 视图恢复可见，继续产帧。'
+            : '[会话] 视图不可见，已暂停产帧（进程停在等待输入上）。');
     }
 
     /* ★ 这里原先有一个 static async listVariables()，注释写着"供变量面板
@@ -704,7 +705,8 @@ if (!rgb) {
      *   这份没人调用、没测试，属于静默腐烂。 */
 }
 
-/** 暴露给上层做诊断：把一行 JSON 的原始形态修好后返回（供输出面板显示）。 */
-export function prettyProtocolLine(line: string): string {
-    return repairLooseJson(line);
-}
+/* ★ 这里原先还有一个 export prettyProtocolLine(line) —— 它是
+ *   repairLooseJson 的一行包装，注释写着"供输出面板显示"。
+ *   已删除：全树零调用点，输出面板从来没有调用过它。
+ *   要显示修复后的协议行，直接用 protocol.ts 的 repairLooseJson 即可 ——
+ *   多这一层包装只会让人以为"显示"走了一条专门的路径。 */

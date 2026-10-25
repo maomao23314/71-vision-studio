@@ -17,6 +17,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { ScutProject } from './types';
 import { CONFIG_FILENAME, readConfig } from './projectconfig';
+import { isDir, isFile } from './fsutil';
 
 /** 编译期契约头文件的候选名（与 tools/scut_build.py 的 find_config_header 一致）。 */
 const CONFIG_HEADER_NAMES = ['scut_config.h', 'config.h'];
@@ -31,21 +32,7 @@ export interface ImageSize {
     from: string;
 }
 
-function isDir(p: string): boolean {
-    try {
-        return fs.statSync(p).isDirectory();
-    } catch {
-        return false;
-    }
-}
-
-function isFile(p: string): boolean {
-    try {
-        return fs.statSync(p).isFile();
-    } catch {
-        return false;
-    }
-}
+/* ★ isDir / isFile 已抽到 fsutil.ts（原来四个文件各有一份）。 */
 
 /**
  * 在一个目录下找工程配置，返回配置文件的绝对路径或 undefined。

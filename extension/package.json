@@ -2,7 +2,7 @@
   "name": "scut-71-vision-studio",
   "displayName": "SCUT-71 Vision Studio",
   "description": "智能车视觉仿真环境 —— 只写算法，其余交给环境",
-  "version": "0.10.8",
+  "version": "0.11.0",
   "publisher": "scut-racing",
   "license": "GPL-3.0",
   "engines": {
@@ -46,12 +46,6 @@
         "title": "新建仿真工程",
         "category": "SCUT-71",
         "icon": "$(new-folder)"
-      },
-      {
-        "command": "scut71.setupProject",
-        "title": "配置本工程（填处理函数名）",
-        "category": "SCUT-71",
-        "icon": "$(settings-gear)"
       },
       {
         "command": "scut71.showLog",
