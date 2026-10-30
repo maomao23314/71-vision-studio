@@ -95,10 +95,9 @@ export interface ProjectConfig {
     run: {
         /** 每帧把算法跑几遍取平均（>1 时结果更稳，耗时也成倍）。 */
         processRepeat: number;
-        /* ★ 这里原先还有一个 runFrames（「运行」按钮连着跑几帧）。
-         *   那项功能已经删掉了 —— 见 simview.ts 的说明。
-         *   字段也跟着删：留着一个没人读的配置项，正是本项目最反感的那种
-         *   "配了没用"的死界面。 */
+        /* 这里原本还有 runFrames（「运行」连着跑几帧），已随该功能删除；
+         * 老工程里残留的这个键由 DEPRECATED_KEYS 负责清掉。
+         * 来龙去脉见 docs/AI交接.md「已删除的概念」。 */
         /** 「测速」按钮对同一张图重复几遍取平均。 */
         benchRepeat: number;
     };
@@ -284,6 +283,58 @@ export function readConfig(projectRoot: string): { config?: ProjectConfig; error
 }
 
 /**
+ * 已知的、已经废弃的配置键 —— 写入时顺手清掉。
+ *
+ * ★ 为什么必须有一张表（而不是"留着也无害"）：
+ *   writeConfig 是"读-改-写、保留未知键"，这个设计本身是对的
+ *   （将来加字段不会因为老版本插件写一次就丢）。但它有个副作用：
+ *   **已废弃的键永远不会消失**。实测一个 0.8 时代的工程里，
+ *   run.runFrames / toolchain.autoDownload / display.secondImage
+ *   在代码里被删了三轮，却仍然躺在 scut_project.json 里 ——
+ *   用户看得见、以为是配置项、去面板里找不到对应的开关。
+ *
+ * ★ 为什么按"块 + 键"两级描述而不是一条 JSON 路径字符串：
+ *   读代码的人要能一眼看出"哪个块里的哪个键没了"，而不是去解析点号。
+ *   嵌套只有两层，不值得引入路径解析。
+ */
+const DEPRECATED_KEYS: Record<string, string[]> = {
+    // 「运行（连续跑 N 帧）」已删：功能与「测速」重复又给不出结论。
+    run: ['runFrames'],
+    // 「要不要自动下载工具链」已删：改成第一次编译时当场问，不再存开关。
+    toolchain: ['autoDownload'],
+    // 「要不要显示图片2」已删：两栏恒在，开合交给面板标题。
+    display: ['secondImage'],
+};
+
+/**
+ * 删掉已废弃的键。返回删掉的个数（只用于日志/测试）。
+ *
+ * ★ 只删【表里列出的】键，其余未知键一律保留 —— 那是 writeConfig
+ *   "向前兼容"的承诺，不能因为加了清理就顺手把用户的自定义字段也抹了。
+ */
+function pruneDeprecated(merged: Record<string, unknown>): number {
+    let removed = 0;
+    for (const [block, keys] of Object.entries(DEPRECATED_KEYS)) {
+        const obj = asRecord(merged[block]);
+        if (!obj) {
+            continue;
+        }
+        for (const k of keys) {
+            if (Object.prototype.hasOwnProperty.call(obj, k)) {
+                delete obj[k];
+                removed++;
+            }
+        }
+        // 整个块只剩空壳时也一并删掉（display 块就是这种情况：
+        // 它唯一的键 secondImage 已废弃，留着 `"display": {}` 更让人困惑）。
+        if (Object.keys(obj).length === 0 && block !== 'run' && block !== 'toolchain') {
+            delete merged[block];
+        }
+    }
+    return removed;
+}
+
+/**
  * 写入工程配置（读-改-写，保留未知字段）。
  *
  * ★ 原子写：先写临时文件再 rename。
@@ -307,6 +358,11 @@ export function writeConfig(projectRoot: string, cfg: ProjectConfig): void {
     merged.toolchain = { ...(asRecord(merged.toolchain) ?? {}), ...cfg.toolchain };
     merged.inputArray = cfg.inputArray;
     merged.outputArray = cfg.outputArray;
+
+    // ★ 合并之后、落盘之前清一次：先合并是为了让"本次要写的键"都在，
+    //   再删废弃键就不会把刚写进去的值又删掉（表里列的都是已废弃的，
+    //   与 ProjectConfig 的字段没有交集 —— 有交集就说明表写错了）。
+    pruneDeprecated(merged);
 
     const tmp = p + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify(merged, null, 2) + '\n', 'utf8');

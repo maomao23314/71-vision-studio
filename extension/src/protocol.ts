@@ -8,9 +8,13 @@
  *
  * 协议来源：backends/headless/scut_headless_main.c（权威，勿凭记忆）。
  *   · 每帧一行 JSON：{"frame":..,"w":..,"h":..,"img":"<ppm path>",
- *                     ["img2":"<ppm path>",]"timing":{..}}
- *   · 结尾一行变量：{"vars":[{"name":..,"kind":..,"dim":..,"total":..,
- *                             "values":"..","truncated":bool}, ...]}
+ *                     "pic":"<输入图>",["loadError":"..",]["img2":"<ppm path>",]
+ *                     "bench":bool,"vars":[{..}],"timing":{..}}
+ *     ★ 变量快照是【内嵌在帧行里】的 "vars" 字段（0.7.1 起），
+ *       不再单独发一行。parseFrameLine 与 parseVariablesLine 的判定顺序
+ *       因此是契约（帧行同时长得像变量行），改动前先看 simsession 的注释。
+ *   · 独立变量行只有 "vars" 没有 "frame"：那是 `--list-vars` 的输出，
+ *     会话里用不到（保留解析是为了那个入口）。
  *   · 帧图像是 PPM(P6)：ASCII 头 "P6\n<w> <h>\n255\n" + w*h*3 字节 RGB。
  *
  *  ★ 为什么输出改成彩色：覆盖层里 SCUT_DrawPoint 写的是真彩色，

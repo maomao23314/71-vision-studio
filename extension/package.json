@@ -2,9 +2,13 @@
   "name": "scut-71-vision-studio",
   "displayName": "SCUT-71 Vision Studio",
   "description": "智能车视觉仿真环境 —— 只写算法，其余交给环境",
-  "version": "0.11.0",
-  "publisher": "scut-racing",
+  "version": "0.12.0",
+  "publisher": "maomao23314",
   "license": "GPL-3.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/maomao23314/71-vision-studio"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -261,6 +265,9 @@
     "watch": "tsc -watch -p ./",
     "prepackage": "npm run clean && npm run sync-sdk && npm run compile",
     "package": "vsce package --no-dependencies --allow-missing-repository",
+    "publish": "npm run prepackage && vsce publish --no-dependencies --allow-missing-repository",
+    "publish:patch": "npm run prepackage && vsce publish patch --no-dependencies --allow-missing-repository --no-git-tag-version",
+    "publish:minor": "npm run prepackage && vsce publish minor --no-dependencies --allow-missing-repository --no-git-tag-version",
     "clean": "node -e \"require('fs').rmSync('out',{recursive:true,force:true})\""
   },
   "devDependencies": {

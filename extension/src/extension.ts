@@ -21,7 +21,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { BuildOptions, BuildResult, ScutProject } from './types';
 import { detectToolchain, peekToolchain, resetToolchainCache, runDoctor, setGlobalStorageDir } from './toolchain';
-import { createProjectFromTemplate, describeProject, detectProject, locatePicReadme, locateTemplateDir } from './project';
+import { createProjectFromTemplate, describeProject, detectProject, locatePicReadme, locateTemplateDir, PIC_EXTS } from './project';
 import { build, disposeBuildOutputChannel, getBuildOutputChannel } from './build';
 import {
     CONFIG_FILENAME,
@@ -119,38 +119,29 @@ function ensureConfigOnActivate(log: (l: string) => void): void {
 /**
  * 数一数图集目录里有多少张能识别的图（给引导页判断"放图了没"）。
  *
- * ★ 为什么只数一层、且只认后端支持的扩展名：
- *   图集约定是 pic/<组号>/<编号>.<ext>，一个组号一层。
- *   递归数会把 pic/ 下所有组加起来，得出"有 200 张"却一张都跑不到
- *   （后端只看当前组）。只数实际会被用的那一层才对得上。
- * ★ 只认 bmp/png/jpg 之外还要认 jpg 吗：不认 —— 后端明确不支持 JPEG
- *   （见 README「已知边界」）。数进来会让用户以为"图放好了"，
- *   然后得到一张黑图。
+ * ★ 只数【当前这一层】，不递归：
+ *   后端拿到 --pic 之后只在那一个目录里按编号找 1.bmp / 2.bmp…，
+ *   不会往下钻子目录。而这里曾经递归两层，于是 pic.dir 指向 pic/ 时
+ *   会把 pic/1/ 里的图也数进去，报"已有 62 张"、后端却一张读不到 ——
+ *   同一件事两个答案，用户只会怀疑环境坏了。
+ *   "数出来的张数"必须等于"后端真的会读的张数"，否则这个数字没有意义。
+ *
+ * ★ 只认 PIC_EXTS：JPEG 后端明确不支持，数进来等于骗用户"图放好了"。
  */
 function countPictures(picDir: string): number {
-    const EXTS = new Set(['.bmp', '.png']);
-    const walk = (dir: string, depth: number): number => {
-        if (depth > 2) {
-            return 0;
+    let entries: fs.Dirent[];
+    try {
+        entries = fs.readdirSync(picDir, { withFileTypes: true });
+    } catch {
+        return 0;
+    }
+    let n = 0;
+    for (const e of entries) {
+        if (e.isFile() && PIC_EXTS.includes(path.extname(e.name).toLowerCase())) {
+            n++;
         }
-        let entries: fs.Dirent[];
-        try {
-            entries = fs.readdirSync(dir, { withFileTypes: true });
-        } catch {
-            return 0;
-        }
-        let n = 0;
-        for (const e of entries) {
-            const p = path.join(dir, e.name);
-            if (e.isDirectory()) {
-                n += walk(p, depth + 1);
-            } else if (EXTS.has(path.extname(e.name).toLowerCase())) {
-                n++;
-            }
-        }
-        return n;
-    };
-    return walk(picDir, 0);
+    }
+    return n;
 }
 
 export function activate(context: vscode.ExtensionContext): void {

@@ -15,6 +15,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { StringDecoder } from 'string_decoder';
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import { LineSplitter, parseFrameLine, parsePpm, parseVariablesLine } from './protocol';
 import type { FramePacket, SimSession, TimingInfo, VariableSnapshot } from './types';
@@ -55,11 +56,54 @@ export interface SimSessionOptions {
 /**
  * 帧图像的存放目录。
  *
- * ★ 不放工作区：帧是高频覆写的临时产物，放工作区会污染 git status，
- *   也会被文件监视器反复触发。放进系统临时目录最干净。
+ * ★★ 2026-10 改动：默认从「系统临时目录」改成「工程的 .scut/frames」。
+ *   理由是【可修复性】，不是整洁：
+ *
+ *   后端的 argv 在中文 Windows 上是 ANSI(GBK)，它拼进 JSON 的路径也是 GBK
+ *   字节；插件按 UTF-8 解就得到乱码，`fs.readFile` 直接 ENOENT。
+ *   这个故障只在"路径里含非 ASCII"时出现，而 `%TEMP%` 长这样：
+ *       C:\Users\张三\AppData\Local\Temp\scut71_frames
+ *   账户名一旦是中文，用户【改不了】—— 改用户名要动注册表、改用户目录名，
+ *   代价远高于收益。而工程目录是用户自己选的，路径出问题换个位置/改个名
+ *   就能绕开。
+ *
+ *   所以：把能搬的都搬进工程目录，让"路径含中文"这件事变成用户自己能
+ *   处理的问题，而不是一台机器上永久无法使用的死结。
+ *
+ * ★ 仍然保留临时目录兜底（两级）：没有工程根时（例如只打开了单个文件），
+ *   或者工程目录不可写时（只读盘、网络盘），总得有个地方放帧 ——
+ *   「跑到一半因为写不了帧而整个跑不起来」比"帧路径不理想"糟得多。
+ *
+ * ★ 帧仍然是高频覆写的派生数据，所以放在 `.scut/`（生成物目录）下面 ——
+ *   那是构建产物该待的地方，`--clean` 会连它一起清掉。
  */
-function defaultFrameOutDir(): string {
+function tempFrameOutDir(): string {
     return path.join(process.env.TEMP ?? process.env.TMP ?? '.', 'scut71_frames');
+}
+
+/** 候选帧目录，按优先级排好；调用方逐个试到能建出来为止。 */
+function frameOutDirCandidates(projectRoot?: string): string[] {
+    if (!projectRoot) {
+        return [tempFrameOutDir()];
+    }
+    return [path.join(projectRoot, '.scut', 'frames'), tempFrameOutDir()];
+}
+
+/**
+ * 由「帧序号」推出帧文件名。
+ *
+ * ★★ 为什么不直接用 JSON 里的 "img" 字段：那个字段是后端拼的，在中文
+ *   路径下是 GBK 字节，插件按 UTF-8 解会得到一串乱码路径，读文件必失败。
+ *   而文件名格式是【确定的契约】（scut_headless_main.c 的
+ *   `"%s/frame_%04d.ppm"`），输出目录和帧号插件本来就知道 ——
+ *   于是"自己拼"永远正确，"读别人给的字符串"只在纯 ASCII 路径下正确。
+ *
+ * ★ 仍然保留 "img" 作为兜底：万一后端将来改了命名规则，插件退回旧行为，
+ *   最坏也只是恢复成今天的样子，不会更差。
+ */
+function frameFileIn(outDir: string, index: number, second: boolean): string {
+    const name = `frame_${String(index).padStart(4, '0')}${second ? '_b' : ''}.ppm`;
+    return path.join(outDir, name);
 }
 
 export class SimSessionImpl implements SimSession {
@@ -82,6 +126,13 @@ export class SimSessionImpl implements SimSession {
     /** 背压：只允许一帧在途。 */
     private inFlightFrame = -1;
     private pendingFrame: FramePacket | undefined;
+    /**
+     * 帧输出目录（--out 的实际值）。
+     *
+     * ★ 必须记下来：读帧时要用它自己拼文件名（见 frameFileIn），
+     *   不能依赖 JSON 里的 "img" 字符串 —— 那串在中文路径下是坏的。
+     */
+    private outDir = '';
     private ackWaiters: Array<() => void> = [];
     private ackTimer: NodeJS.Timeout | undefined;
 
@@ -145,9 +196,9 @@ export class SimSessionImpl implements SimSession {
      *
      * 参数说明（与 scut_headless_main.c 的 parse_args 一一对应）：
      *   --json     机器可读协议
-     *   --step     每帧后等 stdin 一行 —— 这是「单步」与「运行 N 帧」的实现基础
+     *   --step     每帧后等 stdin 一行 —— 「单步」「下一张」「测速」都靠它
      *   --frames 0 表示不设上限；此时进程只在收到 EOF 或被杀时结束。
-     *   --advance  每帧换下一张测试图（否则 120 帧跑的都是同一张图）
+     *   --advance  每帧换下一张测试图（插件【不传】：换图走运行期 n/p/g 命令）
      *   --out      帧图像（PPM/P6）的落盘目录
      */
     async start(): Promise<void> {
@@ -162,12 +213,23 @@ export class SimSessionImpl implements SimSession {
             );
         }
 
-        const outDir = this.opts.frameOutDir ?? defaultFrameOutDir();
-        try {
-            fs.mkdirSync(outDir, { recursive: true });
-        } catch {
-            /* 建不出来就让内核侧 mkdir 去处理，失败会有中文提示 */
+        // ★ 逐个试候选目录，第一个能建出来的就是本次会话的输出目录。
+        //   全都不行时退回临时目录的路径本身（让后续 mkdir/写文件报真实错误，
+        //   而不是在这里静默换一个地方）。
+        const candidates = this.opts.frameOutDir
+            ? [this.opts.frameOutDir]
+            : frameOutDirCandidates(this.opts.projectRoot);
+        let outDir = candidates[0];
+        for (const dir of candidates) {
+            try {
+                fs.mkdirSync(dir, { recursive: true });
+                outDir = dir;
+                break;
+            } catch {
+                /* 试下一个 */
+            }
         }
+        this.outDir = outDir;
 
         // ------------------------------------------------------------------
         // 运行参数
@@ -239,6 +301,22 @@ export class SimSessionImpl implements SimSession {
         });
 
         child.on('close', (code: number | null) => {
+            // ★ 先 flush 解码器、再 flush 行缓冲：解码器可能还留着半个字符，
+            //   不先吐出来的话，最后一行如果正好以多字节字符结尾就会缺字。
+            const tailOut = this.outDecoder.end();
+            if (tailOut) {
+                for (const line of this.splitter.push(tailOut)) {
+                    this.handleLine(line);
+                }
+            }
+            const tailErr = this.errDecoder.end();
+            if (tailErr) {
+                for (const line of this.stderrSplitter.push(tailErr)) {
+                    if (line.trim().length > 0) {
+                        this.emitLog(line.startsWith('[LOG] ') ? line : `[stderr] ${line}`);
+                    }
+                }
+            }
             for (const line of this.splitter.flush()) {
                 this.handleLine(line);
             }
@@ -407,9 +485,25 @@ export class SimSessionImpl implements SimSession {
 
     /* --------------------------------------------------------- 数据处理 */
 
+    /**
+     * 字节 → 文本的解码器。
+     *
+     * ★★ 为什么不能直接 `chunk.toString('utf8')`（0.12.0 修的真缺陷）：
+     *   data 事件按【字节到达】切，不按字符边界切。一个汉字 3 字节，
+     *   完全可能被切成 1+2 落在两个 chunk 里。逐块 toString 会得到
+     *   两个替换字符（），拼起来就是一个坏掉的汉字 ——
+     *   中文工程路径、中文日志都会偶发变成乱码，且"刷新一次就好了"
+     *   这种无法复现的表现，最难查。
+     *
+     *   StringDecoder 内部会留住不完整的尾巴，等下一块补齐再吐字符，
+     *   这正是它存在的理由（Node 官方文档原话）。
+     */
+    private readonly outDecoder = new StringDecoder('utf8');
+    private readonly errDecoder = new StringDecoder('utf8');
+
     private onStdout(chunk: Buffer): void {
         // ★ 必须用 splitter：data 事件按「字节到达」切，不按行切。
-        const text = chunk.toString('utf8');
+        const text = this.outDecoder.write(chunk);
         for (const line of this.splitter.push(text)) {
             this.handleLine(line);
         }
@@ -422,7 +516,7 @@ export class SimSessionImpl implements SimSession {
         // ★ 用户日志行必须【原样透传】：此前这里统一加 `[仿真] ` 前缀，
         //   把 `[LOG] ` 标记埋进了行中间，上层再也认不出它是不是用户日志
         //   （结果就是侧边栏日志区永远是空的，见 simview.pushLog 的说明）。
-        const text = chunk.toString('utf8');
+        const text = this.errDecoder.write(chunk);
         for (const line of this.stderrSplitter.push(text)) {
             if (line.trim().length === 0) {
                 continue;
@@ -468,6 +562,31 @@ export class SimSessionImpl implements SimSession {
         this.emitLog(`[仿真] ${line}`);
     }
 
+    /**
+     * 读一帧的 PPM：先试自己拼的路径，再试后端给的路径。
+     *
+     * ★ 两条都失败时把【第一个】错误抛出去（不是第二个）：
+     *   第一个是"正常情况下必然正确"的那条，它的 ENOENT 才是用户该看到的
+     *   原因；第二个失败只说明"兜底也没救回来"，没有额外信息。
+     *   这样调用方的 catch 里措辞可以保持"读不到帧"这一件事。
+     */
+    private async readFrameFile(derived: string, fromJson: string): Promise<Buffer> {
+        let firstErr: unknown;
+        try {
+            return await fs.promises.readFile(derived);
+        } catch (e) {
+            firstErr = e;
+        }
+        if (fromJson && fromJson !== derived) {
+            try {
+                return await fs.promises.readFile(fromJson);
+            } catch {
+                /* 兜底也不通 —— 抛第一个错误，理由见上 */
+            }
+        }
+        throw firstErr;
+    }
+
     private async handleFrame(frame: ReturnType<typeof parseFrameLine> & object): Promise<void> {
         const timing: TimingInfo = {
             processUs: frame.timing.processUs,
@@ -477,42 +596,50 @@ export class SimSessionImpl implements SimSession {
             cyclesValid: frame.timing.cyclesValid,
         };
 
+        // ★★ 读帧的两条路（顺序有意义）：
+        //   1) 自己拼的路径 —— 只用 outDir + 帧号，纯 ASCII 可控，
+        //      中文用户名/中文工程路径下都正确；
+        //   2) JSON 里的 "img" —— 只在第 1 条落空时才用（后端换命名规则的
+        //      兜底），它在非 ASCII 路径下是 GBK 乱码，读不到也不奇怪。
+        //   先 1 后 2 而不是反过来：反过来等于每次都先踩一次乱码。
         let rgb: Uint8Array | undefined;
+        const derived = frameFileIn(this.outDir, frame.frame, false);
         try {
             // ★ readFileSync 返回 Buffer（Uint8Array 的子类，可能共享 64KB 池 slab）。
             //   parsePpm 内部会 new Uint8Array(...) 拷成独立缓冲，
             //   这样 postMessage 才能走结构化克隆快路径。
-            const buf = await fs.promises.readFile(frame.img);
+            const buf = await this.readFrameFile(derived, frame.img);
             const img = parsePpm(new Uint8Array(buf));
             if (!img) {
-                this.emitLog(`[会话] 第 ${frame.frame} 帧的 PPM 解析失败（文件：${frame.img}），已跳过。`);
+                this.emitLog(`[会话] 第 ${frame.frame} 帧的 PPM 解析失败（文件：${derived}），已跳过。`);
             } else {
                 rgb = img.rgb;
             }
         } catch (e) {
             this.emitLog(
-                `[会话] 读不到第 ${frame.frame} 帧的图像：${frame.img}\n`
+                `[会话] 读不到第 ${frame.frame} 帧的图像：${derived}\n`
                 + `    ${e instanceof Error ? e.message : String(e)}\n`
-                + '    提示：帧是写到系统临时目录的，杀毒软件或清理工具可能删掉了它；'
-                + '若反复出现，请检查 --out 目录是否可写。',
+                + '    提示：帧是写到工程的 .scut/frames 下的，杀毒软件或清理工具可能删掉了它；'
+                + '若反复出现，请检查该目录是否可写。',
             );
         }
 
         let rgb2: Uint8Array | undefined;
         if (frame.img2) {
+            const derived2 = frameFileIn(this.outDir, frame.frame, true);
             try {
-                const buf2 = await fs.promises.readFile(frame.img2);
+                const buf2 = await this.readFrameFile(derived2, frame.img2);
                 const img2 = parsePpm(new Uint8Array(buf2));
                 if (img2) {
                     rgb2 = img2.rgb;
                 } else {
-                    this.emitLog(`[会话] 第 ${frame.frame} 帧的图片2 PPM 解析失败（文件：${frame.img2}），已跳过。`);
+                    this.emitLog(`[会话] 第 ${frame.frame} 帧的图片2 PPM 解析失败（文件：${derived2}），已跳过。`);
                 }
             } catch (e) {
                 // ★ 图片2 是附加信息：读不到就只当没有它，不打断这一帧，
                 //   更不卡住 ACK —— 否则"少了一张附加图"会变成"整个面板停住"。
                 this.emitLog(
-                    `[会话] 读不到第 ${frame.frame} 帧的图片2：${frame.img2}\n`
+                    `[会话] 读不到第 ${frame.frame} 帧的图片2：${derived2}\n`
                     + `    ${e instanceof Error ? e.message : String(e)}`,
                 );
             }

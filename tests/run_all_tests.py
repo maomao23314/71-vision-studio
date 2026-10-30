@@ -8,8 +8,9 @@ run_all_tests.py —— 一次性跑完全部测试。
     一条命令跑完全部，是把测试变成习惯的前提。
 
 用法：
-    python tests/run_all_tests.py [--project <工程目录>]
-    默认工程目录：%TEMP%/scut ascii demo
+    python tests/run_all_tests.py [--project <工程目录>] [--toolchain <根目录>]
+    不给 --project 时，从 templates/starter 现建一个干净工程来测
+    （不复用 %TEMP% 里任何历史目录 —— 那些目录的状态没人说得清）。
 
 退出码 0 = 全部通过。
 """
@@ -44,6 +45,16 @@ PY = sys.executable
 
 results = []
 
+# ★ 已解析出的工具链根目录，由 main() 填。
+#
+# ★ 为什么要有这个全局：子测试（test_e2e_pipeline.py / test_glue_edges.py /
+#   test_outimage.py）各自也调 tc.require()，而它们拿不到 --toolchain
+#   这个命令行参数。此前它们能跑，靠的是 toolchain.py 的兜底列表里
+#   恰好写着开发机的 D:\TOOLS\llvm-mingw —— 也就是说"删掉写死的路径"
+#   会当场打掉三条测试。正确做法是【把已解析的结果传下去】：
+#   在这里塞进子进程环境变量 SCUT71_TOOLCHAIN，tc 的第一优先级就会命中。
+TOOLCHAIN_ROOT = ""
+
 
 def banner(title):
     print("\n" + "=" * 68)
@@ -56,6 +67,12 @@ def run(name, cmd, cwd=None, env=None):
     e = dict(os.environ)
     e["PYTHONIOENCODING"] = "utf-8"
     e["PYTHONUTF8"] = "1"
+    # ★ 把已解析的工具链传下去（理由见 TOOLCHAIN_ROOT 的注释）。
+    #   放在这里而不是每个调用点：漏掉一处就会有一条测试在干净机器上
+    #   变成"找不到 clang"，而报错信息指向的地方（那个测试文件里）看不到
+    #   任何绝对路径，排查起来极费劲。
+    if TOOLCHAIN_ROOT:
+        e[tc.ENV_VAR] = TOOLCHAIN_ROOT
     if env:
         e.update(env)
     try:
@@ -193,8 +210,6 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--project", default="",
                     help="被测工程目录；留空 = 自动从模板新建一个干净的（推荐）")
-    ap.add_argument("--also-cn", action="store_true",
-                    help="在含中文与空格的工程路径上再跑一遍端到端")
     ap.add_argument("--toolchain", default="",
                     help="工具链根目录（含 bin/clang.exe 的那一层）。"
                          "留空 = 依次探测 %s 环境变量 → PATH → 常见位置" % tc.ENV_VAR)
@@ -202,29 +217,34 @@ def main():
 
     # ---- 工具链：缺了就没法测，给可执行的中文提示而不是后续一堆莫名报错 ----
     clang_root = tc.require(args.toolchain)
+    # ★ 立刻记进全局：后面所有子测试都靠 run() 把它透传下去。
+    #   漏了这一行，子测试就只能靠 toolchain.py 的兜底列表 ——
+    #   那正是"开发机路径写进版本库"的成因。
+    global TOOLCHAIN_ROOT
+    TOOLCHAIN_ROOT = clang_root
     clang_exe = tc.clang(args.toolchain)
     lldb_dap = tc.lldb_dap(args.toolchain)
     print("  工具链：%s" % clang_root)
     if not lldb_dap:
         print("  ! 没找到 lldb-dap —— 调试那条会跳过")
 
-    banner("0/16  准备被测工程（从模板新建并构建）")
+    banner("0/18  准备被测工程（从模板新建并构建）")
     proj = args.project or bootstrap_project(ROOT, clang_root)
 
-    banner("1/16  端到端：模板工程 → 零注册用户代码 → 构建 → 运行")
+    banner("1/18  端到端：模板工程 → 零注册用户代码 → 构建 → 运行")
     # ★ 这条排在第一位：它验证的是【设计理念本身】（用户代码零注册、
     #   环境接管图像管道、配置真的生效）。后面的测试都是组件级的，
     #   组件都对但主线断了，这个环境依然是不可用的。
     run("e2e", [PY, os.path.join(HERE, "test_e2e_pipeline.py")])
 
-    banner("2/16  接线单元边界（三条「静默算错」缺陷的回归）")
+    banner("2/18  接线单元边界（三条「静默算错」缺陷的回归）")
     # ★ 这三条都是"构建成功、运行正常、结果悄悄是错的"：
     #   同函数填两阶段（性能数字少一半）、--no-watch 重复定义、
     #   结果图数组名指向标量（越界读）。它们不会让任何东西看起来坏掉，
     #   所以必须有专门的测试盯着。
     run("glue-edges", [PY, os.path.join(HERE, "test_glue_edges.py")])
 
-    banner("3/16  算法直接写输出图 × 默认底图（接口缺口的回归）")
+    banner("3/18  算法直接写输出图 × 默认底图（接口缺口的回归）")
     # ★ 这条守的是"接口承诺了、实现却把它冲掉"那类静默失效：
     #   scut_sdk.h 说 SCUT_OutImageSet 是"算法直接产出显示图"的路径，
     #   而调度器每帧铺的默认底图会把它整幅覆盖。
@@ -232,7 +252,7 @@ def main():
     #   只测一侧的话，把判断条件写反（底图整个没了）也照样是绿的。
     run("outimage", [PY, os.path.join(HERE, "test_outimage.py")])
 
-    banner("4/16  代码卫生（死代码 / 过时注释 / 健壮性常量）")
+    banner("4/18  代码卫生（死代码 / 过时注释 / 健壮性常量）")
     # ★ 这条盯的是"删掉之后没有任何测试会变红"的那类改动。
     #   死代码的特点是双向无感：删错了没人拦，删对了下次有人
     #   "顺手加回来"也没人发现。所以专门写一条断言守着这两件事：
@@ -241,7 +261,7 @@ def main():
     #   它不需要工具链，纯静态判据，所以在任何机器上都会真的跑起来。
     run("cleanup", [PY, os.path.join(HERE, "test_cleanup.py")])
 
-    banner("5/16  webview 前端真实执行（桩加载 simview.js）")
+    banner("5/18  webview 前端真实执行（桩加载 simview.js）")
     # ★ 这条守的是"纯前端缺陷"—— Node 侧测试完全看不见的那一类。
     #   第 12 轮评审发现的两个问题都是它抓到的：
     #     · renderStructDetail 被调用但从未定义（点「展开字段」就 ReferenceError）
@@ -256,14 +276,14 @@ def main():
     #   不能靠"跑绿了"来说明。
     run("webview-js", [PY, os.path.join(HERE, "test_webview_js.py")])
 
-    banner("5.5/16 到手就能用（配置面板字段全覆盖 / 钩子候选 / 引导页）")
+    banner("6/18 到手就能用（配置面板字段全覆盖 / 钩子候选 / 引导页）")
     # ★ 这条盯的是"第一次用的人会不会卡住"，而它【不影响任何已有行为】——
     #   跑其它 15 条全是绿的，用户照样可能卡在第一步。所以必须单独一条。
     #   它已经抓到过一个从 0.9.4 就存在、一直没人发现的真实缺陷：
     #   配置面板里「结果图数组名」从来没有显示过（分组只能装一个一级键）。
     run("firstrun", [PY, os.path.join(HERE, "test_firstrun.py")])
 
-    banner("5.6/16 配置面板自动保存（延迟合并 / 关面板不丢 / 开关）")
+    banner("7/18 配置面板自动保存（延迟合并 / 关面板不丢 / 开关）")
     # ★ 这条与 firstrun §6 的分工：
     #   firstrun 是【静态】断言（代码长这样），这条是【行为】断言
     #   （真的把 settingsview 跑起来，对真实磁盘文件看最后是什么值）。
@@ -287,7 +307,7 @@ def main():
     #
     #   ★ 两边都保留：gcc 侧继续验证"解析逻辑对两种编译器都成立"，
     #     这是 scut_symbols.py 的跨工具链承诺，不能因为主用 clang 就丢掉。
-    banner("6/16  DWARF 读取器（PE/ELF × DWARF4/5 × 多编译单元）")
+    banner("8/18  DWARF 读取器（PE/ELF × DWARF4/5 × 多编译单元）")
     # ★ 这一条测的是「读字节」那一层，和下面的符号发现分开：
     #   符号发现测"类型映射对不对"，这里测"树本身解析得对不对"。
     #   历史上三次"变量面板整块失效"都坏在这一层，而且全都不报错 ——
@@ -297,23 +317,23 @@ def main():
     run("dwarf", [PY, os.path.join(HERE, "test_dwarf.py"),
                   "--cc", clang_exe, "--also", "gcc"])
 
-    banner("7/16  自动符号发现（38 变量 × clang 主 + gcc 副 × DWARF4/5）")
+    banner("9/18  自动符号发现（38 变量 × clang 主 + gcc 副 × DWARF4/5）")
     run("symbols", [PY, os.path.join(HERE, "test_symbols.py"),
                     "--cc", clang_exe, "--also", "gcc"])
 
-    banner("8/16  JSON 协议合法性（插件依赖它）")
+    banner("10/18  JSON 协议合法性（插件依赖它）")
     # ★ 显式传 --project：不传的话它只能去猜（旧版靠仓库外那个集成工程）。
     run("json", [PY, os.path.join(HERE, "check_json_protocol.py"),
                  "--project", proj])
 
-    banner("9/16  内存安全（两处 snprintf 返回值误用 → 栈越界）")
+    banner("11/18  内存安全（两处 snprintf 返回值误用 → 栈越界）")
     # ★ 这条盯的是"越界但不崩溃"的那类缺陷：静默、随机、只在特定输入下出现，
     #   常规功能回归永远测不到。它直接 include 真实源码并用
     #   AddressSanitizer + 金丝雀双重判据验证。
     #   已经抓到过两个真实缺陷：json_escape 越界写、scut_watch_read 越界读。
     run("mem-safety", [PY, os.path.join(HERE, "test_mem_safety.py")])
 
-    banner("10/16 设置项分组一致性（分组后静默失效的唯一防线）")
+    banner("12/18 设置项分组一致性（分组后静默失效的唯一防线）")
     # ★ 这条盯的是"分组改动最容易漏的地方"：
     #   设置改名/搬家之后，读错键名【不会报错】，只是静默退回默认值，
     #   现象是"我在设置里改了却没反应"，而且它出现在编译产物上，
@@ -322,25 +342,25 @@ def main():
     #     它确实报红（第一版正则写错过一次，没报红，见该文件注释）。
     run("settings", [PY, os.path.join(HERE, "test_extension_settings.py")])
 
-    banner("11/16 插件纯逻辑（协议解析 / PPM / 诊断）")
+    banner("13/18 插件纯逻辑（协议解析 / PPM / 诊断）")
     run("extension", ["node", os.path.join(HERE, "extension_smoke.js"),
                       os.path.join(proj, ".scut", "frames"),
                       os.path.join(proj, ".scut", "bin", "scut_sim.exe")])
 
-    banner("12/16 会话：运行 / 测速 / 翻页 / 停止（ACK 背压链路）")
+    banner("14/18 会话：运行 / 测速 / 翻页 / 停止（ACK 背压链路）")
     # ★ 这条盯的是"按钮点了到底有没有反应"：运行/测速/翻页全都靠 ACK 背压
     #   驱动仿真进程前进，背压断在哪一环的表现都是"画面停在第 1 帧"、不报错。
     #   它已经抓到过一个真实缺陷：runFrames(N) 会多跑一帧。
     run("session", ["node", os.path.join(HERE, "run_frames.js"),
                     os.path.join(proj, ".scut", "bin", "scut_sim.exe"), proj])
 
-    banner("13/16 主动暴露变量（源码扫描 → 分组 → 恒显示）")
+    banner("15/18 主动暴露变量（源码扫描 → 分组 → 恒显示）")
     # ★ 这条盯的是"用户主动注册的结构体成员能不能在面板里看见"。
     #   它已经抓到过一个真实缺陷：判据用"运行期注册表减编译期 DWARF"，
     #   而两边完全重合、差集恒空，导致主动暴露永远是 0 个、面板全空。
     run("manual-vars", ["node", os.path.join(HERE, "manual_vars.js"), proj])
 
-    banner("14/16 调试器真实 DAP 会话（lldb-dap）")
+    banner("16/18 调试器真实 DAP 会话（lldb-dap）")
     # ★ 用户源文件名不再是固定的 main.c（模板默认给的是 camera.c，
     #   而且用户可以任意命名）。所以这里动态挑一个真实存在的 .c，
     #   避免测试因为"模板换了默认文件名"而误报失败。
@@ -366,7 +386,7 @@ def main():
         print("  SKIP  没找到 lldb-dap（可选件）：本机无法验证调试链路。")
         print("        装 LLVM-MinGW 后重跑，或 --toolchain 指定它的根目录。")
 
-    banner("15/16 Webview 渲染（真实 Chromium + 真实帧数据）")
+    banner("17/18 Webview 渲染（真实 Chromium + 真实帧数据）")
     wv_out = os.path.join(tempfile.gettempdir(), "scut_wv_test")
     ok, out = run("webview", ["node", os.path.join(HERE, "webview_render.js"),
                               os.path.join(proj, ".scut", "frames"), wv_out])
@@ -375,17 +395,17 @@ def main():
         results[-1] = ("webview", False, "未画出内容")
         print("  --> ❌ 脚本成功退出，但渲染判定未通过")
 
-    if args.also_cn:
-        banner("16/16 端到端（含空格 + 中文的工程路径）")
-        cn = os.path.join(tempfile.gettempdir(), "scut proj 中文", "demo")
-        if os.path.isdir(cn):
-            run("cn-e2e", ["node", os.path.join(HERE, "extension_smoke.js"),
-                           os.path.join(cn, ".scut", "frames"),
-                           os.path.join(cn, ".scut", "bin", "scut_sim.exe")])
-        else:
-            print("  SKIP  中文路径工程不存在：%s" % cn)
-    else:
-        banner("16/16 跳过（用 --also-cn 启用中文路径端到端）")
+    banner("18/18 中文路径（中文用户名 + 中文工程目录，真实会话）")
+    # ★ 为什么这条必须是【真实会话】而不是源码断言：
+    #   缺陷表现是"画面全黑、不报错"，只有真跑一遍才看得见。
+    #   它同时守住"帧目录落在工程内"这条（用户改不了账户名，
+    #   但改得了工程目录 —— 这是可修复性的关键）。
+    #
+    # ★ 先跑 cnpath 的静态/行为部分（不依赖工具链），再把刚建好的工程
+    #   通过 SCUT_TEST_PROJECT 传给它，让第 4 节那条真实会话也跑起来 ——
+    #   否则它会静默 SKIP，而"静默少跑"正是这套测试最想避免的事。
+    run("cnpath", [PY, os.path.join(HERE, "test_cnpath.py")],
+        env={"SCUT_TEST_PROJECT": proj})
 
     banner("汇总")
     npass = sum(1 for _, ok, _ in results if ok)

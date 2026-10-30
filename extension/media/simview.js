@@ -299,7 +299,7 @@
       ph.textContent = '图集里还没有测试图';
       var hint = document.createElement('span');
       hint.className = 'dim';
-      hint.textContent = '把 1.bmp / 2.bmp… 放进工程的 pic/1/，再点「编译」';
+      hint.textContent = '把 1.bmp / 2.bmp… 放进图集目录（默认是工程的 pic/），再点「编译」';
       ph.appendChild(document.createElement('br'));
       ph.appendChild(hint);
       return;
@@ -884,7 +884,13 @@
       //   catalog 里没有的用兜底元信息，保证不崩、能显示。
       picked2.push({
         name: s.name,
-        dims: km.dims, kind: km.kind, isStatic: false,
+        // ★ isStatic 必须取【清单里的值】，不能硬写 false：
+        //   原先这里恒为 false，而 varMeta 又靠它拼「· static」，
+        //   于是编译期明明算出了 isStatic（scut_symbols.py 的
+        //   `not external`），面板上却永远看不到这个标记 ——
+        //   一个"做了但用不了"的功能。km 来自 catalog（kindOf 的兜底
+        //   里 isStatic 是 false，与"不在清单里就别乱标"一致）。
+        dims: km.dims, kind: km.kind, isStatic: km.isStatic === true,
         total: s.total,
         manual: isManual
       });

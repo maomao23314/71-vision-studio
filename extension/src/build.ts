@@ -557,7 +557,8 @@ interface ScriptResult {
 /**
  * 调用 tools/scut_build.py 并解析它的 --json 契约。
  *
- * 契约（已对真实脚本核实，见 tools/scut_build.py:1199-1218 / 1990）：
+ * 契约（已对真实脚本核实：`tools/scut_build.py` 里 `emit_json` 的调用点，
+ * 以及 `do_build` 组装的那个 result 字典 —— 行号会漂，按函数名找）：
  *   stdout 上恰好一份 JSON：
  *     {ok, exePath, output, elapsedMs, errors:[{file,line,column,severity,message}], manifest}
  *   --json 时所有人类可读进度都走 stderr，所以 stderr 拿来给用户看。

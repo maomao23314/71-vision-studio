@@ -26,10 +26,16 @@ ENV_VAR = "SCUT71_TOOLCHAIN"
 
 # 兜底探测的候选（最后手段）。刻意很短：猜目录在本项目上被证伪过两次，
 # 这里只为"独立 clone 下来也能跑"留一条路，不追求覆盖所有发行版。
+#
+# ★ 这里【不得】出现任何具体机器的路径（例如 D:\TOOLS\llvm-mingw）——
+#   文件开头那段注释骂的就是这件事，而它自己曾经又写了一条，
+#   靠 test_mem_safety.py 的扫描范围恰好不查 tests/ 才没被发现。
+#   要指定自己的工具链，用 --toolchain 或 SCUT71_TOOLCHAIN 环境变量。
 _FALLBACK_ROOTS = [
-    r"D:\TOOLS\llvm-mingw",
     r"C:\llvm-mingw",
     os.path.expanduser(r"~\llvm-mingw"),
+    "/opt/llvm-mingw",
+    "/usr/local/llvm-mingw",
 ]
 
 

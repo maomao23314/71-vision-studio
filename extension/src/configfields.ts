@@ -138,8 +138,9 @@ export const FIELDS: FieldDef[] = [
     },
     {
         path: ['pic', 'ext'], label: '图集后缀', kind: 'text',
-        hint: '可填多个，逗号分隔，例如 .png,.bmp,.jpg —— 仿真会逐一尝试，'
-            + '所以同一个目录里混着多种格式也能跑。留空 = 自动探测常见格式。'
+        hint: '可填多个，逗号分隔，例如 .png,.bmp —— 仿真会逐一尝试，'
+            + '所以同一个目录里混着多种格式也能跑。留空 = 自动探测。'
+            + '★ 只支持 BMP / PNG；JPEG 会报"格式不支持"，请先转成这两种。'
             + '★ 改完立即生效，不需要重新编译',
     },
     {
@@ -153,9 +154,8 @@ export const FIELDS: FieldDef[] = [
         path: ['run', 'processRepeat'], label: '每帧重复次数', kind: 'number',
         hint: '大于 1 时每帧跑多遍取平均，结果更稳，耗时也成倍',
     },
-    /* ★ 这里原先还有「运行」连跑帧数（run.runFrames）。
-     *   那个功能在 0.10.6 连同按钮一起删了（用户原话："这个功能没意义"），
-     *   字段自然也不该留在面板上 —— 留着就是"配了没用"。 */
+    // 这里原本还有 run.runFrames（「运行」连跑帧数），已随该功能删除。
+    // 完整的来龙去脉见 docs/AI交接.md「已删除的概念」，不在代码里重复第四遍。
     {
         path: ['run', 'benchRepeat'], label: '「测速」重复次数', kind: 'number',
         hint: '点「测速」时对同一张图重复几遍取平均周期数',

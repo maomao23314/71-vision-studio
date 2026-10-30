@@ -88,7 +88,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 if sys.version_info < (3, 7):  # pragma: no cover - 环境相关
     sys.stderr.write(
         "本脚本需要 Python 3.7 或更高版本，当前是 %d.%d。\n"
-        "原因：脚本第 70 行用了 `from __future__ import annotations`，"
+        "原因：脚本开头用了 `from __future__ import annotations`，"
         "这是 3.7 才加入的特性；3.6 及更早会在那一行直接 SyntaxError。\n"
         "解决办法：装一个 Python 3.7+ 再重试。\n"
         "    · 装了 Anaconda：它自带一份，用 where python 或 conda 找；\n"
@@ -141,6 +141,15 @@ for _stream_name in ("stdout", "stderr"):
 SCUT_DIR = ".scut"
 
 EXE_NAME = "scut_sim.exe"
+
+# 后端真正能解码的图片后缀。
+#
+# ★ 只此一份，别再各处重写：这个清单曾经在四个地方各写一遍，而其中三处
+#   多写了 .jpg/.jpeg/.pgm —— 于是"构建说找到 36 张图、引导页说 0 张、
+#   后端一张都读不到"，三处对同一个事实给出三个答案。
+#   JPEG 在 scut_frame.c 里是明确返回 SCUT_FRAME_ERR_UNSUPPORTED_FORMAT 的。
+#   （TS 侧对应 extension/src/project.ts 的 PIC_EXTS，两边必须一致。）
+PIC_EXTS = (".bmp", ".png")
 
 # 外部命令的超时（秒）。两个不同的量级，各有理由：
 #
@@ -1731,6 +1740,52 @@ def _fallback_compile(job: UnitJob, cc: str, base_flags: List[str],
 # 主构建流程
 # ===========================================================================
 
+def prune_stale_staging(scut_dir: str) -> int:
+    """
+    清掉上次被【强杀】的构建留下的空暂存目录（.scut/scut_gen_*）。
+
+    ★ 为什么会有残留：
+      `_gen_wrapped_unit` 用 `tempfile.mkdtemp(prefix="scut_gen_")` 建暂存目录，
+      靠 `finally: shutil.rmtree(...)` 收尾。而插件「取消构建」走的是
+      `child.kill()` —— Windows 上是 TerminateProcess，进程被直接摘掉，
+      Python 的 finally 根本没机会执行。于是每取消一次就多一个空目录。
+
+    ★ 为什么只删【空】的：
+      多窗口可能同时在构建同一个工程（两个 .scut 目录指向同一处）。
+      删非空目录会打断另一个正在跑的构建，而空目录不可能是"正在用"的
+      （mkdtemp 一建好就为空，真正写文件是在随后几行里）。
+      宁可留下几个空的，也不能误删别人正在用的。
+
+    ★ 为什么放在 do_build 里而不是 main() 的清理分支：
+      这里才确定"现在要构建这个工程"，与 --clean 是两件事；
+      而且这样每个工程只管自己的 .scut，不会越界去动别人。
+
+    返回删掉的个数（只用于日志）。
+    """
+    if not os.path.isdir(scut_dir):
+        return 0
+    removed = 0
+    try:
+        names = os.listdir(scut_dir)
+    except OSError:
+        return 0
+    for name in names:
+        if not name.startswith("scut_gen_"):
+            continue
+        path = os.path.join(scut_dir, name)
+        if not os.path.isdir(path):
+            continue
+        try:
+            if os.listdir(path):        # 非空 → 可能是别人正在用，跳过
+                continue
+            os.rmdir(path)
+            removed += 1
+        except OSError:
+            # 被占用 / 权限不足：跳过即可，不影响本次构建
+            continue
+    return removed
+
+
 def do_build(args: argparse.Namespace, reporter: Reporter,
              timer: StageTimer) -> Tuple[int, Dict[str, Any]]:
     proj = Project(args.project)
@@ -1783,6 +1838,11 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
         return finish(2)
 
     # --- 1) 工具链 ---------------------------------------------------------
+    # ★ 顺手清掉上次被强杀的构建留下的空暂存目录（只删空的，见函数注释）。
+    #   放在工具链探测之前：它不依赖工具链，越早清越不会污染后面的产物统计。
+    stale = prune_stale_staging(proj.scut_dir)
+    if stale:
+        reporter.detail("  清理了 %d 个上次残留的空暂存目录" % stale)
     with timer.stage("工具链探测"):
         tc = detect_toolchain(args.toolchain, reporter)
         for w in tc.warnings:
@@ -2100,8 +2160,7 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
             % (_shown, _shown))
     else:
         pics = [n for n in os.listdir(proj.pic_dir)
-                if os.path.splitext(n)[1].lower()
-                in (".bmp", ".png", ".jpg", ".jpeg", ".pgm")]
+                if os.path.splitext(n)[1].lower() in PIC_EXTS]
         if not pics:
             reporter.warn(
                 "目录 %s 里没有任何图片，仿真将没有测试图可读。\n"
@@ -2764,8 +2823,7 @@ def do_doctor(args: argparse.Namespace, reporter: Reporter,
         pics = []
         for dirpath, _dirnames, filenames in os.walk(proj.pic_dir):
             for n in filenames:
-                if os.path.splitext(n)[1].lower() in (".bmp", ".png", ".jpg",
-                                                      ".jpeg", ".pgm"):
+                if os.path.splitext(n)[1].lower() in PIC_EXTS:
                     pics.append(os.path.join(dirpath, n))
         if pics:
             # 顺带报出实际发现到哪几个子目录，便于用户核对组号

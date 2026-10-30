@@ -4,9 +4,10 @@
  * 设计理念对照：
  *   · 代码松耦合   → 只依赖 types.ts 的 ScutProject，不 import 其它实现
  *   · 上手即用     → 「新建工程」把模板拷过去就能跑，不需要用户理解目录结构
- *   · 适应任意代码 → 尺寸从 config.h 用正则读，【不编译】，所以对任意工程都成立
+ *   · 适应任意代码 → 尺寸先读 scut_project.json（真值），没有它才回落到
+ *                    用正则读 config.h（老工程兼容），【不编译】
  *
- * ★ 为什么尺寸要正则读而不是预处理器：
+ * ★ 为什么老工程要正则读 config.h 而不是预处理器：
  *   读一次 config.h 是微秒级；跑一次 `clang -E -dM` 是几十毫秒起步，
  *   还要处理 include 路径、宏依赖。这里只需要两个整数，
  *   用一条正则足够，且失败了可以优雅降级（返回 undefined 而不是崩）。
@@ -24,6 +25,17 @@ const CONFIG_HEADER_NAMES = ['scut_config.h', 'config.h'];
 
 /** 生成物目录名（与 tools/scut_build.py 的 SCUT_DIR 一致）。 */
 const SCUT_DIR_NAME = '.scut';
+
+/**
+ * 后端真正能解码的图片后缀。
+ *
+ * ★ 唯一一份：这个清单曾经在四个地方各写一遍，其中三处多写了 jpg/jpeg/pgm，
+ *   于是"构建说有图、引导页说 0 张、后端读不到"，三处对同一件事三个答案。
+ *   JPEG 在 core/src/scut_frame.c 里是明确 UNSUPPORTED_FORMAT 的。
+ *   Python 侧对应 tools/scut_build.py 的 PIC_EXTS，两边必须一致
+ *   （tests/test_firstrun.py 有一条断言守着这件事）。
+ */
+export const PIC_EXTS = ['.bmp', '.png'];
 
 export interface ImageSize {
     width: number;

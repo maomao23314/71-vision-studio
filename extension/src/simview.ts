@@ -278,11 +278,9 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
     /**
      * 上一张图。
      *
-     * ★ 这里原来还有一个「运行（连续跑 N 帧）」。
-     *   它真正的功能被「测速」覆盖了（同一张图重复 N 次，取平均周期数），
-     *   而"按顺序连跑 60 帧"既不给结论、又得等半天 —— 用户原话是"没意义"。
-     *   连带的 runFrames / 「运行」连跑帧数配置 / F8 键位 / 命令，
-     *   在 0.10.6 一并删除，原来占着的播放键图标改给了「编译」。
+     * ★ 这里原来还有一个「运行（连续跑 N 帧）」，已删除
+     *   （与「测速」重复，且不给结论）。来龙去脉见 docs/AI交接.md
+     *   「已删除的概念」—— 那段说明只写一处，不在这里重复。
      */
     public async prevPic(): Promise<void> {
         await this.nudgePic(-1);

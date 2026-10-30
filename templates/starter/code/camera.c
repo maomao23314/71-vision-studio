@@ -3,13 +3,17 @@
  *  --------------------------------------------------------------------------
  *  设计理念对照：
  *    · 上手即用     → 整个工程只有这一个源文件需要动
- *    · 可移植       → 本文件【没有】任何仿真环境的注册代码，可原样拷进车载工程
+ *    · 可移植       → 本文件里只有一处【纯显示用】的注册代码
+ *                     （camera_init 末尾那几行，已用 ★ 标出）。
+ *                     删掉它即可原样拷进车载工程 —— 算法一个字符都不用改。
  *    · 松耦合       → 环境调用哪三个函数，由「设置」决定，不写在这里
  *
  *  ★ 你不需要写 main()：环境已经有了。
  *  ★ 你不需要写 SCUT_INIT / SCUT_FRAME 之类的注册宏：
  *      环境调用哪几个函数由【插件的配置面板】指定（见下面「三个入口」）。
- *  ★ 你不需要声明想看哪些变量：环境会自动发现并列进面板让你勾选。
+ *  ★ 你【基本】不需要声明想看哪些变量：环境会在构建时自动发现全局变量，
+ *    列进面板让你勾选。只有"结构体成员"这种自动发现读不懂的东西，
+ *    才需要手动注册一次 —— 本文件末尾就有一个现成的例子（g_result）。
  *
  *  ★★ 为什么这个文件【故意】叫 camera.c 而不是 main.c（可移植性要求）
  *  --------------------------------------------------------------------------
@@ -51,7 +55,7 @@
  * ★ 这些变量【不需要注册】。环境会在构建时自动扫描调试信息，
  *   把它们列进变量面板，你勾选即可看到数值/曲线。
  *   只有自动发现覆盖不到的场景（例如运行期 malloc 的缓冲）才需要
- *   SCUT_Watch 主动注册 —— 那些会排在面板最前面并高亮。
+ *   SCUT_Watch 主动注册 —— 见下面 camera_init 末尾那个例子。
  * -------------------------------------------------------------------------- */
 int     g_threshold = 0;                        /* 二值化阈值 */
 int     g_left_line[SCUT_IMAGE_H];              /* 每行左边界列坐标 */
@@ -59,6 +63,26 @@ int     g_right_line[SCUT_IMAGE_H];             /* 每行右边界列坐标 */
 int     g_mid_line[SCUT_IMAGE_H];               /* 每行中线列坐标 */
 int     g_lost_count = 0;                       /* 连续丢线行数 */
 static int s_histogram[256];                    /* 灰度直方图（static 也能被发现） */
+
+/* --------------------------------------------------------------------------
+ *  ★★ 结构体：自动发现的【真实边界】在这里，模板特意留了一个例子 ★★
+ *
+ *  环境构建时读的是调试信息（DWARF）。对结构体，它只知道
+ *  "g_result 是一块 16 字节的东西"，读不出里面有几个成员、分别叫什么 ——
+ *  这是调试信息的表达能力决定的，不是环境偷懒。
+ *
+ *  而车载算法几乎没有不用结构体的。所以模板里放一个**最小的**结构体，
+ *  并在 camera_init 末尾演示"怎么让它的成员单独出现在面板上"。
+ *  你照抄那 4 行即可。
+ * -------------------------------------------------------------------------- */
+typedef struct {
+    int lane_status;    /* 赛道状态：0=直道 1=左弯 2=右弯 -1=丢线 */
+    int left_lost;      /* 左边线搜不到的行数 */
+    int right_lost;     /* 右边线搜不到的行数 */
+    int mid_offset;     /* 底部中线相对画面中心的偏移（像素，右为正） */
+} camera_result_t;
+
+camera_result_t g_result;                       /* 结构体整体也会进面板（不可展开） */
 
 /* 结果图：环境会把它显示到"处理后的图像"里。
  * ★ 数组名要填到设置里的「结果图数组名」；留空则画面显示输入图本身。 */
@@ -99,6 +123,27 @@ void camera_init(void)
             g_binary[i][x] = 0;
         }
     }
+    g_result.lane_status = -1;
+    g_result.left_lost   = 0;
+    g_result.right_lost  = 0;
+    g_result.mid_offset  = 0;
+
+    /* ----------------------------------------------------------------------
+     *  ★★ 把结构体成员单独登记到变量面板（这是模板里唯一一行"环境相关"代码）★★
+     *
+     *  为什么需要它：自动发现能列出 g_result 这个整体，但读不出成员 ——
+     *  面板上只会显示「<16B>」这种不可读的形式，而 lane_status 恰恰是
+     *  你最想看的那个数。
+     *
+     *  这里只是把成员的【地址】告诉环境，读的仍是同一份内存，不影响数值。
+     *  ★ 拷到车载工程时，把这 4 行连同上面那段注释一起删掉即可 ——
+     *    算法主体一个字都不用动。写在 init 里也是这个原因：
+     *    开机跑一次，不在每帧的热路径上。
+     * -------------------------------------------------------------------- */
+    SCUT_WATCH_SCALAR("lane_status",  &g_result.lane_status,  SCUT_T_I32);
+    SCUT_WATCH_SCALAR("left_lost",    &g_result.left_lost,    SCUT_T_I32);
+    SCUT_WATCH_SCALAR("right_lost",   &g_result.right_lost,   SCUT_T_I32);
+    SCUT_WATCH_SCALAR("mid_offset",   &g_result.mid_offset,   SCUT_T_I32);
 }
 
 /* --------------------------------------------------------------------------
@@ -137,6 +182,8 @@ void camera_process(void)
 
     /* --- 2) 逐行找左右边界（最朴素的跳变检测） --- */
     g_lost_count = 0;
+    g_result.left_lost  = 0;
+    g_result.right_lost = 0;
     for (y = h - 1; y >= 0; y--) {
         int left = -1, right = -1;
 
@@ -162,10 +209,27 @@ void camera_process(void)
         } else {
             g_mid_line[y] = -1;
             g_lost_count++;
+            if (left < 0)  { g_result.left_lost++;  }
+            if (right < 0) { g_result.right_lost++; }
         }
     }
 
-    /* --- 3) 把二值化结果写进【自己的结果图】 ---
+    /* --- 3) 汇总成"算法结论"（结构体里那几个数就是给面板看的） ---
+     *     最底部一行的中线相对画面中心的偏移，是最常用的转向依据。 */
+    {
+        int bottom_mid = -1;
+        for (y = h - 1; y >= 0 && bottom_mid < 0; y--) {
+            bottom_mid = g_mid_line[y];
+        }
+        g_result.mid_offset = (bottom_mid >= 0) ? (bottom_mid - w / 2) : 0;
+
+        if (g_lost_count >= h / 2)      { g_result.lane_status = -1; }  /* 丢线 */
+        else if (g_result.mid_offset >  6) { g_result.lane_status = 2; }  /* 右弯 */
+        else if (g_result.mid_offset < -6) { g_result.lane_status = 1; }  /* 左弯 */
+        else                             { g_result.lane_status = 0; }  /* 直道 */
+    }
+
+    /* --- 4) 把二值化结果写进【自己的结果图】 ---
      *     注意：写的是 g_binary，不是"环境的输出图"。
      *     环境会按设置里的「结果图数组名」把它搬去显示。
      *     这样算法完全不知道"显示"这件事存在 —— 这正是可移植性的来源。 */
@@ -199,7 +263,7 @@ void camera_process(void)
  *      要看数值请用 SCUT_Log 或变量面板。
  *
  * ---------------------------------------------------------------------------
- *  ★ 预定义颜色（12 个）
+ *  ★ 预定义颜色（11 个）
  * ---------------------------------------------------------------------------
  *      SCUT_COLOR_BLACK      SCUT_COLOR_WHITE      SCUT_COLOR_RED
  *      SCUT_COLOR_GREEN      SCUT_COLOR_BLUE       SCUT_COLOR_YELLOW
@@ -240,6 +304,14 @@ void camera_draw(void)
     /* 自建颜色的例子：在画面上方标一条橙色横线（用 SCUT_RGB 而不是字面量）。 */
     SCUT_DrawLine(0, 2, SCUT_IMAGE_W - 1, 2, SCUT_RGB(255, 128, 0));
 
+    /* 画面中心竖线 + 底部中线点：一眼看出 mid_offset 偏了多少。
+     * （mid_offset 这个数本身在变量面板里，见 camera_init 末尾的注册。） */
+    SCUT_DrawLine(SCUT_IMAGE_W / 2, 0, SCUT_IMAGE_W / 2, h - 1, SCUT_COLOR_GRAY);
+    if (g_mid_line[h - 1] >= 0) {
+        SCUT_DrawRect(g_mid_line[h - 1] - 2, h - 5,
+                      g_mid_line[h - 1] + 2, h - 1, SCUT_COLOR_MAGENTA);
+    }
+
     /* DrawText 的例子（ASCII only）。注意不要拿它当"数据显示"用，见上。 */
     SCUT_DrawText(2, 6, SCUT_COLOR_YELLOW, "lost=%d", g_lost_count);
 }
@@ -256,5 +328,9 @@ void camera_draw(void)
  * -------------------------------------------------------------------------- */
 void camera_report(void)
 {
-    SCUT_Log(SCUT_LOG_INFO, "阈值=%d  丢线=%d 行", g_threshold, g_lost_count);
+    /* ★ 注意这里【不重复】打印 lane_status / mid_offset ——
+     *   它们已经在变量面板里了（靠 camera_init 末尾那几行注册）。
+     *   日志只写"需要组合判断、光看数字看不出来"的东西。 */
+    SCUT_Log(SCUT_LOG_INFO, "阈值=%d  丢线=%d 行  状态=%d",
+             g_threshold, g_lost_count, g_result.lane_status);
 }

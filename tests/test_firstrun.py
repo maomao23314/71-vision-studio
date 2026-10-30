@@ -411,6 +411,66 @@ ok('前端收到 autoSaved 才切成"已自动保存"',
 
 
 # ===========================================================================
+print('\n=== 7. 图片后缀只有一份清单（JPEG 不该被当成"能读"） ===')
+# ===========================================================================
+#
+# ★ 为什么单独守这一条：同一份后缀清单曾经在四个地方各写一遍，
+#   其中三处多写了 jpg/jpeg/pgm。后果是"构建说找到 36 张图、
+#   引导页说 0 张、后端一张都读不到" —— 同一件事三个答案。
+#   判据不是"有没有写 jpg"，而是【三处清单必须完全相等】，
+#   因为只有相等才说明它们来自同一个事实。
+py_build = read('tools/scut_build.py')
+m_exts = re.search(r'^PIC_EXTS\s*=\s*\(([^)]*)\)', py_build, re.M)
+ok('scut_build.py 有唯一的 PIC_EXTS 常量', m_exts is not None)
+py_set = set()
+if m_exts:
+    py_set = {s.strip().strip('"\'') for s in m_exts.group(1).split(',') if s.strip()}
+ok('PIC_EXTS 就是 bmp+png', py_set == {'.bmp', '.png'}, sorted(py_set))
+
+ts_proj = code_of('extension/src/project.ts')
+m_ts = re.search(r'PIC_EXTS\s*=\s*\[([^\]]*)\]', ts_proj)
+ok('project.ts 导出 PIC_EXTS', m_ts is not None)
+ts_set = set()
+if m_ts:
+    ts_set = {s.strip().strip('"\'') for s in m_ts.group(1).split(',') if s.strip()}
+ok('TS 与 Python 的清单逐字一致', ts_set == py_set, (sorted(ts_set), sorted(py_set)))
+
+# 配置面板的提示不能推荐后端不支持的后缀
+cfg_ts = code_of('extension/src/configfields.ts')
+pic_ext_block = re.search(r"path:\s*\['pic',\s*'ext'\][\s\S]{0,400}?\}", cfg_ts)
+ok('pic.ext 提示里不再出现 .jpg', pic_ext_block is not None
+   and '.jpg' not in pic_ext_block.group(0))
+ok('pic.ext 提示说明只支持 BMP/PNG',
+   pic_ext_block is not None and 'JPEG' in pic_ext_block.group(0))
+
+# 构建脚本里不该再有第二份手写清单
+ok('scut_build.py 不再有手写的 jpg 后缀元组',
+   not re.search(r'\(\s*"\.bmp",\s*"\.png",\s*"\.jpg"', py_build))
+
+# ===========================================================================
+print('\n=== 8. 中文路径：帧目录必须在工程内 + 不依赖 JSON 里的路径 ===')
+# ===========================================================================
+#
+# ★ 这是本轮修的缺陷，判据要抓【行为】而不是"有没有那个函数"：
+#   ① 帧目录默认落在 <工程>/.scut/frames（用户改不了账户名，但改得了工程目录）；
+#   ② 读帧用的是插件自己拼的路径，JSON 的 img 只作兜底。
+ss_ts = code_of('extension/src/simsession.ts')
+ok('帧目录默认在工程的 .scut/frames 下',
+   re.search(r"path\.join\(projectRoot,\s*'\.scut',\s*'frames'\)", ss_ts) is not None)
+ok('仍然保留系统临时目录兜底（无工程时也能跑）',
+   'scut71_frames' in ss_ts)
+ok('读帧先用自己的推导路径', 'frameFileIn(' in ss_ts
+   and re.search(r'readFrameFile\(derived', ss_ts) is not None)
+ok('JSON 的 img 只作为兜底（不是唯一来源）',
+   re.search(r'readFrameFile\([^)]*frame\.img', ss_ts) is not None)
+ok('帧文件名格式与后端契约一致（frame_%04d.ppm）',
+   re.search(r"frame_\$\{String\(index\)\.padStart\(4,\s*'0'\)\}", ss_ts) is not None)
+# 逐 chunk 解码会把跨块的多字节汉字切成半个
+ok('stdout 用 StringDecoder（不再逐块 toString）',
+   'StringDecoder' in ss_ts and "chunk.toString('utf8')" not in ss_ts)
+
+
+# ===========================================================================
 print('\n' + '=' * 60)
 if FAIL == 0:
     print('全部 %d 项通过' % PASS)

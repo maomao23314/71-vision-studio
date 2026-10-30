@@ -18,7 +18,13 @@
    它会连着问三件事，都有默认值，一路回车也能建：
    工程名 · **图像尺寸**（默认 `188x120`）· **每帧处理函数名**（默认 `camera_process`）。
    三项直接写进工程的 `scut_project.json` —— 建出来**当场就能编译**。
-3. 把你的测试图放进工程的 `pic/1/`，命名 `1.bmp`、`2.bmp`…（也支持 `0.png` 起的编号）。
+3. 把你的测试图放进工程里，命名 `1.bmp`、`2.bmp`…（也支持 `0.png` 起的编号）。
+   **放哪都行**，两种都常见：
+   - 直接放 `pic/` —— 这是默认值，什么都不用配；
+   - 或者放 `pic/1/` 这类子目录 —— 那就去「⚙ › 测试图集 › 图集目录」填 `pic/1`。
+
+   图集目录可以指向工程内任意目录，也可以指到工程外（多个工程共用一份图集）。
+   新建工程时插件会顺手建一个空的 `pic/1/` 并放一份 `README-pic.txt`，照着看即可。
 4. 换成你自己的算法 / 函数名时，点侧边栏工具栏最右边的 **⚙**，
    在「钩子函数 › 每帧处理函数」里改 —— 那一栏下面有**候选下拉框**，
    列的是 `code/` 里真实存在且非 `static` 的 `void f(void)`，选一个即可。
@@ -318,7 +324,7 @@ void camera_draw(void)
 
 ```
 SCUT-71: 环境自检          # 命令面板里执行，逐项报告工具链/工程结构/核心库
-python tests/run_all_tests.py   # 跑一遍回归（15 个套件）
+python tests/run_all_tests.py   # 跑一遍回归（18 个套件）
 ```
 
 ---
@@ -452,9 +458,8 @@ scut_project.json
 ## 测试
 
 ```
-python tests/run_all_tests.py                        # 15 个套件
+python tests/run_all_tests.py                        # 18 个套件
 python tests/run_all_tests.py --toolchain <根目录>    # 工具链不在默认位置时
-python tests/run_all_tests.py --also-cn              # 额外跑一遍中文路径端到端
 ```
 
 在终端里直接跑构建脚本时，`Ctrl+C` 会走一条"已中断"的收尾分支；

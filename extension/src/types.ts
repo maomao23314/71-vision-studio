@@ -207,7 +207,7 @@ export interface FramePacket {
      */
     rgb: Uint8Array;
     /**
-     * 第二张图（算法用 SCUT_OutImage2Set / SCUT_EnvCopyOutput2 画的那张）。
+     * 第二张图（算法用 SCUT_OutImageSet(2, …) / SCUT_EnvCopyOutput(2, …) 画的那张）。
      *
      * ★ 只有算法真的写过才有这个字段：后端从没见人写过第二张图时，
      *   连 PPM 都不生成（见 scut_bind_output2_used）。
@@ -277,9 +277,9 @@ export interface SimSession {
      *   超时或进程已退出时返回 undefined。
      */
     bench(n: number): Promise<FramePacket | undefined>;
-    /* ★ 这里原先还有一个 runFrames(n)：实现是"连续发空行"，
-     *   服务于已删除的「运行 N 帧」。它和那项功能一起删掉了 ——
-     *   否则声明还在，调用方会以为环境仍支持连续播放。 */
+    /* 这里原先还有一个 runFrames(n)（"连续发空行"，服务于已删的「运行 N 帧」）。
+     * 它与那项功能一起删掉了 —— 声明留着会让调用方以为环境仍支持连续播放。
+     * 来龙去脉见 docs/AI交接.md「已删除的概念」。 */
     /**
      * 跳到第 n 张测试图（协议 g<N>，进程不重启，算法状态保留）。
      *

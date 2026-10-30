@@ -109,7 +109,10 @@ const scut_watch_entry_t    *scut_watch_at(int index);
  *   与 scut_registry_reset 同理 —— 注册发生在 main 之前、只增不减，
  *   运行期不需要清空。但"同进程重开会话"的场景（软复位、多工程切换、
  *   单元测试）需要它，而它是公开接口。
- *   tests/test_mem_safety.py 的驱动就是靠这类 reset 反复建表验越界的。 */
+ *   ★ 纯接口预留：当前没有任何调用方（包括测试）。原先这里写着
+ *     "tests/test_mem_safety.py 靠它反复建表"，复核后确认那条测试是
+ *     #include 源文件后自己造等价驱动的，根本没调这个函数 —— 说明写错比
+ *     不写更糟，已改成事实描述。 */
 void                         scut_watch_reset(void);
 
 /* --- 读值 ---

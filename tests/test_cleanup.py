@@ -628,10 +628,27 @@ ok('生成的接线单元用 1（图片1）搬运结果图',
 # ★ 这里【不再】断言任何"显示开关"：用户要求删掉它
 #   （「不要选择开启」），两栏恒在、开合只由标题控制。
 # ★ 只扫【代码】（去掉注释）：解释"为什么删掉那个开关"的注释里必然出现这些词。
-ok('工程配置里没有"要不要显示图片2"这类开关',
-   'secondImage' not in strip_comments(pc_ts)
-   and 'secondImage' not in strip_comments(cfg_ts, 'ts')
-   and '"display"' not in strip_comments(sb_src, 'py'))
+# ★ 2026-10 补充：projectconfig.ts 里【允许】出现这些名字，但只能在
+#   DEPRECATED_KEYS 那张清理表里 —— 那是"把老工程里的废弃键删掉"用的，
+#   与"又把它做回配置项"是相反的两件事。所以判据从"全文不许出现"
+#   收窄成"不许出现在默认值与类型定义里"，再单独断言它出现在清理表中。
+def _region(text, start_pat, end_pat):
+    m = re.search(start_pat + r'([\s\S]*?)' + end_pat, text)
+    return m.group(1) if m else ''
+
+
+pc_defaults = _region(pc_ts, r'export function defaultConfig\(\)[^{]*\{', r'\n\}')
+ok('默认配置里没有"要不要显示图片2"这类开关',
+   'secondImage' not in pc_defaults and 'runFrames' not in pc_defaults)
+ok('配置面板字段表里没有这类开关',
+   'secondImage' not in strip_comments(cfg_ts, 'ts')
+   and 'runFrames' not in strip_comments(cfg_ts, 'ts'))
+ok('scut_build.py 的 DEFAULT_CONFIG 没有 display 段',
+   '"display"' not in strip_comments(sb_src, 'py'))
+ok('已废弃的键在清理表里（否则老工程里的键永远删不掉）',
+   re.search(r'DEPRECATED_KEYS[\s\S]{0,400}?secondImage', pc_ts) is not None
+   and re.search(r'DEPRECATED_KEYS[\s\S]{0,400}?runFrames', pc_ts) is not None
+   and re.search(r'DEPRECATED_KEYS[\s\S]{0,400}?autoDownload', pc_ts) is not None)
 ok('会话读到 rgb2 就读（不再看开关）',
    re.search(r'if\s*\(frame\.img2\)', read('extension/src/simsession.ts')) is not None)
 ok('宿主把 rgb2 转发给面板',
