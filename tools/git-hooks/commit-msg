@@ -1,0 +1,36 @@
+#!/bin/sh
+# ---------------------------------------------------------------------------
+# commit-msg 钩子：拒绝把 AI 助手写进 Co-Authored-By
+#
+# 为什么要有这个：
+#   GitHub 统计仓库 Contributors 时，除了 commit 的 author，
+#   还会把提交信息里 `Co-Authored-By:` 的人算进去。
+#   一旦某个 AI 工具的默认 trailer（例如
+#   "Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"）
+#   混进历史，仓库的 Contributors 里就会永久多出一个你根本不认识的账号。
+#   而删掉它需要重写历史 + 让 GitHub GC 旧对象，非常麻烦。
+#
+# 所以：从源头拦住。
+#
+# 用法：放到仓库里，然后
+#   git config core.hooksPath tools/git-hooks
+# ---------------------------------------------------------------------------
+
+msg_file="$1"
+[ -f "$msg_file" ] || exit 0
+
+bad=$(grep -iE '^[[:space:]]*co-authored-by:[[:space:]]*.*@(anthropic\.com|claude\.ai|claude\.com|openai\.com|cursor\.(sh|com)|codeium\.com|tabnine\.com|supermaven\.com|sourcegraph\.com|windsurf\.com)' "$msg_file")
+
+if [ -n "$bad" ]; then
+    echo "" >&2
+    echo "  ✗ 提交被拒绝：提交信息里有 AI 助手的 Co-Authored-By 行" >&2
+    echo "" >&2
+    echo "    $bad" >&2
+    echo "" >&2
+    echo "    这会让 GitHub 把该账号算进仓库的 Contributors。" >&2
+    echo "    删掉这一行再提交（已经 commit 了就用 git commit --amend）。" >&2
+    echo "" >&2
+    exit 1
+fi
+
+exit 0
