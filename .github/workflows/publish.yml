@@ -1,0 +1,68 @@
+name: Publish to Marketplace
+
+# 用 GitHub OIDC 的 Trusted Publishing 发布到 VS Code 插件市场，不需要存 PAT。
+#
+# 前置条件（在网页上做一次，不在这个仓库里）：
+#   marketplace.visualstudio.com/manage → 选 publisher maomao23314
+#   → Trusted Publishing → Create
+#       Policy name      : Release workflow
+#       Repository owner : maomao23314
+#       Repository       : 71-vision-studio
+#       Workflow         : publish.yml
+#       Environment      : 留空
+#
+# 为什么不用 PAT：Azure DevOps 的 global PAT 在 2026-12-01 退役；
+# Trusted Publishing 换来的凭证 15 分钟过期、且每次 OIDC token 只能用一次。
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # 换 OIDC token 必需，缺了这一步会 403
+
+    defaults:
+      run:
+        working-directory: extension
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+
+      - name: 安装依赖
+        run: npm ci
+
+      # 只在打 tag 触发时校验；手动触发（workflow_dispatch）不校验，
+      # 因为那时候还没有 tag。
+      - name: 校验 tag 与 package.json 版本一致
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          pkg="v$(node -p "require('./package.json').version")"
+          if [ "$pkg" != "${GITHUB_REF_NAME}" ]; then
+            echo "tag ${GITHUB_REF_NAME} 与 package.json 版本 ${pkg} 不一致，拒绝发布" >&2
+            exit 1
+          fi
+          echo "版本一致：${pkg}"
+
+      # clean + sync-sdk + tsc。extension/sdk/ 和 out/ 都是生成物、不入库，
+      # 所以必须在 CI 里现生成一次，否则打出来的 vsix 是空壳。
+      - name: 构建
+        run: npm run prepackage
+
+      # 本地锁的是 vsce 2.x，没有 --oidc；单独装一个 4.x 来发。
+      - name: 安装支持 OIDC 的 vsce
+        run: npm install --global @vscode/vsce@4.1.0
+
+      - name: 发布
+        run: vsce publish --oidc
