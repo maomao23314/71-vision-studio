@@ -959,6 +959,230 @@ def apply_pic_dir(proj: "Project", cfg: Dict[str, Any]) -> None:
 _STR_MACRO_CACHE: Dict[str, Dict[str, str]] = {}
 
 
+def rel_or_abs(path: str, start: str) -> str:
+    """把 path 显示成「相对 start」的形式；两者不在同一个盘时退回绝对路径。
+
+    ★★ 为什么需要它（一条真实缺陷的修复）★★
+
+      Windows 上 `os.path.relpath()` 在两个路径【不同盘符】时会直接抛
+      `ValueError: path is on mount 'd:', start on mount 'c:'`。
+      它是个纯格式化函数，调用方没人会想到它还能抛异常 —— 于是异常
+      一路冒到 main 的顶层兜底，用户看到的是一句
+          「构建失败：构建脚本内部错误: path is on mount 'd:', ...」
+      而这既不是"脚本 bug"，也不是用户的算法有问题：用户只是把图集
+      放在了 D 盘、工程放在 C 盘（"多个工程共用一份图集"是本插件
+      明确支持的用法，见 README 的「图集目录可以指到工程外」）。
+
+      这条路径的后果还不只是报错难懂 —— 它在【构建阶段】就中断，
+      用户什么都跑不起来，且看不出和自己做的哪一步有关。
+
+    ★ 为什么不是"跨盘就报个友好的错"：
+      跨盘完全合法，没有任何理由拒绝。这里只是把「显示用的相对路径」
+      降级成「显示用的绝对路径」，信息量不降反升
+      （绝对路径反而让用户一眼看出图集到底读的哪儿）。
+
+    ★ 为什么不用 os.path.commonpath 判断：
+      它对混合了相对/绝对、或大小写不同的输入也会抛 ValueError，
+      换一个函数等于换一个坑。直接 try/except 是这里最诚实的写法：
+      "能相对就相对，不能就绝对"，没有第三种意图。
+    """
+    try:
+        return os.path.relpath(path, start)
+    except ValueError:
+        # 跨盘（Windows）或其它无法相对化的情况：原样给绝对路径。
+        return os.path.abspath(path)
+
+
+def probe_system_includes(cc: str) -> Tuple[str, List[str]]:
+    """问编译器自己：目标三元组是什么、系统头文件都在哪。
+
+    返回 (target, [目录…])；探测失败时返回 ("", [])。
+
+    ★★ 为什么必须问编译器，而不是在 clangd 那边"配一下"★★
+
+      clangd 和 clang 是两个独立可执行文件，**用户装哪一个我们控制不了**：
+      插件自己下的是 llvm-mingw（自带完整 MinGW sysroot），
+      但用户可能早就装了官方 LLVM 或 VS 的 clangd，甚至 Linux 版。
+      不同发行版的 clangd 默认目标三元组不同（msvc / gnu / 各自的 sysroot），
+      于是同一份编译数据库在 A 机器上能索引、在 B 机器上一片红。
+
+      唯一稳定的做法是：把**我们的编译器**亲眼报出来的搜索路径
+      原样写进编译数据库。这样无论谁的 clangd 来读，看到的都是
+      与真实构建完全一致的一套头文件 —— 索引结果与"能不能编过"天然一致。
+
+    ★ 为什么用 `-E -v -x c -`：
+      这是 clang 打印搜索路径的标准方式，且**不产生任何目标文件**、
+      不依赖工程内容（空翻译单元即可）。比 `-print-search-dirs` 可靠：
+      后者只报库目录，不含 `#include <...>` 的完整列表。
+    """
+    r = run_cmd([cc, "-E", "-v", "-x", "c", "-"], timeout=PROBE_TIMEOUT_SEC)
+    if r.code != 0:
+        return "", []
+
+    target = ""
+    dirs: List[str] = []
+    in_list = False
+    for raw in r.out.splitlines():
+        line = raw.rstrip()
+        if line.startswith("Target:"):
+            target = line[len("Target:"):].strip()
+            continue
+        if line.strip().startswith("#include <...> search starts here:"):
+            in_list = True
+            continue
+        if in_list:
+            if line.strip().startswith("End of search list"):
+                in_list = False
+                continue
+            s = line.strip()
+            if s and not s.startswith("("):
+                dirs.append(s)
+    return target, dirs
+
+
+def write_compile_db(proj: "Project", cc: str, sources: List[str],
+                     include_dirs: List[str], user_flags: List[str],
+                     base_flags: List[str]) -> Optional[str]:
+    """为 clangd 写一份编译数据库：.scut/compile_commands.json。
+
+    ★★ 为什么需要它（用户报的问题）★★
+
+      插件自带的 clangd 不知道 `-I core/include`、`-I .scut/gen` 这些路径
+      —— 那些只在构建脚本内部存在。于是用户在编辑器里写
+      `#include "scut_sdk.h"` 会立刻标红，`SCUT_DrawLine` 之类的函数
+      跳不过去、也没有补全，看起来像"环境库根本不存在"。
+      而实际上它只是**没被告诉过在哪**。
+
+    ★★ 为什么写进 .scut/ 而不是工程根 ★★
+
+      `compile_commands.json` 是构建产物（内容每次构建都会变：编译器路径、
+      头文件位置、图像尺寸都不同）。放进工程根会被用户提交进 git，
+      变成一份"看起来像源码、其实每次编译都在改"的脏文件。
+      `.scut/` 是生成物目录，模板的 .gitignore 里已经忽略它，
+      `--clean` 也会连它一起清掉 —— 语义完全对齐。
+
+    ★★ 为什么只放【用户的 .c】，不放生成的包装单元 ★★
+
+      `.scut/gen/*.wrapped.c` 是把用户源码 `#include` 进去之后的产物。
+      让 clangd 也索引它们，等于同一个符号被索引两遍：跳转会跳到生成文件里，
+      而且那里是拼接出来的行号，指不回用户的原文件。所以刻意排除。
+
+    ★ 为什么宽高宏不用单独写：它们来自 .scut/gen/scut_config.h，
+      而那个目录已经在 include_dirs 里了 —— 一份真值，不重复。
+    """
+    if not sources:
+        return None
+
+    target, sys_dirs = probe_system_includes(cc)
+
+    def one(src: str) -> Dict[str, Any]:
+        argv: List[str] = [cc] + base_flags + user_flags + list(include_dirs)
+        # 把编译器自己的目标三元组与系统头目录写死进来：
+        # 这样换成任意 clangd（msvc/gnu、任何版本）都能得到同一套解析环境。
+        if target:
+            argv.append("--target=" + target)
+        for d in sys_dirs:
+            argv.append("-isystem")
+            argv.append(d)
+        argv += ["-c", src]
+        return {
+            # directory 必须是绝对路径且存在：clangd 用它解析相对参数。
+            "directory": proj.root,
+            "file": src,
+            "arguments": argv,
+        }
+
+    payload = [one(s) for s in sources]
+    path = os.path.join(proj.scut_dir, "compile_commands.json")
+    # ★ 原子写：clangd 会在我们构建的同时读这个文件，
+    #   半截 JSON 会让它整份丢弃（然后退回"什么都不知道"的状态）。
+    atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
+    return path
+
+
+CLANGD_MARK_BEGIN = "# >>> SCUT-71 视觉仿真环境（自动生成，勿手改这一段）"
+CLANGD_MARK_END = "# <<< SCUT-71"
+
+
+def ensure_clangd_config(proj: "Project", reporter: Reporter) -> Optional[str]:
+    """在工程根写/更新 `.clangd`，让它把 clangd 指到 .scut 下的编译数据库。
+
+    ★★ 为什么不能只写 compile_commands.json 就完事 ★★
+
+      clangd 只会在**源文件的上级目录**里找 `compile_commands.json`。
+      我们的源文件在 `<工程>/code/` 下，而数据库在 `<工程>/.scut/` 里 ——
+      那是同级、不是上级，clangd 永远找不到。
+      `.clangd` 的 `CompilationDatabase` 正是为此存在的开关：
+      它显式告诉 clangd "去这个目录找"。缺了它，前面那份数据库等于白写。
+
+    ★★ 为什么不覆盖用户已有的 .clangd ★★
+
+      `.clangd` 是用户可能自己维护的配置文件（自定义宏、警告级别、编译参数）。
+      直接覆盖 = 把人家辛苦调好的东西删了，且没有任何提示。
+      所以这里只做两件事：
+        · 文件不存在 → 新建一份（只含我们这一小段）；
+        · 已存在     → 把我们那一段用注释标记包起来，**只替换这一段**，
+                      其余内容一个字符都不动（幂等，重复构建不会越加越长）。
+      用户若已经自己指定了 CompilationDatabase，就完全不碰 ——
+      他显然知道自己要什么，我们不该替他做决定。
+    """
+    path = os.path.join(proj.root, ".clangd")
+    block = (
+        "%s\n"
+        "# 让 clangd 去 .scut/ 下读编译数据库（那里有真实的 -I / 宏 / 目标三元组）。\n"
+        "# 这份文件由构建脚本自动维护；这一段之外的内容不会被改动。\n"
+        "CompileFlags:\n"
+        "  CompilationDatabase: .scut\n"
+        "%s\n" % (CLANGD_MARK_BEGIN, CLANGD_MARK_END)
+    )
+
+    old = ""
+    if os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
+                old = f.read()
+        except OSError:
+            return None
+
+        # 用户自己配过编译数据库：尊重他的选择，一个字都不动。
+        stripped = re.sub(r"#.*$", "", old, flags=re.MULTILINE)
+        if "CompilationDatabase" in stripped and CLANGD_MARK_BEGIN not in old:
+            reporter.detail("  已跳过 .clangd：用户自己配置了 CompilationDatabase")
+            return None
+
+    # 先剥掉旧的标记段（可能是上一次构建写的），再决定要不要追加。
+    new = old
+    if CLANGD_MARK_BEGIN in new:
+        new = re.sub(
+            re.escape(CLANGD_MARK_BEGIN) + r".*?" + re.escape(CLANGD_MARK_END) + r"\n?",
+            "", new, flags=re.DOTALL)
+
+    # ★★ 剥完标记段还要把【我们自己上次加的分隔符】一并剥掉 ★★
+    #   否则每构建一次就多一行 `---`：第一次 "…\n---\n<block>"，
+    #   第二次剥掉 block 后剩下 "…\n---\n"，再拼一次 → "…\n---\n---\n<block>"。
+    #   实测确认过：连跑三次会堆出两个空文档分隔符，而 YAML 里连续多个
+    #   `---` 之间是【空文档】——clangd 容忍它，但文件会越长越脏，
+    #   用户打开一看全是莫名其妙的横线。
+    #   所以这里把结尾的空白与 `---` 分隔行一起剥干净，保证幂等。
+    new = re.sub(r"(?:\s*\n?---[ \t]*\n?)+\s*$", "\n", new) if new.strip() else ""
+    new = new.rstrip("\n")
+
+    if new:
+        # 已有内容：用 YAML 的多文档分隔符另起一个片段，绝不与上文粘连。
+        new = new + "\n---\n" + block
+    else:
+        new = block
+
+    if new == old:
+        return path          # 内容没变就不动磁盘（避免无谓的 mtime 变化）
+
+    try:
+        atomic_write_text(path, new)
+    except OSError:
+        return None
+    return path
+
+
 def _read_macro_str(header: str, macro: str) -> str:
     """从 config.h 里读一个字符串宏的字面量（只支持 "..." 形式）。"""
     cache = _STR_MACRO_CACHE.get(header)
@@ -2150,7 +2374,7 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
     # ★ 必须在分支【之前】算好：两个分支都要用它。
     #   （第一版把它写在 if 分支里、else 分支引用，直接 UnboundLocalError，
     #     被 tests/test_glue_edges.py 当场抓住 —— 这正是那套测试存在的意义。）
-    _shown = os.path.relpath(proj.pic_dir, proj.root).replace("\\", "/")
+    _shown = rel_or_abs(proj.pic_dir, proj.root).replace("\\", "/")
 
     if not os.path.isdir(proj.pic_dir):
         reporter.warn(
@@ -2239,6 +2463,27 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
 
     reporter.human("")
 
+    # --- 4b) 给编辑器（clangd）准备编译数据库 ------------------------------
+    #
+    # ★★ 为什么放在编译之前、且失败【不阻断构建】★★
+    #   它唯一的消费者是编辑器的语言服务：写得再对，也不影响能不能编过。
+    #   所以任何异常都只降级成一条 detail（--verbose 才打印），
+    #   绝不能让"生成 IDE 辅助文件"这件事把一个能成功的构建搞失败 ——
+    #   那会是最荒唐的一类因果。
+    #
+    # ★ 放在这里而不是构建末尾：用户点「编译」之后通常立刻回去改代码，
+    #   编译数据库越早刷新，编辑器越早看到新的头文件路径。
+    with timer.stage("生成编辑器索引（clangd）"):
+        try:
+            db_path = write_compile_db(proj, tc.cc, sources, include_dirs,
+                                       user_flags, base_flags)
+            cfg_path = ensure_clangd_config(proj, reporter)
+            if db_path and cfg_path:
+                reporter.detail("  编译数据库: %s" % db_path)
+                reporter.detail("  clangd 配置: %s" % cfg_path)
+        except Exception as exc:  # noqa: BLE001 - 纯锦上添花，绝不影响构建
+            reporter.detail("  跳过 clangd 索引生成：%s" % exc)
+
     # --- 5) 编译 bind 单元 -------------------------------------------------
     # bind 是唯一知道编译期尺寸的地方，改 config.h 只需重编它 + 用户算法，
     # 核心库零重编 —— 这是整套架构的核心收益。
@@ -2279,7 +2524,7 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
                 "%s 里定义了 main()。仿真程序的 main 由后端提供，"
                 "两者会冲突（duplicate symbol: main）。"
                 "\n    code/ 里不该写 main：环境调用哪些函数由配置面板的"
-                "「钩子函数」决定。" % os.path.relpath(src0, proj.root))
+                "「钩子函数」决定。" % rel_or_abs(src0, proj.root))
         for nm0 in user_hook_names:
             pat0 = (r"\bstatic\b[^;{}]*\b" + re.escape(nm0)
                     + r"\s*\(")
@@ -2287,12 +2532,12 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
                 reporter.warn(
                     "%s 里的 %s 看起来是 static 函数。钩子函数必须是非 static 的"
                     " void f(void)，否则接线单元调不到它（链接期会报未定义符号）。"
-                    % (os.path.relpath(src0, proj.root), nm0))
+                    % (rel_or_abs(src0, proj.root), nm0))
 
     # --- 6) 编译用户单元（两遍编译，多线程并行） ---------------------------
     jobs: List[UnitJob] = []
     for src in sources:
-        rel = os.path.relpath(src, proj.code_dir).replace("\\", "/")
+        rel = rel_or_abs(src, proj.code_dir).replace("\\", "/")
         stem = rel[:-2] if rel.lower().endswith(".c") else rel
         flat = stem.replace("/", "__")
         jobs.append(UnitJob(
@@ -2340,7 +2585,7 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
             timer.report()
             return finish(2)
         reporter.human("  结果图数组 : %s（声明在 %s）"
-                       % (out_array, os.path.relpath(out_owner, proj.root)))
+                       % (out_array, rel_or_abs(out_owner, proj.root)))
 
     with timer.stage("编译用户代码（%d 个文件）" % len(jobs)):
         if workers == 1 or len(jobs) == 1:
@@ -2365,7 +2610,7 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
 
     for j in jobs:
         for w in j.warnings:
-            reporter.warn("%s：%s" % (os.path.relpath(j.src, proj.root), w))
+            reporter.warn("%s：%s" % (rel_or_abs(j.src, proj.root), w))
 
     # --- 6) 用户配置错误：立刻停下，原文报出 --------------------------------
     #
@@ -2759,7 +3004,7 @@ def do_doctor(args: argparse.Namespace, reporter: Reporter,
         if sources:
             say("  ✅ code/      : 找到 %d 个 .c 文件" % len(sources))
             for s in sources[:20]:
-                say("       %s" % os.path.relpath(s, proj.root))
+                say("       %s" % rel_or_abs(s, proj.root))
             if len(sources) > 20:
                 say("       … 另有 %d 个" % (len(sources) - 20))
         else:
@@ -2827,7 +3072,7 @@ def do_doctor(args: argparse.Namespace, reporter: Reporter,
                     pics.append(os.path.join(dirpath, n))
         if pics:
             # 顺带报出实际发现到哪几个子目录，便于用户核对组号
-            groups = sorted({os.path.relpath(os.path.dirname(p), proj.pic_dir)
+            groups = sorted({rel_or_abs(os.path.dirname(p), proj.pic_dir)
                              for p in pics})
             say("  ✅ pic/       : 找到 %d 张测试图（%d 个图集：%s）"
                 % (len(pics), len(groups), ", ".join(groups[:6])

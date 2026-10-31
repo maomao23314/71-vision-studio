@@ -790,6 +790,92 @@ for bad in code_leaks:
 ok('测试脚本里没有写死外部测试工程的名字/路径', not code_leaks,
    '共 %d 处' % len(code_leaks))
 
+# ---------------------------------------------------------------------------
+# 21. clangd 索引（0.12.1 修）
+# ---------------------------------------------------------------------------
+# ★★ 这条守的是什么 ★★
+#
+#   用户报："clangd 访问不到仿真环境库，函数无法索引"。
+#   根因是编译数据库从来没被生成过 —— 插件自己的 -I 只活在构建脚本内部，
+#   clangd 一无所知，于是 `#include "scut_sdk.h"` 永远标红。
+#
+#   这套东西有三个环节，缺任何一个都会静默退回"没有索引"：
+#     ① 生成 .scut/compile_commands.json（内容要含真实 -I）
+#     ② 写 .clangd 的 CompilationDatabase 指过去（clangd 只向上找，
+#        .scut 是同级目录，不给这一句它永远找不到）
+#     ③ 不能覆盖用户自己写的 .clangd，也不能越构建越长（幂等）
+#   ①②是纯事实，在源码里断言即可；③是行为，下面直接跑真函数验。
+_bs = read('tools/scut_build.py')
+ok('scut_build.py 生成 clangd 编译数据库', 'def write_compile_db' in _bs)
+ok('scut_build.py 维护 .clangd', 'def ensure_clangd_config' in _bs)
+ok('编译数据库写进 .scut（生成物目录，不污染工程根）',
+   'os.path.join(proj.scut_dir, "compile_commands.json")' in _bs)
+ok('.clangd 用 CompilationDatabase 指向 .scut',
+   'CompilationDatabase: .scut' in _bs)
+# ★ 为什么不索引生成的包装单元：那是把用户源码 include 进来的产物，
+#   索引它等于同一符号两份，跳转会落到拼接出来的生成文件里。
+# ★ 判据要看【代码】而不是注释：本函数的说明里恰好会讲到"排除 wrapped"，
+#   拿 'wrapped' 全文搜索会命中那段注释 —— 一条恒假的断言比没有更糟。
+ok('编译数据库只收用户 .c（排除生成的包装单元）',
+   '[one(s) for s in sources]' in _bs)
+
+# 行为验证：幂等 + 不覆盖用户配置。直接 import 那个脚本跑真函数。
+# ★ 为什么值得真跑：上面几条都是"字符串在不在"，而这条缺陷的形态
+#   恰恰是"字符串都在、行为不对"（连跑两次多一个 --- 分隔符）。
+import importlib.util as _ilu
+_spec = _ilu.spec_from_file_location(
+    '_sb', os.path.join(ROOT, 'tools', 'scut_build.py'))
+_sb = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(_sb)
+
+
+class _Quiet(object):
+    def detail(self, msg):
+        pass
+
+    def human(self, msg):
+        pass
+
+
+import tempfile as _tf
+
+with _tf.TemporaryDirectory() as _td:
+    class _P(object):
+        root = _td
+        scut_dir = os.path.join(_td, '.scut')
+
+    os.makedirs(_P.scut_dir)
+    _cl = os.path.join(_td, '.clangd')
+
+    # ① 空工程：建出来、且内容正确
+    _sb.ensure_clangd_config(_P, _Quiet())
+    _first = io.open(_cl, encoding='utf-8').read()
+    ok('空工程会建出 .clangd 且指向 .scut',
+       'CompilationDatabase: .scut' in _first)
+
+    # ② 连跑 5 次：内容必须完全不变（幂等）
+    for _ in range(5):
+        _sb.ensure_clangd_config(_P, _Quiet())
+    _after = io.open(_cl, encoding='utf-8').read()
+    ok('.clangd 幂等（连跑 5 次不累积 --- 分隔符）', _after == _first,
+       '长度 %d → %d' % (len(_first), len(_after)))
+
+    # ③ 用户已有配置：一个字符都不许动
+    io.open(_cl, 'w', encoding='utf-8', newline='').write(
+        '# 用户自己的\nCompileFlags:\n  CompilationDatabase: my_dir\n')
+    _user = io.open(_cl, encoding='utf-8').read()
+    _sb.ensure_clangd_config(_P, _Quiet())
+    ok('用户自己配了 CompilationDatabase 时完全不碰 .clangd',
+       io.open(_cl, encoding='utf-8').read() == _user)
+
+    # ④ 用户有其它配置（没有 CDB）：保留原内容 + 追加我们那段
+    io.open(_cl, 'w', encoding='utf-8', newline='').write(
+        '# 用户自己的\nCompileFlags:\n  Add:\n    - -Wall\n')
+    _sb.ensure_clangd_config(_P, _Quiet())
+    _merged = io.open(_cl, encoding='utf-8').read()
+    ok('用户已有 .clangd 时保留原内容并追加',
+       '# 用户自己的' in _merged and 'CompilationDatabase: .scut' in _merged)
+
 print('\n' + '=' * 60)
 if FAIL == 0:
     print('全部 %d 项通过' % PASS)

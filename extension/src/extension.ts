@@ -617,7 +617,7 @@ async function commandNewProject(context: vscode.ExtensionContext): Promise<void
     }
 
     const target = path.join(picked[0].fsPath, name.trim());
-    // ★ README-pic.txt 是可选的：找不到也照样建工程（pic/1/ 空目录仍会创建），
+    // ★ README-pic.txt 是可选的：找不到也照样建工程（pic/ 空目录仍会创建），
     //   不因为少一份说明文档就让「新建工程」整个失败。
     const r = createProjectFromTemplate(template, target, locatePicReadme(context.extensionUri));
     if (!r.ok) {

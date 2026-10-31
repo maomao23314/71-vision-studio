@@ -88,6 +88,47 @@ if 'configurationDefaults' not in contrib:
     fail('★ configurationDefaults 被误删了 —— 它用来关掉 cpptools 的 '
          'intellisense，不是本插件自己的配置项')
 
+# ------------------------------------------------------------------
+#  A2. 环境 SDK 必须标记为只读（0.12.1 加）
+# ------------------------------------------------------------------
+# ★★ 这条守的是什么 ★★
+#
+#   用户能在 VS Code 里跳进 sdk/core/include/scut_draw.h，这是好事；
+#   但插件目录里的那份 SDK 是【环境实现】，不是用户代码。
+#   用户手滑改一行（或让 AI 助手"顺手修一下"），后果是：
+#     · 插件升级时被覆盖 → 改动静默丢失，白改
+#     · 改坏了 → 编译报一堆看不懂的错，而根因是他自己动过的头文件
+#   所以把 <扩展目录>/sdk/** 标成只读：能看、能跳、能复制，改不了。
+#
+# ★ 为什么用 files.readonlyInclude 而不是文件系统只读属性：
+#   chmod / attrib 要动磁盘权限，插件卸载后残留；而这是 VS Code 侧
+#   的"编辑器只读"，随插件安装/卸载自动生效/失效，零残留。
+#   而且用户想改时点一下就能临时解锁（VS Code 自带的会话内切换），
+#   比被文件系统拒绝更讲道理。
+_cd = contrib.get('configurationDefaults', {})
+_ro = _cd.get('files.readonlyInclude')
+if not isinstance(_ro, dict) or not _ro:
+    fail('★ configurationDefaults 里没有 files.readonlyInclude —— '
+         '插件自带的 SDK 会被用户改坏（改坏了还查不出根因）')
+else:
+    _pat = [k for k, v in _ro.items() if v is True]
+    ok_pat = [p for p in _pat if 'sdk' in p]
+    if not ok_pat:
+        fail('★ files.readonlyInclude 里没有指向 sdk 的模式：%s' % _pat)
+    else:
+        note.append('SDK 已标记只读：%s' % ', '.join(ok_pat))
+        # ★ 模式必须【限定在插件安装目录】里，不能写成 **/sdk/**
+        #   那样会把用户自己的 sdk/ 目录（车载工程里完全可能有）也锁掉。
+        for p in ok_pat:
+            if 'scut-71-vision-studio' not in p:
+                fail('★ 只读模式没有限定在插件目录内：%s\n'
+                     '    写成 **/sdk/** 会误伤用户自己的 sdk/ 目录。' % p)
+
+# cpptools 那条不能被我们挤掉（同一个对象，两个键都要在）。
+if 'C_Cpp.intelliSenseEngine' not in _cd:
+    fail('★ configurationDefaults 里 cpptools 那条被挤掉了 —— '
+         '关不掉 cpptools 的 intellisense 会和 clangd 抢补全')
+
 # ==================================================================
 #  B. 源码里不许再读 VS Code 的 scut71.* 设置
 # ==================================================================

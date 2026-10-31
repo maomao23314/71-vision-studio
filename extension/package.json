@@ -2,7 +2,7 @@
   "name": "scut-71-vision-studio",
   "displayName": "SCUT-71 Vision Studio",
   "description": "智能车视觉仿真环境 —— 只写算法，其余交给环境",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "publisher": "maomao23314",
   "license": "GPL-3.0",
   "repository": {
@@ -255,7 +255,10 @@
       }
     ],
     "configurationDefaults": {
-      "C_Cpp.intelliSenseEngine": "disabled"
+      "C_Cpp.intelliSenseEngine": "disabled",
+      "files.readonlyInclude": {
+        "**/*scut-71-vision-studio*/sdk/**": true
+      }
     }
   },
   "scripts": {

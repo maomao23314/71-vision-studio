@@ -316,19 +316,29 @@ export interface CreateProjectResult {
 }
 
 /**
- * 把模板拷到 targetDir，并补出空的 pic/1/ 图集目录。
+ * 把模板拷到 targetDir，并补出空的 pic/ 图集目录。
  *
  * ★ 安全约束：目标目录若已存在【且有内容】就直接拒绝，绝不覆盖用户文件。
  *   学生把算法写在 code/ 里，误覆盖一次就是灾难。宁可多问一句。
  *
  * ★ 为什么 pic/ 目录要由插件补出来，而不是放进模板里：
  *   模板里【不该有图片】—— 用哪些图是用户自己的数据，不是环境能替他决定的。
- *   但目录结构本身要能被发现：留一个空的 pic/1/ 加上一份 README-pic.txt，
+ *   但目录结构本身要能被发现：留一个空的 pic/ 加上一份 README-pic.txt，
  *   用户一眼就知道"图放这儿、怎么编号"，而不会被塞一组别人的图误导。
  *   （曾经的模板带 36 张 BMP，831 KB，既占了安装包体积，
  *     又暗示"这组图才是标准"，实际上换台车就完全不适用。）
  *
- * @param picReadme 可选：README-pic.txt 的路径。给了就拷进 pic/1/，没给就跳过。
+ * ★★ 为什么建的是 pic/ 而不是 pic/1/（0.12.1 修）★★
+ *   pic.dir 留空时的默认值就是 <工程根>/pic（见 project.ts 的
+ *   `fromProjectConfig ?? fromLegacyConfig ?? 'pic'`）。而旧代码建的却是
+ *   pic/1/，README 里还教用户"图放 pic/1、去面板把图集目录填成 pic/1"。
+ *   用户照着说明把图放进 pic/1/ 却漏了去面板改那一项 —— 仿真一张也读不到，
+ *   画面全黑，构建只警告"目录里没有图片"。也就是【插件建出来的目录】和
+ *   【插件默认读的目录】不是同一个，说明本身就是陷阱。
+ *   现在两者对齐：建 pic/，默认也读 pic/。子目录（pic/1、pic/2…）照样支持，
+ *   但那要用户自己显式去面板填 —— 这个决定不该由插件替他默认做掉。
+ *
+ * @param picReadme 可选：README-pic.txt 的路径。给了就拷进 pic/，没给就跳过。
  */
 export function createProjectFromTemplate(
     templateDir: string,
@@ -375,15 +385,17 @@ export function createProjectFromTemplate(
         };
         walk(templateDir, dst);
 
-        // 补出空的图集目录 pic/1/，并放一份放法说明。
+        // 补出空的图集目录 pic/，并放一份放法说明。
         // ★ 先建空目录再放说明：即使 README-pic.txt 缺失（理论上不该发生），
-        //   pic/1/ 这个结构本身也要在，否则用户不知道该往哪放图。
-        const picGroupDir = path.join(dst, 'pic', '1');
-        fs.mkdirSync(picGroupDir, { recursive: true });
-        copied.push('pic/1/');
+        //   pic/ 这个结构本身也要在，否则用户不知道该往哪放图。
+        // ★ 目录名必须与「pic.dir 留空时的默认值」一致（都是 <root>/pic），
+        //   理由见本函数头部那段说明 —— 建的和读的不是同一个，说明就成了陷阱。
+        const picDir = path.join(dst, 'pic');
+        fs.mkdirSync(picDir, { recursive: true });
+        copied.push('pic/');
         if (picReadme && isFile(picReadme)) {
-            fs.copyFileSync(picReadme, path.join(picGroupDir, 'README-pic.txt'));
-            copied.push('pic/1/README-pic.txt');
+            fs.copyFileSync(picReadme, path.join(picDir, 'README-pic.txt'));
+            copied.push('pic/README-pic.txt');
         }
 
         return {
@@ -393,7 +405,7 @@ export function createProjectFromTemplate(
                 + `    已复制：${copied.join('、')}\n`
                 + '    下一步：打开这个文件夹，按 Ctrl+Shift+B 编译，再按 → 看下一张；'
                 + '图像尺寸、钩子函数等在侧边栏的 ⚙ 配置面板里改。'
-                + '把【你自己的】测试图按连续编号放进 pic/1/（放法见 pic/1/README-pic.txt）。',
+                + '把【你自己的】测试图按连续编号放进 pic/（放法见 pic/README-pic.txt）。',
         };
     } catch (e) {
         return {
