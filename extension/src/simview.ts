@@ -16,10 +16,13 @@
 
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
+import * as fs from 'fs';
 import { SimSessionImpl } from './simsession';
 import { getSimLogChannel } from './extension';
 import type { FramePacket, VariableManifest, VariableSnapshot, WatchedVariable } from './types';
-import { defaultConfig, readConfig } from './projectconfig';
+import { configPath, defaultConfig, readConfig } from './projectconfig';
+import type { ProjectConfig } from './projectconfig';
+import { OutPicSaver } from './outpic';
 
 /** 视图 id（必须与 package.json 的 contributes.views 一致）。 */
 export const SIM_VIEW_ID = 'scut71.simview';
@@ -96,6 +99,16 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
     private lastLoadError: string | undefined;
     /** 上次弹加载失败通知的时间戳（节流用，毫秒）。 */
     private lastLoadErrorAt = 0;
+    /**
+     * 输出图保存器（OutPic_1 / OutPic_2）。
+     *
+     * ★ 放在视图上而不是会话里：它属于「呈现/留档」，与进程怎么起、
+     *   协议长什么样无关。会话那层只管把帧读出来交给上面。
+     */
+    private readonly outPic = new OutPicSaver();
+    /** 「输出图保存」配置的缓存（每帧都要用，见 outputConfig）。 */
+    private outputCfg: ProjectConfig['output'] | undefined;
+    private outputCfgKey = '';
     private disposables: vscode.Disposable[] = [];
 
     constructor(extensionUri: vscode.Uri, deps: SimViewDeps) {
@@ -472,6 +485,66 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
     }
 
     /**
+     * 把这一帧的画面存成工程根下的 OutPic_1 / OutPic_2。
+     *
+     * ★★ 为什么放在 onFrame 的【最前面】而不是 ACK 之后 ★★
+     *   计时口径必须只反映用户算法：processUs 由后端在 PROCESS 阶段测，
+     *   与我们什么时候写文件无关；但如果把编码+写盘放在 ACK 之后，
+     *   它就会插在"下一帧被放行"之前，把一帧的墙钟时间拉长 ——
+     *   用户看到的画面节奏会变慢，还找不到原因。
+     *   放在最前面 + OutPicSaver 内部的微任务排队，编码才真的落到
+     *   ACK 之后去跑（详见 outpic.ts 的 save）。
+     *
+     * ★ 保存失败不影响画面：写不出来只是少两个文件，
+     *   不能让"磁盘满了"变成"仿真面板不出图"。
+     */
+    private saveOutputPictures(f: FramePacket): void {
+        const root = this.deps.projectRoot();
+        if (!root) {
+            return;
+        }
+        const out = this.outputConfig(root);
+        if (!out.saveImages) {
+            return;
+        }
+        this.outPic.save(root, f.width, f.height, out.format,
+            f.rgb, f.rgb2, (msg) => {
+                this.deps.log(`[输出图] 保存失败：${msg}`);
+            });
+    }
+
+    /**
+     * 取「输出图保存」那一组配置，带缓存。
+     *
+     * ★ 为什么必须缓存：这是每帧都要问一次的问题，而 readConfig 是
+     *   同步读盘 + JSON.parse。跑起来一秒几十帧，等于每秒几十次
+     *   磁盘读取 —— 用户关掉保存之后它照样在读，纯粹白烧。
+     *
+     * ★ 缓存键用【文件路径 + 修改时间】而不是"只在面板保存时失效"：
+     *   用户可以直接在编辑器里改 scut_project.json（面板也提供了
+     *   「打开 JSON」），那条路不经过我们的任何代码。用 mtime 判据，
+     *   两条入口都能立即生效，且不需要谁记得去通知谁 —— 少一处耦合。
+     *   statSync 失败（文件不存在）按"用默认值"处理，与 readConfig 一致。
+     */
+    private outputConfig(root: string): ProjectConfig['output'] {
+        const file = configPath(root);
+        let stamp = 0;
+        try {
+            stamp = fs.statSync(file).mtimeMs;
+        } catch {
+            stamp = 0;              /* 没有配置文件：用默认值 */
+        }
+        if (this.outputCfg && this.outputCfgKey === root + '|' + stamp) {
+            return this.outputCfg;
+        }
+        const { config } = readConfig(root);
+        const out = (config ?? defaultConfig()).output;
+        this.outputCfg = out;
+        this.outputCfgKey = root + '|' + stamp;
+        return out;
+    }
+
+    /**
      * 一帧到手 → 推给【sim】类视图。
      *
      * ★ 没有可见的 sim 视图时【立刻 ACK】而不是干等：
@@ -482,6 +555,8 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
     private onFrame(f: FramePacket): void {
         this.lastTiming = f.timing;
         this.lastFrameIndex = f.index;
+
+        this.saveOutputPictures(f);
 
         // ★ 加载失败弹通知（用户原话："是否可以在图片加载失败后弹出一个
         //   VS Code 右下角那种窗口"）。

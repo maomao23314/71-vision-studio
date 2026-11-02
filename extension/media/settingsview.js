@@ -248,8 +248,32 @@
             return box;
         }
 
+        // ★ 'select'：只能从给定的几个值里挑（例如输出图格式 bmp/png）。
+        //   做成下拉而不是输入框，是因为"填错"这个状态根本不该存在 ——
+        //   用户手打 ".jpg" 或 "PNG " 会得到一个打不开的文件，
+        //   而报错信息完全指不到配置上。
+        if (f.kind === 'select') {
+            const sel = document.createElement('select');
+            const opts = f.options || [];
+            for (const o of opts) {
+                const el = document.createElement('option');
+                el.value = o.value;
+                el.textContent = o.label || o.value;
+                sel.appendChild(el);
+            }
+            // ★ 当前值不在选项里时（手改过配置）回落到第一项，
+            //   而不是让下拉框显示空白 —— 空白会让人以为"没配置"。
+            const has = opts.some((o) => o.value === v);
+            sel.value = has ? v : (opts.length ? opts[0].value : '');
+            sel.addEventListener('change', () => {
+                setValue(cfg, f.path, sel.value);
+                markDirty();
+            });
+            return sel;
+        }
+
         // ★ 'file' 必须与 'folder' 合并判断（一条真实缺陷的修复）：
-        //   本函数的分支顺序是 bool → lines → number → folder → 兜底 text。
+        //   本函数的分支顺序是 bool → lines → number → select → folder → 兜底 text。
         //   原先这里只判 'folder'，而 configfields.ts 里 pythonPath 的
         //   kind 是 'file' —— 于是它永远落到 text 兜底，
         //   下面两句针对 'file' 写的 placeholder / 按钮 title 成了不可达代码，

@@ -103,9 +103,13 @@
 #  include <windows.h>
 #  include <direct.h>       /* _mkdir —— 建帧输出目录 */
 #else
-#  include <sys/stat.h>     /* mkdir */
 #  include <sys/types.h>
 #endif
+/* ★ <sys/stat.h> 两个平台都要，所以放在平台分支【外面】：
+ *   建帧输出目录的 mkdir() 用它（仅 POSIX），
+ *   而 pic_mirror_to_project 取源图修改时间用的 stat() 两个平台都用。
+ *   放在分支里的话 Windows 侧会缺 stat() 的声明。 */
+#include <sys/stat.h>
 
 /* --- 由 bind 单元提供（它是唯一知道编译期尺寸的地方） ---
  * ★ 契约声明统一在 core/include/scut_bind.h 里，本文件原先【手写 extern】，
@@ -900,6 +904,212 @@ static int pic_file_exists(const char *path)
 }
 
 /* --------------------------------------------------------------------------
+ *  「输入图副本」：把当前这张图复制到 <工程根>/Input_pic.<ext>
+ *
+ * ★ 为什么要有这一步（用户要求，2026-11）：
+ *   环境【真正读的是工程根下这份副本】，而不是直接读 pic/ 里那个原图。
+ *   于是用户随时能在工程根找到"这一帧到底喂了什么"，也可以直接
+ *   改这个副本、让仿真用改过的那张（后续要做的图像编辑器就靠这条）。
+ *
+ * ★★ 复制与解码的先后顺序是契约，不能挪 ★★
+ *   本函数只负责"把原图搬到 Input_pic"并交回副本路径，
+ *   调用方（scut_pic_load）随后【从副本解码】。两件事必须成对出现：
+ *     · 只复制、仍读原图  → 用户手改 Input_pic 不会生效，
+ *       他会以为"我改了这张图，仿真该跟着变"，实际什么都没变；
+ *     · 先复制、再读副本  → Input_pic 就是真正的输入源。
+ *   第二种才是用户要的语义。所以本函数【返回副本路径】，由调用方去解码。
+ *
+ * ★ 为什么翻页/跳图/测速/--advance 都不用改：
+ *   它们全都只调 scut_pic_load()，而"换图 = 覆盖 Input_pic 再解码"
+ *   就发生在那一处。图集编号规则、多目录、后缀优先级全部原样保留。
+ *
+ * ★★ 两层「不重复搬运」，各自守不同的承诺（缺一不可）★★
+ *
+ *   第一层（上面的快路径，进程内）：同一张图被连续加载 → 跳过复制。
+ *     这一层【不是优化，是语义】：用户手改 Input_pic 之后再加载同一张图，
+ *     源文件三项都没变 → 跳过 → 解码器读到他改过的那张。
+ *     若把它去掉，每次加载都会从 pic/ 重新覆盖，改副本永远不生效，
+ *     后面要做的图像编辑器也就无从谈起。
+ *
+ *   第二层（下面的逐字节比对，跨进程）：源变了但内容其实一样 → 跳过写。
+ *     用户关掉仿真再打开，静态变量全清空，第一层失效；
+ *     若没有这一层，每开一次就把一模一样的副本重写一遍。
+ *     在同步盘（OneDrive/坚果云）上那会被当成"文件被修改"触发一次上传，
+ *     而用户什么都没改。读一遍 23 KB 远便宜于写一遍 + 一次云同步。
+ *
+ *   ★ 为什么第二层不会覆盖用户改过的副本：
+ *     用户改完副本再加载同一张图，走的是第一层（源文件三项没变），
+ *     根本到不了这里。第二层只在"源文件确实变了"或"新进程"时跑，
+ *     而这两种情况下副本本来就该被刷新。
+ *
+ * ★ 复制失败时【回落到读原图】，而不是让仿真跑不起来：
+ *   工程目录只读、磁盘满、杀毒软件锁文件 —— 任何一种都不该中断仿真。
+ *   此时行为退回到"直接读图集"，与没有这个功能时完全一致。
+ *
+ * 返回 1 = 副本可用（out 里是它的路径）；0 = 没做成，调用方应读原图。
+ * -------------------------------------------------------------------------- */
+static int pic_mirror_to_project(const char *src, char *out, size_t out_cap)
+{
+    static char s_last_src[SCUT_PATH_MAX];
+    static long s_last_size = -1;
+    static long s_last_mtime = -1;
+    static int  s_warned;
+    char        dst[SCUT_PATH_MAX];
+    char        root[SCUT_PATH_MAX];
+    char        ext[64];
+    const char *dot;
+    struct stat st;
+    FILE       *fi;
+    FILE       *fo;
+    long        size;
+    long        mtime;
+    long        n;
+    int         k;
+    int         ok;
+    char        buf[8192];
+
+    if (src == NULL || src[0] == '\0' || s_proj_root[0] == '\0' ||
+        out == NULL || out_cap == 0) {
+        return 0;
+    }
+
+    /* 后缀原样带过去：Input_pic.bmp / Input_pic.png。
+     * ★ 不带后缀会让 Windows 完全无法预览（用户明确要求"能直接看"），
+     *   而改名成固定的 .bmp 又会误导人 —— 内容其实是 PNG 的话，
+     *   双击打开就是一句"文件已损坏"。 */
+    dot = strrchr(src, '.');
+    if (dot != NULL && strlen(dot) < sizeof(ext)) {
+        snprintf(ext, sizeof(ext), "%s", dot);
+    } else {
+        ext[0] = '\0';
+    }
+
+    /* 工程根可能带末尾分隔符，拼之前先统一去掉，免得出现 "D:/p//Input_pic.bmp" */
+    snprintf(root, sizeof(root), "%s", s_proj_root);
+    path_strip_trailing_sep(root);
+
+    k = snprintf(dst, sizeof(dst), "%s/Input_pic%s", root, ext);
+    if (k < 0 || (size_t)k >= sizeof(dst)) {
+        return 0;                   /* 路径过长：不做任何截断写，回落到原图 */
+    }
+    if ((size_t)k >= out_cap) {
+        return 0;                   /* 调用方缓冲放不下，同样回落 */
+    }
+    /* 副本路径先交给调用方：即使下面判定"内容没变、不必重写"，
+     * 副本也已经存在，调用方照样可以从它解码。 */
+    memcpy(out, dst, (size_t)k + 1u);
+
+    fi = fopen(src, "rb");
+    if (fi == NULL) {
+        return 0;                   /* 源图都打不开，加载本身会报错，这里不重复报 */
+    }
+    /* 取大小与修改时间：两者都拿不到时按"一定变了"处理（安全侧）。 */
+    size = -1;
+    mtime = -1;
+    if (fseek(fi, 0, SEEK_END) == 0) {
+        size = ftell(fi);
+        if (fseek(fi, 0, SEEK_SET) != 0) {
+            size = -1;
+        }
+    }
+    /* ★ 用 stat() 而不是 fstat(fileno())：
+     *   fileno 是 POSIX 名字，MSVC 上叫 _fileno，为它再引一个平台分支
+     *   不值得。stat() 在 MinGW 与 POSIX 上都有（见文件头的 include）。
+     *   拿不到就保持 -1，等价于"一定变了"，宁可多拷一次也不留旧图。 */
+    if (stat(src, &st) == 0) {
+        mtime = (long)st.st_mtime;
+    }
+
+    if (s_last_src[0] != '\0' && strcmp(s_last_src, src) == 0 &&
+        size >= 0 && size == s_last_size && mtime == s_last_mtime) {
+        fclose(fi);
+        return 1;                   /* 同一张图、内容没变：已拷过，副本就是它 */
+    }
+
+    /* ---- 第二层：跨进程的"内容相同就不写"（理由见函数头）----
+     * ★ 判据里的 size >= 0 是必须的：源文件大小都拿不到时，
+     *   下面的逐块比对会把"两边都读空"误判成"完全相同"，
+     *   于是副本停在一个可能已经损坏的旧版本上。 */
+    if (size >= 0) {
+        FILE *fd = fopen(dst, "rb");
+        if (fd != NULL) {
+            char buf2[8192];
+            int  same = 1;
+            while (same) {
+                size_t a = fread(buf,  1, sizeof(buf),  fi);
+                size_t b = fread(buf2, 1, sizeof(buf2), fd);
+                if (a != b) {
+                    same = 0;       /* 长度不同（含一边提前读完） */
+                } else if (a == 0) {
+                    break;          /* 两边同时读完：完全相同 */
+                } else if (memcmp(buf, buf2, a) != 0) {
+                    same = 0;
+                }
+            }
+            fclose(fd);
+            if (same) {
+                fclose(fi);
+                snprintf(s_last_src, sizeof(s_last_src), "%s", src);
+                s_last_size  = size;
+                s_last_mtime = mtime;
+                return 1;           /* 目标已经是这张图，不重写 */
+            }
+            /* 不同：回到源文件开头，走下面的正常复制 */
+            if (fseek(fi, 0, SEEK_SET) != 0) {
+                fclose(fi);
+                return 0;
+            }
+        }
+    }
+
+    fo = fopen(dst, "wb");
+    if (fo == NULL) {
+        fclose(fi);
+        if (!s_warned) {
+            s_warned = 1;
+            fprintf(stderr,
+                "提示: 无法在工程根写入输入图副本（%s）。\n"
+                "      仿真会继续，但改为直接读图集里的原图。\n"
+                "      原因通常是工程目录只读、磁盘已满，或文件被杀毒软件占用。\n", dst);
+        }
+        return 0;
+    }
+
+    ok = 1;
+    while ((n = (long)fread(buf, 1, sizeof(buf), fi)) > 0) {
+        if (fwrite(buf, 1, (size_t)n, fo) != (size_t)n) {
+            ok = 0;
+            break;
+        }
+    }
+    if (ferror(fi)) {
+        ok = 0;
+    }
+    if (fclose(fo) != 0) {
+        ok = 0;
+    }
+    fclose(fi);
+
+    if (!ok) {
+        if (!s_warned) {
+            s_warned = 1;
+            fprintf(stderr,
+                "提示: 写输入图副本失败（%s），本次仿真改为读图集原图。\n", dst);
+        }
+        /* ★ 半截文件不能当输入源用：删掉它。
+         *   留着的话下一次会从一个残缺的副本解码 —— 画面是花的，
+         *   而错误信息指向的地方（源图）完全正常。 */
+        remove(dst);
+        return 0;
+    }
+
+    snprintf(s_last_src, sizeof(s_last_src), "%s", src);
+    s_last_size  = size;
+    s_last_mtime = mtime;
+    return 1;
+}
+
+/* --------------------------------------------------------------------------
  *  路径拼接
  *
  *  ★ 为什么要手写而不是拼字符串：
@@ -1464,6 +1674,8 @@ static int scut_pic_load(int index)
     int      w;
     int      h;
     char     path[SCUT_PATH_MAX];
+    char     mirror[SCUT_PATH_MAX];   /* 工程根的 Input_pic.<ext> 副本 */
+    const char *load_path;            /* 真正交给解码器的那一条（见下面的说明） */
     char     ext_buf[64];
     int      k;
     int      rc = SCUT_FRAME_ERR_OPEN;
@@ -1538,8 +1750,35 @@ static int scut_pic_load(int index)
             continue;
         }
 
-        rc = scut_frame_load_image(path, dst, w, h, w);
+        /* ★★ 先复制到工程根，再【从副本解码】★★
+         *
+         * 顺序不能反，也不能只复制不解码 —— 那两种写法看起来一样，
+         * 差别却正是这个功能存在的意义：
+         *   · 只复制、仍读原图  → 用户手改 Input_pic 不会生效，
+         *     它会以为"我改了这张图，仿真该跟着变"，实际什么都没变。
+         *   · 先复制、再读副本  → Input_pic 就是真正的输入源，
+         *     改了它、下次加载就会用改过的那张。
+         *
+         * ★ 复制失败时回落到读原图：这是【安全侧】的降级 ——
+         *   工程目录只读 / 磁盘满 / 杀毒软件锁文件，都不该让仿真跑不起来。
+         *   此时行为退回到"直接读图集"，与没有这个功能时一致。
+         *
+         * ★ 为什么"镜像失败"不报 loadError：
+         *   loadError 的含义是"这一帧的输入是黑的"。而这里图照样读到了，
+         *   画面是对的 —— 只是没留下副本。把便利功能的失败说成加载失败，
+         *   会让用户去查一张根本不坏的图。 */
+        load_path = path;
+        if (pic_mirror_to_project(path, mirror, sizeof(mirror))) {
+            load_path = mirror;
+        }
+
+        rc = scut_frame_load_image(load_path, dst, w, h, w);
         if (rc == SCUT_FRAME_OK) {
+            /* ★ s_pic_path 记【原图】而不是副本：
+             *   JSON 的 "pic" 与界面那一行「第 N 帧 · …」要回答的是
+             *   "这是图集里的第几张"，而不是"副本落在哪"。
+             *   报副本路径的话，每张图都显示成同一个 Input_pic.bmp，
+             *   翻页时看不出任何变化 —— 用户会以为翻页没生效。 */
             snprintf(s_pic_path, sizeof(s_pic_path), "%s", path);
             loaded = 1;
             break;

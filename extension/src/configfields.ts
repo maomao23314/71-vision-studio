@@ -28,9 +28,10 @@ export type SectionKey =
     | 'hooks'
     | 'pic'
     | 'run'
+    | 'output'
     | 'toolchain';
 
-export type FieldKind = 'text' | 'number' | 'lines' | 'bool' | 'folder' | 'file';
+export type FieldKind = 'text' | 'number' | 'lines' | 'bool' | 'folder' | 'file' | 'select';
 
 export interface FieldDef {
     /** 在 scut_project.json 里的路径 */
@@ -43,6 +44,15 @@ export interface FieldDef {
     unit?: string;
     /** 是否需要重新编译才生效 */
     rebuild?: boolean;
+    /**
+     * kind === 'select' 时的选项。
+     *
+     * ★ 为什么让用户选而不是让他填：
+     *   后缀只有 bmp / png 两个合法值，填错（".jpg"、"PNG "、忘了点）
+     *   的后果是写出一个打不开的文件，而报错信息完全指不到配置上。
+     *   做成下拉之后，"填错"这个状态根本不存在。
+     */
+    options?: Array<{ value: string; label: string }>;
 }
 
 export interface SectionDef {
@@ -79,6 +89,7 @@ export const SECTIONS: SectionDef[] = [
     },
     { key: 'pic', keys: ['pic'], title: '测试图集', note: '改完立即生效' },
     { key: 'run', keys: ['run'], title: '运行期', note: '改完立即生效' },
+    { key: 'output', keys: ['output'], title: '输出图保存', note: '改完立即生效' },
     { key: 'toolchain', keys: ['toolchain'], title: '工具链', note: '本机环境' },
 ];
 
@@ -159,6 +170,20 @@ export const FIELDS: FieldDef[] = [
     {
         path: ['run', 'benchRepeat'], label: '「测速」重复次数', kind: 'number',
         hint: '点「测速」时对同一张图重复几遍取平均周期数',
+    },
+    {
+        path: ['output', 'saveImages'], label: '自动保存输出图', kind: 'bool',
+        hint: '每跑完一帧，把画面存成工程根目录下的 OutPic_1、OutPic_2。'
+            + '★ 重复运行只覆盖同一个文件，不会越存越多；保存不计入计时。'
+            + '★ 算法没画图片2 时不会生成 OutPic_2',
+    },
+    {
+        path: ['output', 'format'], label: '输出图格式', kind: 'select',
+        options: [
+            { value: 'bmp', label: 'BMP（Windows 双击直接看，文件大）' },
+            { value: 'png', label: 'PNG（体积小，看图软件都能开）' },
+        ],
+        hint: '两种都是无损格式。BMP 更通用，PNG 体积大约是 BMP 的 1/5',
     },
     // ★ 这里【故意】没有 view 段 ★
     //   初版加了 showTiming / showVariables / showLog / pickPersist 四个开关，

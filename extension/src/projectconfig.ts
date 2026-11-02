@@ -101,6 +101,35 @@ export interface ProjectConfig {
         /** 「测速」按钮对同一张图重复几遍取平均。 */
         benchRepeat: number;
     };
+    /**
+     * 输出图自动保存（OutPic_1 / OutPic_2）。
+     *
+     * ★ 为什么单独一段而不是塞进 run：
+     *   这两项只影响"要不要往工程根写文件"，与仿真跑多少遍、
+     *   测速重复几次毫无关系。混进 run 之后，用户想关掉保存
+     *   就得在一堆计时相关的项里找一个不相关的开关。
+     *
+     * ★ 为什么要有 autoSave 这个开关（而不是永远保存）：
+     *   写盘发生在每帧的收尾路径上，而有的人只想要画面、不想要文件
+     *   （例如把工程放在同步盘里，多两个文件会一直触发同步）。
+     *   默认开 —— 用户的原话是"默认打开"。
+     */
+    output: {
+        /**
+         * 每帧把图片1/图片2 存到工程根的 OutPic_1 / OutPic_2。
+         *
+         * ★ 名字刻意【不叫】autoSave：插件里已经有一个"自动保存"，
+         *   指的是"配置面板改完自动落盘到 scut_project.json"，
+         *   而那是【本机本用户】的偏好（存在 globalState，绝不能进工程 JSON，
+         *   否则别人 clone 下来会多一个与他无关的开关）。
+         *   两者同名但语义无关，混在一起看代码的人一定会问
+         *   "到底哪个 autoSave"。这里说的是"这个工程跑完要不要存图"，
+         *   属于工程级行为，所以叫 saveImages。
+         */
+        saveImages: boolean;
+        /** 保存的后缀：'bmp' 或 'png'。留空按 bmp 处理。 */
+        format: string;
+    };
     // ★ 这里【故意】没有旧的 view 段 ★
     //   0.9.4 曾加了 showTiming / showVariables / showLog / pickPersist
     //   四项，但全项目没有任何代码读取它们 —— 面板一直按自己的方式显示。
@@ -164,6 +193,7 @@ export function defaultConfig(): ProjectConfig {
         hooks: { init: [], frame: [], post: [] },
         pic: { dir: '', ext: '', start: 1 },
         run: { processRepeat: 1, benchRepeat: 1000 },
+        output: { saveImages: true, format: 'bmp' },
         toolchain: { path: '', pythonPath: '', autoWatch: true,
                      watchExclude: '', watchMaxElems: 0 },
     };
@@ -209,6 +239,7 @@ export function normalizeConfig(raw: unknown): ProjectConfig {
     const hooks = asRecord(root.hooks) ?? {};
     const pic = asRecord(root.pic) ?? {};
     const run = asRecord(root.run) ?? {};
+    const out = asRecord(root.output) ?? {};
     const tc = asRecord(root.toolchain) ?? {};
 
     const str = (v: unknown, fb: string): string =>
@@ -241,6 +272,16 @@ export function normalizeConfig(raw: unknown): ProjectConfig {
         run: {
             processRepeat: count(run.processRepeat, 1),
             benchRepeat: count(run.benchRepeat, 1000),
+        },
+        output: {
+            saveImages: bool(out.saveImages, d.output.saveImages),
+            /* ★ 只认 bmp / png 两个值，其余一律按 bmp。
+             *   配置文件可能被手改成 "jpg" 或 "PNG "，而写图那一侧
+             *   只实现了这两种 —— 与其让它写出一个后缀是 .jpg、
+             *   内容是 BMP 的文件（双击打不开且毫无线索），
+             *   不如在这里就收敛到确实支持的那一个。 */
+            format: str(out.format, d.output.format).toLowerCase() === 'png'
+                ? 'png' : 'bmp',
         },
         toolchain: {
             path: str(tc.path, ''),
@@ -355,6 +396,7 @@ export function writeConfig(projectRoot: string, cfg: ProjectConfig): void {
     merged.hooks = { ...(asRecord(merged.hooks) ?? {}), ...cfg.hooks };
     merged.pic = { ...(asRecord(merged.pic) ?? {}), ...cfg.pic };
     merged.run = { ...(asRecord(merged.run) ?? {}), ...cfg.run };
+    merged.output = { ...(asRecord(merged.output) ?? {}), ...cfg.output };
     merged.toolchain = { ...(asRecord(merged.toolchain) ?? {}), ...cfg.toolchain };
     merged.inputArray = cfg.inputArray;
     merged.outputArray = cfg.outputArray;

@@ -50,6 +50,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 try:
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -92,6 +93,14 @@ def check(cond, msg, extra=''):
 def run(cmd):
     return subprocess.run(cmd, capture_output=True, text=True,
                           encoding='utf-8', errors='replace')
+
+
+def _same_bytes(a, b):
+    """两个文件内容是否逐字节相同（大小先比，避免读整个大文件）。"""
+    if os.path.getsize(a) != os.path.getsize(b):
+        return False
+    with open(a, 'rb') as fa, open(b, 'rb') as fb:
+        return fa.read() == fb.read()
 
 
 def read_ppm(path):
@@ -384,6 +393,107 @@ def main():
                  if n.endswith('_b.ppm')]
         check(extra == [], 'D 没有多写 *_b.ppm（从没用过的工程零额外开销）',
               '多写了：%s' % extra)
+
+        # ---- E) 输入图副本 Input_pic ----
+        #
+        # 这一节守的是「环境读的是工程根那一份副本」这条承诺：
+        #   ① 跑完之后工程根必须出现 Input_pic.<后缀>，且内容与当前那张图一致；
+        #   ② 翻页（协议 n）之后副本要跟着换 —— 不换的话用户会对着
+        #      "上一张的副本"调参，而画面早就是下一张了；
+        #   ③ 同一张图重复加载【不重写】—— 这是用户明确要求的"不用重复搬运"。
+        #      判据用 mtime：内容相同却重写一遍的话，同步盘会当成文件被修改，
+        #      而用户什么都没改。
+        print('\n[E] 输入图副本 Input_pic（跟随当前帧、重复运行不重搬）')
+        projE = make_project(work, 'E_mirror', USER_NO_WRITE, '', pics)
+        # ★ 必须把图重命名成【连续编号】1.bmp / 2.bmp：
+        #   tests/fixtures 里的文件名是 1.bmp、10.bmp、11.bmp（真实图集的抽样），
+        #   而图集按"读到缺号就结束"的规则只认 1 张 —— 于是"翻页"这一步
+        #   根本没有第 2 张可翻，测试会误报成"副本没跟着换"。
+        #   这一节要验的是镜像行为，不是编号规则，所以在这里把编号摆正。
+        pic_dirE = os.path.join(projE, 'pic', '1')
+        for old in sorted(os.listdir(pic_dirE)):
+            os.remove(os.path.join(pic_dirE, old))
+        for i, n in enumerate(pics, 1):
+            shutil.copyfile(os.path.join(PIC_SRC, n),
+                            os.path.join(pic_dirE, '%d.bmp' % i))
+        pics = ['%d.bmp' % i for i in range(1, len(pics) + 1)]
+
+        r = run([sys.executable, BUILD, '--project', projE,
+                 '--toolchain', args.toolchain])
+        if not check(r.returncode == 0, 'E 工程构建成功',
+                     ((r.stdout or '') + (r.stderr or ''))[-600:]):
+            return 1
+
+        exeE = os.path.join(projE, '.scut', 'bin', 'scut_sim.exe')
+        framesE = os.path.join(projE, '.scut', 'bin', 'frames')
+        mirror = os.path.join(projE, 'Input_pic.bmp')
+
+        # ① 跑一帧 → 副本出现，内容 = 第 1 张
+        run([exeE, '--frames', '1', '--out', framesE])
+        if not check(os.path.isfile(mirror), 'E 工程根出现 Input_pic.bmp'):
+            print('  （后续 E 项跳过：副本不存在）')
+        else:
+            src1 = os.path.join(projE, 'pic', '1', pics[0])
+            check(_same_bytes(mirror, src1),
+                  'E 副本内容 = 当前那张输入图（%s）' % pics[0])
+
+            # ③ 同一张图再跑一次 → mtime 不变（没重写）
+            m1 = os.stat(mirror).st_mtime_ns
+            time.sleep(0.05)     # 让"如果重写了"必然能看出 mtime 差异
+            run([exeE, '--frames', '1', '--out', framesE])
+            m2 = os.stat(mirror).st_mtime_ns
+            check(m1 == m2, 'E 同一张图重复运行不重写副本（mtime 未变）',
+                  '%d -> %d' % (m1, m2))
+
+            # ② 翻页 → 副本跟着换
+            if len(pics) >= 2:
+                rr = subprocess.run([exeE, '--json', '--step', '--frames', '0',
+                                     '--out', framesE],
+                                    input='n\n', capture_output=True,
+                                    text=True, encoding='utf-8',
+                                    errors='replace')
+                pics_seen = re.findall(r'"pic":"([^"]*)"', rr.stdout or '')
+                src2 = os.path.join(projE, 'pic', '1', pics[1])
+                check(_same_bytes(mirror, src2),
+                      'E 翻页后副本换成第 2 张（%s）' % pics[1],
+                      'JSON 里的 pic 序列=%s' % pics_seen[-2:])
+            else:
+                print('  SKIP  图集只有 1 张，跳过翻页验证')
+
+            # ④ ★ 核心断言：环境解码的是【副本】而不是原图 ★
+            #
+            # 这条不能靠"副本内容 = 原图"来证明 —— 那只能说明复制成功了，
+            # 说明不了解码器读的是哪一条。所以反过来做：
+            #   把原图换成一个【内容不同】的文件、同时保持副本不变，
+            #   然后看画面跟着谁变。
+            #
+            # ★ 怎么做到"副本变了而原图没变"：
+            #   把副本覆盖成一张【纯白图】，再让加载跳过复制
+            #   （判据是 源路径+大小+mtime 都没变 → 不重写副本）。
+            #   同一次进程内连续加载同一张图时，第二次就不会重写副本，
+            #   于是我们写进去的白图得以保留、被解码器读到。
+            #
+            # ★ 这条测试本身踩过两次坑，都记在 mirror_decode.js 的头部：
+            #   ① 副本后缀跟着图集走（PNG 图集 → Input_pic.png），
+            #      旧版把名字写死成 Input_pic.bmp，在 PNG 工程上直接报
+            #      "副本没有生成"；
+            #   ② 阈值定成"正好 255"会假失败 —— 画面是合成后的最终图，
+            #      算法会在上面画绿色标注，实测纯白输入得到 244。
+            print('\n[E2] 解码确实走副本（同进程内改副本 → 画面跟着变）')
+            node = shutil.which('node')
+            if not node:
+                print('  SKIP  找不到 node，跳过"解码走副本"验证')
+            else:
+                # ★ 图集目录要显式传：这个测试工程的图在 pic/1/ 下，
+                #   而 mirror_decode.js 默认按 pic/ 找（与 pic.dir 一致）。
+                rr = run([node, os.path.join(HERE, 'mirror_decode.js'),
+                          projE, pic_dirE])
+                out = ((rr.stdout or '') + (rr.stderr or ''))
+                check(rr.returncode == 0, 'E2 解码走副本的会话验证通过',
+                      out[-700:])
+                check('DECODED_FROM_MIRROR' in out,
+                      'E2 改副本后画面跟着变（证明解码读的是 Input_pic）',
+                      out[-400:])
 
         print('\n' + '=' * 60)
         if failures:

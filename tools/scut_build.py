@@ -840,6 +840,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # ★ 也没有 display 段：图片1/图片2 两栏恒在，开合由面板标题控制，
     #   没有"要不要显示"这种需要存进工程的开关。
     "run": {"processRepeat": 1, "benchRepeat": 1000},
+    # 输出图自动保存：每跑完一帧把画面存成工程根的 OutPic_1 / OutPic_2。
+    # ★ autoSave 默认开（用户要求）；format 只认 bmp / png ——
+    #   面板上是下拉框，所以"填错后缀"这个状态不存在。
+    "output": {"saveImages": True, "format": "bmp"},
     # 本机工具链。path 空 = 依次探测：SCUT71_TOOLCHAIN 环境变量
     # → 插件自动下载过的目录 → PATH；都找不到时弹窗问用户。
     # pythonPath：跑本脚本用的解释器，只要求 3.7+，不依赖任何第三方库

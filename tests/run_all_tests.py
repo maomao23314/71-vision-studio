@@ -228,23 +228,23 @@ def main():
     if not lldb_dap:
         print("  ! 没找到 lldb-dap —— 调试那条会跳过")
 
-    banner("0/18  准备被测工程（从模板新建并构建）")
+    banner("0/19  准备被测工程（从模板新建并构建）")
     proj = args.project or bootstrap_project(ROOT, clang_root)
 
-    banner("1/18  端到端：模板工程 → 零注册用户代码 → 构建 → 运行")
+    banner("1/19  端到端：模板工程 → 零注册用户代码 → 构建 → 运行")
     # ★ 这条排在第一位：它验证的是【设计理念本身】（用户代码零注册、
     #   环境接管图像管道、配置真的生效）。后面的测试都是组件级的，
     #   组件都对但主线断了，这个环境依然是不可用的。
     run("e2e", [PY, os.path.join(HERE, "test_e2e_pipeline.py")])
 
-    banner("2/18  接线单元边界（三条「静默算错」缺陷的回归）")
+    banner("2/19  接线单元边界（三条「静默算错」缺陷的回归）")
     # ★ 这三条都是"构建成功、运行正常、结果悄悄是错的"：
     #   同函数填两阶段（性能数字少一半）、--no-watch 重复定义、
     #   结果图数组名指向标量（越界读）。它们不会让任何东西看起来坏掉，
     #   所以必须有专门的测试盯着。
     run("glue-edges", [PY, os.path.join(HERE, "test_glue_edges.py")])
 
-    banner("3/18  算法直接写输出图 × 默认底图（接口缺口的回归）")
+    banner("3/19  算法直接写输出图 × 默认底图（接口缺口的回归）")
     # ★ 这条守的是"接口承诺了、实现却把它冲掉"那类静默失效：
     #   scut_sdk.h 说 SCUT_OutImageSet 是"算法直接产出显示图"的路径，
     #   而调度器每帧铺的默认底图会把它整幅覆盖。
@@ -252,7 +252,16 @@ def main():
     #   只测一侧的话，把判断条件写反（底图整个没了）也照样是绿的。
     run("outimage", [PY, os.path.join(HERE, "test_outimage.py")])
 
-    banner("4/18  代码卫生（死代码 / 过时注释 / 健壮性常量）")
+    banner("4/19  输出图编码（OutPic_1 / OutPic_2 真的能被解码）")
+    # ★ 这条守的是"生成的文件打不开"这类缺陷：
+    #   BMP 的行序自下而上、每行按 4 字节对齐；PNG 每块要带 CRC32。
+    #   写错了不报错，文件照样生成，只是打开是上下颠倒 / 斜切 / 打不开 ——
+    #   用户只会说"图是坏的"，从那张图上完全看不出是哪一步错的。
+    #   所以它不比对字节，而是用【仓库自带的 C 解码器】把文件读回像素、
+    #   逐点核对。环境能读的图，才是真正能用的图。
+    run("outpic", ["node", os.path.join(HERE, "test_outpic.js")])
+
+    banner("5/19  代码卫生（死代码 / 过时注释 / 健壮性常量）")
     # ★ 这条盯的是"删掉之后没有任何测试会变红"的那类改动。
     #   死代码的特点是双向无感：删错了没人拦，删对了下次有人
     #   "顺手加回来"也没人发现。所以专门写一条断言守着这两件事：
@@ -261,7 +270,7 @@ def main():
     #   它不需要工具链，纯静态判据，所以在任何机器上都会真的跑起来。
     run("cleanup", [PY, os.path.join(HERE, "test_cleanup.py")])
 
-    banner("5/18  webview 前端真实执行（桩加载 simview.js）")
+    banner("6/19  webview 前端真实执行（桩加载 simview.js）")
     # ★ 这条守的是"纯前端缺陷"—— Node 侧测试完全看不见的那一类。
     #   第 12 轮评审发现的两个问题都是它抓到的：
     #     · renderStructDetail 被调用但从未定义（点「展开字段」就 ReferenceError）
@@ -276,14 +285,14 @@ def main():
     #   不能靠"跑绿了"来说明。
     run("webview-js", [PY, os.path.join(HERE, "test_webview_js.py")])
 
-    banner("6/18 到手就能用（配置面板字段全覆盖 / 钩子候选 / 引导页）")
+    banner("7/19 到手就能用（配置面板字段全覆盖 / 钩子候选 / 引导页）")
     # ★ 这条盯的是"第一次用的人会不会卡住"，而它【不影响任何已有行为】——
     #   跑其它 15 条全是绿的，用户照样可能卡在第一步。所以必须单独一条。
     #   它已经抓到过一个从 0.9.4 就存在、一直没人发现的真实缺陷：
     #   配置面板里「结果图数组名」从来没有显示过（分组只能装一个一级键）。
     run("firstrun", [PY, os.path.join(HERE, "test_firstrun.py")])
 
-    banner("7/18 配置面板自动保存（延迟合并 / 关面板不丢 / 开关）")
+    banner("8/19 配置面板自动保存（延迟合并 / 关面板不丢 / 开关）")
     # ★ 这条与 firstrun §6 的分工：
     #   firstrun 是【静态】断言（代码长这样），这条是【行为】断言
     #   （真的把 settingsview 跑起来，对真实磁盘文件看最后是什么值）。
@@ -307,7 +316,7 @@ def main():
     #
     #   ★ 两边都保留：gcc 侧继续验证"解析逻辑对两种编译器都成立"，
     #     这是 scut_symbols.py 的跨工具链承诺，不能因为主用 clang 就丢掉。
-    banner("8/18  DWARF 读取器（PE/ELF × DWARF4/5 × 多编译单元）")
+    banner("9/19  DWARF 读取器（PE/ELF × DWARF4/5 × 多编译单元）")
     # ★ 这一条测的是「读字节」那一层，和下面的符号发现分开：
     #   符号发现测"类型映射对不对"，这里测"树本身解析得对不对"。
     #   历史上三次"变量面板整块失效"都坏在这一层，而且全都不报错 ——
@@ -317,23 +326,23 @@ def main():
     run("dwarf", [PY, os.path.join(HERE, "test_dwarf.py"),
                   "--cc", clang_exe, "--also", "gcc"])
 
-    banner("9/18  自动符号发现（38 变量 × clang 主 + gcc 副 × DWARF4/5）")
+    banner("10/19  自动符号发现（38 变量 × clang 主 + gcc 副 × DWARF4/5）")
     run("symbols", [PY, os.path.join(HERE, "test_symbols.py"),
                     "--cc", clang_exe, "--also", "gcc"])
 
-    banner("10/18  JSON 协议合法性（插件依赖它）")
+    banner("11/19  JSON 协议合法性（插件依赖它）")
     # ★ 显式传 --project：不传的话它只能去猜（旧版靠仓库外那个集成工程）。
     run("json", [PY, os.path.join(HERE, "check_json_protocol.py"),
                  "--project", proj])
 
-    banner("11/18  内存安全（两处 snprintf 返回值误用 → 栈越界）")
+    banner("12/19  内存安全（两处 snprintf 返回值误用 → 栈越界）")
     # ★ 这条盯的是"越界但不崩溃"的那类缺陷：静默、随机、只在特定输入下出现，
     #   常规功能回归永远测不到。它直接 include 真实源码并用
     #   AddressSanitizer + 金丝雀双重判据验证。
     #   已经抓到过两个真实缺陷：json_escape 越界写、scut_watch_read 越界读。
     run("mem-safety", [PY, os.path.join(HERE, "test_mem_safety.py")])
 
-    banner("12/18 设置项分组一致性（分组后静默失效的唯一防线）")
+    banner("13/19 设置项分组一致性（分组后静默失效的唯一防线）")
     # ★ 这条盯的是"分组改动最容易漏的地方"：
     #   设置改名/搬家之后，读错键名【不会报错】，只是静默退回默认值，
     #   现象是"我在设置里改了却没反应"，而且它出现在编译产物上，
@@ -342,25 +351,25 @@ def main():
     #     它确实报红（第一版正则写错过一次，没报红，见该文件注释）。
     run("settings", [PY, os.path.join(HERE, "test_extension_settings.py")])
 
-    banner("13/18 插件纯逻辑（协议解析 / PPM / 诊断）")
+    banner("14/19 插件纯逻辑（协议解析 / PPM / 诊断）")
     run("extension", ["node", os.path.join(HERE, "extension_smoke.js"),
                       os.path.join(proj, ".scut", "frames"),
                       os.path.join(proj, ".scut", "bin", "scut_sim.exe")])
 
-    banner("14/18 会话：运行 / 测速 / 翻页 / 停止（ACK 背压链路）")
+    banner("15/19 会话：运行 / 测速 / 翻页 / 停止（ACK 背压链路）")
     # ★ 这条盯的是"按钮点了到底有没有反应"：运行/测速/翻页全都靠 ACK 背压
     #   驱动仿真进程前进，背压断在哪一环的表现都是"画面停在第 1 帧"、不报错。
     #   它已经抓到过一个真实缺陷：runFrames(N) 会多跑一帧。
     run("session", ["node", os.path.join(HERE, "run_frames.js"),
                     os.path.join(proj, ".scut", "bin", "scut_sim.exe"), proj])
 
-    banner("15/18 主动暴露变量（源码扫描 → 分组 → 恒显示）")
+    banner("16/19 主动暴露变量（源码扫描 → 分组 → 恒显示）")
     # ★ 这条盯的是"用户主动注册的结构体成员能不能在面板里看见"。
     #   它已经抓到过一个真实缺陷：判据用"运行期注册表减编译期 DWARF"，
     #   而两边完全重合、差集恒空，导致主动暴露永远是 0 个、面板全空。
     run("manual-vars", ["node", os.path.join(HERE, "manual_vars.js"), proj])
 
-    banner("16/18 调试器真实 DAP 会话（lldb-dap）")
+    banner("17/19 调试器真实 DAP 会话（lldb-dap）")
     # ★ 用户源文件名不再是固定的 main.c（模板默认给的是 camera.c，
     #   而且用户可以任意命名）。所以这里动态挑一个真实存在的 .c，
     #   避免测试因为"模板换了默认文件名"而误报失败。
@@ -386,7 +395,7 @@ def main():
         print("  SKIP  没找到 lldb-dap（可选件）：本机无法验证调试链路。")
         print("        装 LLVM-MinGW 后重跑，或 --toolchain 指定它的根目录。")
 
-    banner("17/18 Webview 渲染（真实 Chromium + 真实帧数据）")
+    banner("18/19 Webview 渲染（真实 Chromium + 真实帧数据）")
     wv_out = os.path.join(tempfile.gettempdir(), "scut_wv_test")
     ok, out = run("webview", ["node", os.path.join(HERE, "webview_render.js"),
                               os.path.join(proj, ".scut", "frames"), wv_out])
@@ -395,7 +404,7 @@ def main():
         results[-1] = ("webview", False, "未画出内容")
         print("  --> ❌ 脚本成功退出，但渲染判定未通过")
 
-    banner("18/18 中文路径（中文用户名 + 中文工程目录，真实会话）")
+    banner("19/19 中文路径（中文用户名 + 中文工程目录，真实会话）")
     # ★ 为什么这条必须是【真实会话】而不是源码断言：
     #   缺陷表现是"画面全黑、不报错"，只有真跑一遍才看得见。
     #   它同时守住"帧目录落在工程内"这条（用户改不了账户名，
