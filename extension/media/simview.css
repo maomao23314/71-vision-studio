@@ -198,12 +198,18 @@ body[data-guide='1'] #app { display: none; }
  * ★ max-height：两块画面叠起来容易把下面的变量/日志区挤没，
  *   给单块设一个上限，超出的部分由本容器的滚动条处理（它已经 overflow:auto）。
  *   34vh 是按"188×120 的图在常见侧边栏宽度下能完整显示"估的 ——
- *   再高就会在 1080p 的侧边栏里让下面几栏看不见。 */
+ *   再高就会在 1080p 的侧边栏里让下面几栏看不见。
+ *
+ * ★★ 这里【刻意没有】align-items/justify-content: center ★★
+ *   居中改由 .screen 的 margin:auto 承担（原因见下面 .screen 那段）。
+ *   两个都写反而会坏：flex 的 center 是"把内容推到容器中线"，
+ *   内容比容器大时中线左边/上边那半截会跑到【滚动原点之外】，
+ *   scrollLeft/scrollTop 最小只能到 0，于是那半截永远拖不出来 ——
+ *   症状正是"放大之后下方和左右都能拖，上面怎么拖都出不来"。
+ *   （0.12.2 修。auto 外边距在溢出时会自动退化成 0，天然没有这个问题。） */
 .screen-wrap {
   position: relative;
   display: flex;
-  align-items: center;
-  justify-content: center;
   min-height: 90px;
   max-height: 34vh;
   padding: 4px;
@@ -215,6 +221,18 @@ body[data-guide='1'] #app { display: none; }
 
 .screen {
   display: block;
+  /* ★★ 居中用 margin:auto，不用容器的 justify-content/align-items ★★
+   *   auto 外边距的语义是"把剩下的空间平均分给两侧"：
+   *   装得下时四边等距（就是居中的效果），
+   *   装不下时剩余空间为负，auto 直接退化成 0 —— 内容贴着容器左上角，
+   *   于是滚动原点正好是内容的左上角，四个方向全都拖得到。
+   *   flex 的 center 没有这个退化行为，这正是上面那条注释说的 bug。 */
+  margin: auto;
+  /* ★ 不许被 flex 压窄。默认 flex-shrink:1 会在"图比容器宽"时
+   *   把画布缩到容器宽度 —— 图不会溢出、也就不会出现滚动条，
+   *   用户以为自己看到的是全图，其实是浏览器把 900px 缩成了 727px。
+   *   这种"静默缩窄"比裁掉更难发现：画面不糊、只是比例不对。 */
+  flex: 0 0 auto;
   /* ★ 关键：灰度图放大时必须保留硬边，
      否则浏览器会做双线性插值，188x120 放大后糊成一团，
      学生根本看不出边缘在哪 —— 而找边正是这个项目的全部内容。 */

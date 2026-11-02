@@ -338,6 +338,55 @@ const feed = `
       var tp = document.getElementById('t-process');
       out.tProcessText = tp ? tp.textContent : null;
       out.bodyLen = (document.body.innerText || '').length;
+
+      /* ★★ 画面缩放后四个方向都要能拖到（0.12.2 修）★★
+       *
+       * 用户报的原话："图片放大之后会显示不了上面的部分 ——
+       * 下方、左右都能展示，但是上面无论如何拖不出来"。
+       *
+       * 成因是 CSS：滚动容器用 flex 的 align-items/justify-content: center
+       * 居中，内容比容器大时那"半截"会被推到滚动原点之外，
+       * scrollTop/scrollLeft 最小只能到 0，于是永远拖不出来。
+       *
+       * ★ 为什么这条必须在这里测：它是纯 CSS 布局行为，
+       *   静态检查（查文件里有没有某行）只能证明"写了什么"，
+       *   证明不了"布局真的这样算"。而这里跑的是真实 Chromium。
+       *
+       * 判据：放大到溢出之后
+       *   · scrollTop/scrollLeft 归零 → 画布的上/左边缘必须落在可视区内；
+       *   · scrollTop/scrollLeft 拉满 → 画布的下/右边缘必须落在可视区内。
+       * 任何一边为负 = 那一侧被推到滚动原点之外 = 拖不出来。 */
+      (function () {
+          var wrap = document.getElementById('pane-0-wrap');
+          var cvs = document.getElementById('pane-0-canvas');
+          if (!wrap || !cvs) { out.zoom = { err: '没有 #pane-0-wrap / #pane-0-canvas' }; return; }
+          function rel(prop) {
+              var a = cvs.getBoundingClientRect(), b = wrap.getBoundingClientRect();
+              return prop === 't' ? a.top - b.top
+                   : prop === 'l' ? a.left - b.left
+                   : prop === 'b' ? b.bottom - a.bottom
+                   : b.right - a.right;
+          }
+          // 走真实交互路径（滚轮事件），而不是直接改 zoom 变量 ——
+          // 直接改变量测不到 setZoom 里那段锚点计算
+          var r = wrap.getBoundingClientRect();
+          for (var k = 0; k < 8; k++) {
+              wrap.dispatchEvent(new WheelEvent('wheel', {
+                  deltaY: -100, clientX: r.left + r.width / 2,
+                  clientY: r.top + r.height / 2, bubbles: true, cancelable: true }));
+          }
+          var overflow = wrap.scrollWidth > wrap.clientWidth + 1
+                      || wrap.scrollHeight > wrap.clientHeight + 1;
+          wrap.scrollTop = 0; wrap.scrollLeft = 0;
+          var origin = { top: +rel('t').toFixed(1), left: +rel('l').toFixed(1) };
+          wrap.scrollTop = 1e6; wrap.scrollLeft = 1e6;
+          var max = { bottom: +rel('b').toFixed(1), right: +rel('r').toFixed(1),
+                      scrollTop: wrap.scrollTop, scrollLeft: wrap.scrollLeft,
+                      needTop: wrap.scrollHeight - wrap.clientHeight,
+                      needLeft: wrap.scrollWidth - wrap.clientWidth };
+          out.zoom = { overflow: overflow, origin: origin, max: max };
+      })();
+
       return out;
   };
   window.addEventListener('load', function () {
@@ -418,6 +467,8 @@ if (!m) {
         console.log('  变量区文本       : ' + JSON.stringify((r.varsText || '').slice(0, 200)));
         console.log('  处理时间显示     : ' + JSON.stringify(r.tProcessText));
         console.log('  前端主动发的消息 : ' + JSON.stringify(r.sent).slice(0, 200));
+        const z = r.zoom || {};
+        console.log('  画面缩放         : ' + JSON.stringify(z));
 
         // 判定：画面画出来了 + 有彩色标注 + 变量有条目 + 变量区没有残留的折线图 canvas
         //      + 第二张图画到了【第二块】画布上（不是串到第一块）
@@ -435,16 +486,22 @@ if (!m) {
             && px[2] === RED[2];
         const secondGotRed = second && isRed(second.pixel00);
         const mainNotSecond = canvasCount > 0 && !isRed(r.painted[0].pixel00);
+        /* 缩放后四个方向都要能拖到（0.12.2 修，见 __result 里的说明）。
+         * ★ 先要求"确实溢出了"，否则滚动位置恒为 0、四条断言都是空转。 */
+        const zoomOk = !!(z.overflow && z.origin && z.max)
+            && z.origin.top >= -0.5 && z.origin.left >= -0.5
+            && z.max.bottom >= -0.5 && z.max.right >= -0.5;
         const pass = r.canvases > 0 && painted && colored && r.varItems > 0
-            && noSpark && secondOk && secondGotRed && mainNotSecond;
+            && noSpark && secondOk && secondGotRed && mainNotSecond && zoomOk;
         console.log('\n  ==> 渲染判定: ' +
-            (pass ? '✅ 两块画面都已绘制（第二张图进了第二块画布）、彩色标注可见、变量面板有条目、变量区无折线图'
+            (pass ? '✅ 两块画面都已绘制（第二张图进了第二块画布）、彩色标注可见、变量面板有条目、变量区无折线图、放大后四边都能拖到'
                    : '❌ 未通过'
                      + (painted ? '' : '（画面全黑）')
                      + (colored ? '' : '（没有非灰度像素：彩色标注没透传）')
                      + (noSpark ? '' : '（变量区还有 canvas）')
                      + (secondOk ? '' : '（第二张图的画布是空的：rgb2 没有画上去）')
                      + (secondGotRed ? '' : '（第二块画布没收到 rgb2 的数据）')
-                     + (mainNotSecond ? '' : '（主画布收到了 rgb2：两块画布串了）')));
+                     + (mainNotSecond ? '' : '（主画布收到了 rgb2：两块画布串了）')
+                     + (zoomOk ? '' : '（放大后有一侧拖不到：' + JSON.stringify(z) + '）')));
     }
 }
