@@ -240,8 +240,10 @@ ok('--max-elems 默认 0', a2.max_elems == 0)
 
 # --exclude / --max-elems 必须真的透传给 scut_symbols.py
 src = read('tools/scut_build.py')
-ok('--exclude 透传给符号发现', 'gen_cmd += ["--exclude", exclude_names]' in src)
-ok('--max-elems 透传给符号发现', 'gen_cmd += ["--max-elems", str(max_elems)]' in src)
+# ★ 符号发现改成了【一次进程处理全部单元】（--batch），所以判据从
+#   "命令行里拼了这两个参数"变成"批量任务里带了这两个字段"。
+ok('--exclude 透传给符号发现', '"exclude": env.exclude_names' in src)
+ok('--max-elems 透传给符号发现', '"maxElems": env.max_elems' in src)
 
 # objdump 相关的东西必须彻底消失（换成了纯 Python 读 DWARF）
 # ★ 这一节是"防回潮"：新写法把 objdump 从构建链里彻底拿掉了，
@@ -730,6 +732,99 @@ ok('仿真视图里的编译按钮带播放图标', '▶ 编译' in read('extens
 ok('F8 键位已删除（它绑的是被删掉的「运行」）',
    '"f8"' not in pkg_json)
 
+print('\n=== 19b. 清理 / 重新编译：命令、菜单、按钮、转发四层都不许缺 ===')
+
+# ★ 守的是"一个动作有四层，删/加时漏掉其中一层"。
+#   这两个命令的每一层单独缺失都是【静默】的：
+#     · 少了 package.json 的 commands → 命令面板搜不到；
+#     · 少了 extension.ts 的 registerCommand → 点按钮报"命令不存在"；
+#     · 少了 simview.ts 的转发分支 → 按钮发了消息但没人接；
+#     · 少了 simview.js 的 bind → 按钮画出来了，点下去毫无反应。
+#   这四种都不会让别的测试变红，所以只能逐层钉住。
+sv_html = read('extension/src/simview.ts')
+sv_js = read('extension/media/simview.js')
+for cmd in ('clean', 'rebuild'):
+    ok('package.json 声明了 scut71.%s 命令' % cmd,
+       '"scut71.%s"' % cmd in pkg_json)
+    ok('extension.ts 注册了 scut71.%s' % cmd,
+       "'scut71.%s'" % cmd in ext_ts)
+    # ★ 判据要【成对】出现：`cmd === 'clean'` 之后必须跟着
+    #   `executeCommand('scut71.clean')`。只查前者的话，一个"识别了但
+    #   什么都不做"的分支也能过；只查后者的话，别处的一处提及就能过。
+    ok('simview.ts 把 cmd=%s 转发到 scut71.%s' % (cmd, cmd),
+       re.search(r"cmd === '%s'\)\s*\{[^}]*executeCommand\('scut71\.%s'\)"
+                 % (cmd, cmd), sv_html) is not None)
+    ok('simview.js 把按钮 %s 接线到弹消息' % cmd,
+       "cmd: '%s'" % cmd in sv_js)
+    ok('工具栏有 btn-%s 按钮' % cmd,
+       'id="btn-%s"' % cmd in sv_html)
+
+# ★ 两个按钮必须是 ghost（灰底细边框）：它们是低频自救操作，
+#   实心样式会和「编译 / 下一张」抢注意力。
+ok('清理 / 重新编译是 ghost 样式（低频操作，不抢注意力）',
+   re.search(r'id="btn-rebuild"\s+class="ghost"', sv_html) is not None
+   and re.search(r'id="btn-clean"\s+class="ghost"', sv_html) is not None)
+
+# ★ 反向：不许给它们绑快捷键。它们是"出事时才用"的按钮，
+#   给一个键位等于让用户可能在手忙脚乱时误触发全量重编。
+ok('清理 / 重新编译没有绑 VS Code 键位',
+   not (_view_keys & {'scut71.clean', 'scut71.rebuild'}),
+   '仍在 keybindings 里：%s' % sorted(_view_keys))
+
+print('\n=== 19c. 构建命令行只能有一处拼装（不得回到 build.ts 里手拼）===')
+
+# ★★ 守的是一个真实事故（0.14.1 发布版一上手就失败）★★
+#
+#   事故现象：
+#       $ python clean --project <工程> --json
+#       python: can't open file '...\clean': [Errno 2] No such file or directory
+#   原因是"脚本路径"被漏在 argv 之外 —— python 的第一个位置参数是脚本，
+#   不是子命令。
+#
+#   根因不是手滑，而是那段拼装【没法被测试】：
+#     · build.ts import 了 vscode，普通 Node 加载不了；
+#     · 而所有既有测试都是直接调 python 脚本（脚本路径由测试自己写对）。
+#   所以修法不是"再小心一点"，而是把拼装搬进不依赖 vscode 的 buildcmd.ts，
+#   由 tests/test_buildcmd.js 真实执行。
+#
+#   这里守住的是【结构】：build.ts 里不许再出现手拼的
+#   '--project' / '--json' 字面量 —— 一旦有人"顺手"加一行，
+#   就又绕开了那条真正会跑的测试。
+_bd = read('extension/src/build.ts')
+_bc = read('extension/src/buildcmd.ts')
+ok('buildcmd.ts 存在且不 import vscode（所以它能被 Node 直接测）',
+   'vscode' not in re.sub(r'//[^\n]*|/\*[\s\S]*?\*/', '', _bc))
+ok('build.ts 通过 buildScriptArgs() 拼命令行',
+   _bd.count('buildScriptArgs(') >= 2)
+# ★ 判据只查【带引号的字面量】：`args.push('--project', ...)` 这种手拼。
+#   --project 作为字符串出现在注释或类型里是正常的，不该被误判。
+ok('build.ts 里没有手拼的 --project（应交给 buildcmd.ts）',
+   re.search(r"push\(\s*'--project'", _bd) is None,
+   '发现手拼：%s' % (re.search(r'.{0,40}push\(\s*\'--project\'.{0,40}', _bd) or ''))
+ok('build.ts 里没有手拼的 --json',
+   re.search(r"push\(\s*'--json'", _bd) is None)
+
+# ★★ 第二次事故（脚本路径【重复】）的结构守卫 ★★
+#
+#   修完第一次事故（脚本路径漏了）之后，buildScriptArgs 与 runScript
+#   各补了一次脚本路径，argv 变成 `<脚本> <脚本> --project …`，
+#   argparse 报 invalid choice: 'c:\...\scut_build.py'。
+#
+#   两次事故同一个成因：同一个位置有两个负责方。
+#   所以修法不是"再补一层幂等"，而是让第二个负责方【不存在】：
+#   runScript 只收完整 argv，签名里不再有 script 参数。
+_bd_code = re.sub(r'//[^\n]*|/\*[\s\S]*?\*/', '', _bd)
+_m = re.search(r'async function runScript\(\s*([^)]*)\)', _bd_code)
+ok('build.ts 里能定位到 runScript 的签名', _m is not None)
+if _m:
+    _params = re.sub(r'\s+', ' ', _m.group(1))
+    ok('runScript 没有 script 参数（否则又有两个负责方）',
+       re.search(r'\bscript\s*:', _params) is None, '签名：%s' % _params)
+    ok('runScript 收的是完整 argv', re.search(r'\bargv\s*:', _params) is not None,
+       '签名：%s' % _params)
+ok('build.ts 里没有 [script, ...] 这样的前置拼接',
+   re.search(r'\[\s*script\s*,', _bd_code) is None)
+
 print('\n=== 20. 文档里不许写死测试工程的路径 ===')
 
 # ★ 守的是一类"别人 clone 下来就对不上"的缺陷：
@@ -875,6 +970,78 @@ with _tf.TemporaryDirectory() as _td:
     _merged = io.open(_cl, encoding='utf-8').read()
     ok('用户已有 .clangd 时保留原内容并追加',
        '# 用户自己的' in _merged and 'CompilationDatabase: .scut' in _merged)
+
+# ============================================================================
+# §20 打包前的版本守卫（0.14.1 事故的正面教训）
+# ============================================================================
+# ★ 守的是什么：改了代码、版本号不变、重新打同一个 .vsix。
+#   装上去之后 VS Code 认为"没有更新"，不提示重新加载窗口，
+#   正在运行的窗口继续用内存里的旧代码 —— 用户看到的就是"修了还是坏的"。
+#   这个守卫把这种静默事故变成一次明确的打包失败。
+#
+# ★ 为什么不只断言"脚本存在"：脚本存在但不生效（路径写错、条件写反）
+#   是这类守卫最常见的失效方式。所以下面把脚本【真跑三遍】。
+print('\n[20] 版本守卫：同一个版本号不许重复打包')
+_pkg = json.load(io.open(os.path.join(ROOT, 'extension', 'package.json'),
+                         encoding='utf-8'))
+_scripts = _pkg.get('scripts') or {}
+ok('prepackage 里挂了版本检查（不挂等于没有）',
+   'check-version' in str(_scripts.get('prepackage', '')))
+ok('有独立的 check-version 脚本条目',
+   'check-version' in _scripts)
+ok('打包脚本 check-version.js 存在',
+   os.path.isfile(os.path.join(ROOT, 'extension', 'scripts',
+                               'check-version.js')))
+
+import subprocess as _sp
+import shutil as _sh
+import tempfile as _tf2
+
+# 把脚本拷到一个临时"插件目录"里跑，绝不碰真实 extension/。
+with _tf2.TemporaryDirectory() as _td2:
+    _ed = os.path.join(_td2, 'ext')
+    os.makedirs(os.path.join(_ed, 'scripts'))
+    _sh.copy(os.path.join(ROOT, 'extension', 'scripts', 'check-version.js'),
+             os.path.join(_ed, 'scripts', 'check-version.js'))
+    _nm, _ver = 'demo-ext', '1.2.3'
+    io.open(os.path.join(_ed, 'package.json'), 'w', encoding='utf-8',
+            newline='').write(
+        json.dumps({'name': _nm, 'version': _ver}))
+    _vsix = os.path.join(_ed, '%s-%s.vsix' % (_nm, _ver))
+
+    def _run_check(env_extra=None):
+        _env = dict(os.environ)
+        _env.pop('SCUT71_ALLOW_REPACK', None)
+        if env_extra:
+            _env.update(env_extra)
+        # ★ 必须用 node 跑：这是 .js。用 sys.executable 跑会得到
+        #   SyntaxError，而"退出码非 0"恰好能让"拦下"那条检查假通过 ——
+        #   本测试第一版就是这么写的，被下面两条抓了出来。
+        _node = _sh.which('node')
+        if not _node:
+            raise RuntimeError('找不到 node，无法验证版本守卫')
+        return _sp.run([_node, os.path.join(_ed, 'scripts', 'check-version.js')],
+                       capture_output=True, text=True, encoding='utf-8',
+                       errors='replace', env=_env)
+
+    _r = _run_check()
+    ok('没有同名 .vsix 时放行', _r.returncode == 0,
+       '退出码 %d：%s' % (_r.returncode, (_r.stderr or '')[-200:]))
+
+    io.open(_vsix, 'w').close()
+    _r = _run_check()
+    ok('已存在同名 .vsix 时拦下', _r.returncode != 0,
+       '退出码 %d（应当非 0）' % _r.returncode)
+    # ★ 报错里必须点明"版本号没变 ⇒ 装了也不生效"，否则用户只会
+    #   看到"打包失败"四个字，然后想办法绕过它。
+    ok('拦截时的说明点出了「版本号没变就不生效」',
+       '版本号' in (_r.stderr or '') and '重新加载' in (_r.stderr or ''),
+       (_r.stderr or '')[-300:])
+
+    _r = _run_check({'SCUT71_ALLOW_REPACK': '1'})
+    ok('SCUT71_ALLOW_REPACK=1 时可以覆盖（本地反复试打包要留门）',
+       _r.returncode == 0,
+       '退出码 %d：%s' % (_r.returncode, (_r.stderr or '')[-200:]))
 
 print('\n' + '=' * 60)
 if FAIL == 0:

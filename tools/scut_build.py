@@ -1573,6 +1573,46 @@ def parse_extra_mk(path: str, reporter: Reporter) -> Tuple[List[str], List[str]]
     return libs, libdirs
 
 
+def resolve_extra_libs(extra_libs: Sequence[str],
+                       extra_libdirs: Sequence[str]) -> List[str]:
+    """把 `-lfoo` 解析成实际库文件的绝对路径（解析不出的直接丢掉）。
+
+    ★ 为什么需要它：链接指纹要覆盖【全部链接输入】的字节，而
+      scut.extra.mk 里写的是 `-lfoo` 这种【名字】，不是路径。
+      只把 `-lfoo` 这七个字符放进指纹，等于「库换了内容但指纹不变」——
+      实测：重新打包 libextra.a 后构建仍然报「链接输入未变化，复用」，
+      用户改的第三方库永远进不了 exe，而没有任何提示。
+
+    ★ 为什么解析不出来就丢掉，而不是让指纹为空：
+      丢掉只是「少覆盖一个输入」，最坏退化成旧行为（可能漏检）；
+      而指纹为空会让【每次构建都重新链接】，等于把增量链接关掉。
+      两者相权衡，宁可漏检也不要静默关掉一个明确的功能。
+      （解析不出的库通常是系统库，本来也不该随工程变化。）
+
+    解析顺序与链接器一致：按 -L 出现顺序，找 lib<name>.a / <name>.lib。
+    """
+    dirs: List[str] = []
+    for d in extra_libdirs:
+        if d.startswith("-L") and len(d) > 2:
+            dirs.append(d[2:])
+    out: List[str] = []
+    for tok in extra_libs:
+        if not tok.startswith("-l") or len(tok) <= 2:
+            continue
+        name = tok[2:]
+        for d in dirs:
+            for cand in ("lib" + name + ".a", name + ".lib",
+                         "lib" + name + ".dll.a"):
+                p = os.path.join(d, cand)
+                if os.path.isfile(p):
+                    out.append(os.path.abspath(p))
+                    break
+            else:
+                continue
+            break
+    return out
+
+
 # ===========================================================================
 # 诊断解析
 # ===========================================================================
@@ -1658,12 +1698,8 @@ def first_error_digest(diags: List[Dict[str, Any]]) -> str:
 # 构建
 # ===========================================================================
 
-class BuildError(Exception):
-    """致命构建错误，消息本身已经是说人话的中文。"""
-
-
 class UnitJob:
-    """一个用户 .c 的构建任务（两遍编译链在这里闭环）。"""
+    """一个用户 .c 的构建任务（三阶段流水线在这里闭环）。"""
 
     def __init__(self, src: str, rel: str, obj: str, wrapped: str,
                  wrapped_obj: str, manifest: str) -> None:
@@ -1673,35 +1709,513 @@ class UnitJob:
         self.wrapped = wrapped  # 生成的包装 .c
         self.wrapped_obj = wrapped_obj  # 真正参与链接的 .o
         self.manifest = manifest        # 变量清单 json
+        # 增量构建的两个伴随文件：与 wrapped_obj 同目录、同基名。
+        self.dep = wrapped_obj[:-2] + ".d"
+        self.stamp = wrapped_obj[:-2] + ".stamp"
         self.ok = True
         self.used_wrapper = False
+        # 三个阶段的结论。探针失败 → 降级直接编译原文件；符号发现失败 →
+        # 同样降级。两者都不该让整个构建失败（见 _fallback_compile）。
+        self.probe_ok = True
+        self.wrapper_ok = True
         self.warnings: List[str] = []
         # 用户配置错误（不是编译错误）：整条构建要立刻停下并原文报出，
-        # 不能降级、不能继续 —— 见 build_one_unit 里对退出码 4 的处理。
+        # 不能降级、不能继续 —— 见 generate_wrappers 对退出码 4 的处理。
         self.config_error: str = ""
 
 
+# ===========================================================================
+# 增量构建：内容指纹 + 依赖文件
+#
+# ★★ 判据为什么是「内容指纹」而不是 mtime ★★
+#   与核心库那条判据同源（见 do_build 里 _core_fingerprint 的说明）：
+#   git clone / 解压 zip / 云盘同步都会让时间戳失真，而"时间戳看起来没变"
+#   的表现是【静默复用旧产物】—— 报错指向别处，根因完全看不出来。
+#
+# ★★ 依赖集合从哪来：编译器自己写的 .d ★★
+#   每个真正产出 .o 的编译都带 -MD -MF，由 clang 记下本次编译【实际读过】
+#   的全部文件。下一次构建按这份名单逐个哈希。这就是 make / ninja 的做法：
+#   不猜、不扫目录，只信编译器自己的记录。
+#
+#   它为什么是严的：
+#     · 新增 #include 必然改动源文件或某个被包含的头文件 → 指纹变；
+#     · 删掉一个头文件 → 名单里那个路径读不到 → 判为失效（重建）；
+#     · 改了 -I 顺序 / flags / 编译器 → 命令行参与指纹 → 变；
+#     · 改了 scut_project.json 里的尺寸 → 生成的契约头 scut_config.h
+#       内容变，而它在依赖名单里 → 变。
+#   唯一不覆盖的是「新增一个文件让 __has_include 改选」这类
+#   【不改变任何既有文件内容】的场景 —— make 与 ninja 同样不覆盖。
+#   本仓库里 __has_include 只用于 scut_config.h / config.h 二选一，
+#   而 scut_config.h 恒在 -I 的最前面，所以这个缺口落不到实处。
+# ===========================================================================
 
-def build_one_unit(job: UnitJob, cc: str, python: str,
-                   symbols_tool: str, base_flags: List[str], user_flags: List[str],
-                   probe_flags: List[str], include_dirs: List[str],
-                   auto_watch: bool, output_array: str,
-                   output_owner: Optional[str], image_size: str,
-                   reporter: Reporter, log_lock: threading.Lock,
-                   logs: List[str], proj: "Project",
-                   exclude_names: str = "", max_elems: int = 0) -> bool:
-    """
-    一个用户编译单元的完整流水线：
+STAMP_VERSION = "scut-unit-1"
 
-        探针编译 → scut_symbols.py → 编译包装单元
-        任一环节失败 → 直接编译原文件（降级，但绝不整体失败）
+
+def _cmd_text(cmd: Sequence[str]) -> str:
+    """给人看的命令行（只用于日志；执行永远用列表形式）。"""
+    return " ".join('"%s"' % a if " " in a else a for a in cmd)
+
+
+def _sha256_file(path: str) -> str:
+    """文件内容指纹。读不了返回空串 —— 调用方一律当成「必须重建」。"""
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 16), b""):
+                h.update(chunk)
+    except OSError:
+        return ""
+    return h.hexdigest()
+
+
+def parse_dep_text(text: str) -> List[str]:
+    """解析 clang/gcc `-MD` 生成的 .d 文本，返回依赖路径（不含目标）。
+
+    ★ 为什么不能直接 split：Makefile 的依赖格式有三种转义
+      （`\\ ` 表示空格、`\\\\` 表示反斜杠、`$$` 表示 `$`），
+      而本项目的硬要求是「路径含空格与中文必须能用」。
+      直接 split 会把 `D:\\我的 工程\\a.h` 拆成两半，于是那份头文件
+      【永远不参与指纹】—— 改了它却不重建，属于最难查的一类缺陷。
+
+    ★ 目标与依赖的分界取「冒号后面跟空白」，而不是第一个冒号：
+      Windows 路径的盘符本身也是冒号
+      （`D:\\proj\\.scut\\obj\\camera.o: ...`），按第一个冒号切会把
+      目标切在盘符处，剩下的依赖全带上 `\\proj\\...` 前缀而读不到。
     """
-    def _append(text: str) -> None:
+    # 先拼回被反斜杠续行拆开的多行
+    text = text.replace("\\\r\n", " ").replace("\\\n", " ")
+    m = re.search(r":(?=\s)", text)
+    if m:
+        text = text[m.end():]
+    out: List[str] = []
+    cur: List[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "\\" and i + 1 < n:
+            nxt = text[i + 1]
+            if nxt in (" ", "\t", ":", "#", "\\"):
+                cur.append(nxt)
+                i += 2
+                continue
+            cur.append(ch)
+            i += 1
+            continue
+        if ch == "$" and i + 1 < n and text[i + 1] == "$":
+            cur.append("$")
+            i += 2
+            continue
+        if ch.isspace():
+            if cur:
+                out.append("".join(cur))
+                cur = []
+            i += 1
+            continue
+        cur.append(ch)
+        i += 1
+    if cur:
+        out.append("".join(cur))
+    return out
+
+
+def read_dep_paths(dep_file: str, root: str) -> Optional[List[str]]:
+    """读依赖名单，相对路径按编译时的工作目录（工程根）解析。
+
+    读不到 / 是空的 → 返回 None，调用方据此判为「无法判断，必须重建」。
+    """
+    try:
+        with open(dep_file, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return None
+    if not text.strip():
+        return None
+    paths: List[str] = []
+    for p in parse_dep_text(text):
+        if not os.path.isabs(p):
+            p = os.path.normpath(os.path.join(root, p))
+        paths.append(p)
+    return paths or None
+
+
+def read_stamp(path: str) -> Dict[str, Any]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_stamp(path: str, payload: Dict[str, Any]) -> None:
+    atomic_write_text(path, json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+def fingerprint_of(parts: Sequence[str], deps: Optional[Sequence[str]]) -> str:
+    """把「命令行/配置」与「依赖文件内容」合成一个指纹。
+
+    ★ deps 为空时【必须】返回空串，而不是"空依赖集合的指纹"：
+      否则"上次的 .d 丢了"会被判成"最新"，于是永远不再重建。
+      任何一个依赖读不到也一样 —— 宁可多编一次，不可复用错的产物。
+    """
+    if not deps:
+        return ""
+    h = hashlib.sha256()
+    h.update(STAMP_VERSION.encode())
+    for p in parts:
+        h.update(b"\0")
+        h.update(p.encode("utf-8", "replace"))
+    for p in sorted(set(deps)):
+        digest = _sha256_file(p)
+        if not digest:
+            return ""
+        h.update(b"\0")
+        h.update(p.encode("utf-8", "replace"))
+        h.update(b"=")
+        h.update(digest.encode())
+    return h.hexdigest()
+
+
+def _generator_fingerprint() -> str:
+    """生成器与编排脚本自身的内容指纹。
+
+    ★ 编排脚本为什么也要算：--no-watch 那条路的薄包装 C 代码是
+      _thin_copy_fn 现拼出来的。它改了而指纹不变，就会一直复用旧产物。
+      代价是读一个 130 KB 的文件（约 1 ms），换来"改了生成逻辑必然重建"。
+    """
+    h = hashlib.sha256()
+    for p in (SYMBOLS_TOOL,
+              os.path.join(SCUT_TOOL_ROOT, "tools", "scut_dwarf.py"),
+              os.path.abspath(__file__)):
+        h.update(os.path.basename(p).encode("utf-8", "replace"))
+        h.update(b"=")
+        h.update(_sha256_file(p).encode())
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+class BuildEnv:
+    """一次构建里所有单元共享的编译环境。
+
+    ★ 为什么收成一个对象：流水线拆成三个阶段之后，每个阶段都要这十几个
+      参数。用位置参数传等于把「谁是谁」交给顺序记忆 —— 那是本项目最不能
+      接受的一类脆弱（参数顺序写错不会报错，只会静默编错东西）。
+    """
+
+    def __init__(self, *, cc: str, cc_version: str, python: str,
+                 symbols_tool: str, base_flags: List[str],
+                 user_flags: List[str], probe_flags: List[str],
+                 include_dirs: List[str], auto_watch: bool,
+                 output_array: str, output_owner: Optional[str],
+                 image_size: str, exclude_names: str, max_elems: int,
+                 proj: "Project", reporter: Reporter,
+                 log_lock: threading.Lock, logs: List[str],
+                 generator_fp: str) -> None:
+        self.cc = cc
+        self.cc_version = cc_version
+        self.python = python
+        self.symbols_tool = symbols_tool
+        self.base_flags = base_flags
+        self.user_flags = user_flags
+        self.probe_flags = probe_flags
+        self.include_dirs = include_dirs
+        self.auto_watch = auto_watch
+        self.output_array = output_array
+        self.output_owner = output_owner
+        self.image_size = image_size
+        self.exclude_names = exclude_names
+        self.max_elems = max_elems
+        self.proj = proj
+        self.root = proj.root
+        self.reporter = reporter
+        self.log_lock = log_lock
+        self.logs = logs
+        self.generator_fp = generator_fp
+
+    def append(self, text: str) -> None:
         if text:
-            with log_lock:
-                logs.append(text)
+            with self.log_lock:
+                self.logs.append(text)
 
-    if not auto_watch:
+
+def probe_cmd(job: UnitJob, env: BuildEnv) -> List[str]:
+    """探针编译：只为拿到 DWARF，产物不参与链接。
+
+    ★ 不带 -MD：依赖名单以【真正产出 .o 的那次编译】为准，
+      探针的依赖集合是它的子集（探针不 include 包装单元多出来的头），
+      再记一份只会互相覆盖。
+    """
+    return ([env.cc] + env.base_flags + env.probe_flags + env.include_dirs
+            + ["-c", job.src, "-o", job.obj])
+
+
+def dep_flags(job: UnitJob) -> List[str]:
+    """让编译器自己记下本次读过的全部文件（make/ninja 的依赖来源）。"""
+    return ["-MD", "-MF", job.dep]
+
+
+def wrap_cmd(job: UnitJob, env: BuildEnv) -> List[str]:
+    """编译包装单元 = 真正参与链接的 .o。"""
+    return ([env.cc] + env.base_flags + env.user_flags + env.include_dirs
+            + dep_flags(job) + ["-c", job.wrapped, "-o", job.wrapped_obj])
+
+
+def direct_cmd(job: UnitJob, env: BuildEnv) -> List[str]:
+    """直接编译用户原文件（--no-watch 与降级路径共用）。"""
+    return ([env.cc] + env.base_flags + env.user_flags + env.include_dirs
+            + dep_flags(job) + ["-c", job.src, "-o", job.wrapped_obj])
+
+
+def unit_fingerprint_parts(job: UnitJob, env: BuildEnv) -> List[str]:
+    """本单元里「非文件内容」的那部分输入。
+
+    ★ 三条命令行【全部】参与指纹，而不是只算这次会走的那条：
+      指纹的职责是"只要输入变了就重建"，而"这次走哪条"本身
+      取决于配置与阶段成败，不是一个稳定的判据。
+    """
+    return [
+        "cc=" + env.cc,
+        "ccver=" + env.cc_version,
+        "generator=" + env.generator_fp,
+        "watch=" + ("1" if env.auto_watch else "0"),
+        "out=" + env.output_array,
+        "owner=" + ("1" if env.output_owner == job.src else "0"),
+        "exclude=" + env.exclude_names,
+        "max=" + str(env.max_elems),
+        "size=" + env.image_size,
+        "probe=$ " + _cmd_text(probe_cmd(job, env)),
+        "wrap=$ " + _cmd_text(wrap_cmd(job, env)),
+        "direct=$ " + _cmd_text(direct_cmd(job, env)),
+    ]
+
+
+def unit_up_to_date(job: UnitJob, env: BuildEnv) -> Optional[Dict[str, Any]]:
+    """这个单元能否直接复用上次的产物？能就返回它上次的 stamp。
+
+    ★ 返回 stamp 而不是 bool：调用方必须知道"上次走的是包装单元吗"。
+      变量清单与结果图搬运函数是否存在取决于这个标记，猜不得。
+    """
+    if not os.path.isfile(job.wrapped_obj):
+        return None
+    deps = read_dep_paths(job.dep, env.root)
+    if not deps:
+        return None
+    want = fingerprint_of(unit_fingerprint_parts(job, env), deps)
+    if not want:
+        return None
+    stamp = read_stamp(job.stamp)
+    if stamp.get("fp") != want:
+        return None
+    if stamp.get("wrapper"):
+        # 包装单元那条路：生成物也必须在，否则变量面板会空、搬运函数会缺。
+        if not (os.path.isfile(job.wrapped) and os.path.isfile(job.manifest)):
+            return None
+    elif env.auto_watch:
+        # ★★ 上次走的是【降级路径】，而这次要求自动符号发现 → 不许复用 ★★
+        #
+        #   降级（探针编译失败 / 生成器起不来 / 生成物落盘失败）是
+        #   【一次性事件】，而指纹里没有任何一项能反映"上次降级了"：
+        #   同样的源码、同样的命令行，降级前后算出来的 fp 完全一样。
+        #   于是复用它等于把降级【永久固化】：
+        #     · 变量面板永远少这个文件的变量，而且没有警告 ——
+        #       警告只在降级那一次打过，用户多半没看见；
+        #     · do_build 的「结果图数组有没有被生成」检查会一直报
+        #       "数组名在 code/ 里找不到"，而那个数组明明存在；
+        #     · 用户唯一的逃生口是【改动源文件】让指纹变 ——
+        #       这完全不可发现，他会去改配置里的数组名，越改越错。
+        #
+        #   为什么不是"降级过就永不缓存"：--no-watch 那条路合法地走
+        #   direct_cmd（wrapper=False），它必须能复用，所以只在
+        #   auto_watch 时把这个 stamp 判为不可用。代价是降级后每次
+        #   构建都重试一遍符号发现 —— 那正是想要的：降级是可恢复的，
+        #   而"上次失败了"不是放弃重试的理由。
+        return None
+    return stamp
+
+
+def refresh_unit_stamp(job: UnitJob, env: BuildEnv) -> None:
+    """编译成功后把本次指纹落盘（下次构建据此判断能否跳过）。
+
+    ★ 必须在【编译之后】重新算一次：.d 是这次编译才写出来的，
+      它可能比上次多出几个头文件。存下来的必须是新名单的指纹。
+    """
+    deps = read_dep_paths(job.dep, env.root)
+    fp = fingerprint_of(unit_fingerprint_parts(job, env), deps)
+    if not fp:
+        return
+    try:
+        write_stamp(job.stamp, {"fp": fp, "wrapper": bool(job.used_wrapper)})
+    except OSError:
+        # 写不了 stamp 只是"下次多编一次"，绝不能让构建失败。
+        pass
+
+
+def _parallel_map(workers: int, fn, items: List[UnitJob]) -> None:
+    """按单元并行跑一个阶段。items 少于 2 个时不开线程池。"""
+    if workers <= 1 or len(items) <= 1:
+        for it in items:
+            fn(it)
+        return
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        list(ex.map(fn, items))
+
+
+# ---------------------------------------------------------------------------
+# 阶段 1：探针编译
+# ---------------------------------------------------------------------------
+
+def probe_unit(job: UnitJob, env: BuildEnv) -> None:
+    """第 1 遍：探针编译（-g -O0，固定），产出 DWARF 供符号发现。"""
+    if not env.auto_watch:
+        return
+    cmd = probe_cmd(job, env)
+    env.reporter.detail("  [1/3 探针] $ " + _cmd_text(cmd))
+    r = run_cmd(cmd, cwd=env.root)
+    env.append(r.out)
+    if r.code != 0:
+        job.probe_ok = False
+        job.warnings.append(
+            "探针编译失败，已改为直接编译原文件（不会影响本次构建，"
+            "但该文件的全局变量不会出现在变量面板里）。")
+
+
+# ---------------------------------------------------------------------------
+# 阶段 2：符号发现（一次进程处理全部单元）
+# ---------------------------------------------------------------------------
+
+def read_batch_result(path: str) -> Optional[List[Dict[str, Any]]]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    units = data.get("units")
+    return units if isinstance(units, list) else None
+
+
+def generate_wrappers(jobs: List[UnitJob], env: BuildEnv) -> None:
+    """第 2 遍：一次进程生成全部包装单元 + 变量清单。
+
+    ★★ 为什么合成一次，而不是每个文件起一次 python ★★
+      这一步真正的计算只有几十毫秒（读 DWARF 11 ms、扫手写注册 5 ms），
+      其余全是 Python 解释器启动。而启动耗时在装了实时扫描的机器上会被
+      放大一个数量级（实测同一台机器上 `python -c pass` 在 27 ms 与
+      1050 ms 之间双峰摆动）。N 个文件就是 N 次启动，纯属白付。
+      批量化之后，启动次数与文件数无关。
+
+    ★ 仍然先写暂存目录再 os.replace：插件可能在构建过程中读这些文件，
+      半截文件会让变量面板偶发为空，且极难复现。暂存目录保持
+      【同样的文件名】，这样生成文件头里的注释不会带上 .tmp 之类的脏东西。
+    """
+    todo = [j for j in jobs if j.probe_ok and not j.config_error]
+    if not env.auto_watch or not todo:
+        return
+    staging = tempfile.mkdtemp(prefix="scut_gen_", dir=env.proj.scut_dir)
+    try:
+        units = []
+        for j in todo:
+            units.append({
+                "obj": j.obj,
+                # --src 会原样写进生成文件的 #include，所以必须是
+                # 【相对 code/】的路径（--src 只能给相对路径）。
+                "src": j.rel,
+                # 扫描"用户手写注册"要另给一个绝对路径：本脚本可能在任意
+                # 工作目录下运行，若生成器按相对路径 open()，会失败、
+                # 被 except 吞掉、静默返回空集 —— 症状是"用户主动注册的
+                # 变量一个都不显示"，而且没有任何报错。
+                "srcAbs": j.src,
+                "outC": os.path.join(staging, os.path.basename(j.wrapped)),
+                "outJson": os.path.join(staging, os.path.basename(j.manifest)),
+            })
+        spec = {
+            "outputArray": env.output_array,
+            "exclude": env.exclude_names,
+            "maxElems": env.max_elems,
+            "imageSize": env.image_size,
+            "units": units,
+        }
+        spec_path = os.path.join(staging, "batch.json")
+        out_path = os.path.join(staging, "batch.out.json")
+        atomic_write_text(spec_path, json.dumps(spec, ensure_ascii=False))
+
+        cmd = [env.python, env.symbols_tool,
+               "--batch", spec_path, "--batch-out", out_path]
+        env.reporter.detail("  [2/3 生成] $ " + _cmd_text(cmd))
+        run_env = dict(os.environ)
+        # 保证生成脚本自身的中文输出不会因 Windows 控制台编码而炸
+        run_env["PYTHONIOENCODING"] = "utf-8"
+        run_env["PYTHONUTF8"] = "1"
+        r = run_cmd(cmd, cwd=env.root, env=run_env)
+        env.append(r.out)
+
+        results = read_batch_result(out_path)
+        if results is None:
+            # 整个进程都没给出结果（解释器起不来 / 脚本崩了）：
+            # 全部按"符号发现失败"降级，绝不整体失败。
+            tail = (r.out or "").strip().splitlines()
+            reason = tail[-1] if tail else "无输出"
+            for j in todo:
+                j.wrapper_ok = False
+                j.warnings.append(
+                    "自动符号发现失败（%s），已改为直接编译原文件。"
+                    "这一步只读探针 .o 里的 DWARF，不依赖任何外部工具 ——"
+                    "所以多半是 Python 解释器的问题。请运行 doctor 查看详情。"
+                    % reason)
+            return
+
+        for idx, j in enumerate(todo):
+            res = results[idx] if idx < len(results) else {}
+            code = int(res.get("code", 1) or 0)
+            msg = str(res.get("message") or "").strip()
+            if code == 0:
+                tmp_c = units[idx]["outC"]
+                tmp_j = units[idx]["outJson"]
+                if not os.path.isfile(tmp_c):
+                    code = 1
+                    msg = msg or "生成器没有产出包装单元"
+                else:
+                    try:
+                        os.replace(tmp_c, j.wrapped)
+                        if os.path.isfile(tmp_j):
+                            os.replace(tmp_j, j.manifest)
+                    except OSError as exc:
+                        code = 1
+                        msg = "生成物落盘失败（%s）" % exc
+            if code == 0:
+                continue
+            if code == 4:
+                # ★ 退出码 4 = 生成器发现【用户配置问题】（结果图数组名
+                #   指向标量）。这里【绝不能】降级为"直接编译原文件"：
+                #   那样会得到"构建成功但图是垃圾"，用户配置错了这件事
+                #   就被彻底掩盖了 —— 那正是要避免的。
+                j.config_error = msg or "结果图数组的形状不合法。"
+                j.ok = False
+                continue
+            j.wrapper_ok = False
+            j.warnings.append(
+                "自动符号发现失败（%s），已改为直接编译原文件。"
+                "这一步只读探针 .o 里的 DWARF，不依赖任何外部工具 ——"
+                "所以多半是 Python 解释器的问题。请运行 doctor 查看详情。"
+                % (msg or "无输出"))
+    finally:
+        # 无论成败都清掉暂存目录，避免 .scut 下堆积临时文件
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# 阶段 3：编译出真正参与链接的 .o
+# ---------------------------------------------------------------------------
+
+def compile_unit(job: UnitJob, env: BuildEnv) -> bool:
+    """第 3 遍：产出真正参与链接的目标文件（或走降级路径）。"""
+    if job.config_error:
+        return False
+
+    if not env.auto_watch:
         # --no-watch：跳过探针与符号发现，直接编译原文件（最快路径）。
         #
         # ★ 但"结果图搬运"必须照旧生成 —— 它和符号发现是两件事：
@@ -1714,152 +2228,42 @@ def build_one_unit(job: UnitJob, cc: str, python: str,
         #   每个用户 .c 都参与链接；若人人都定义一遍，链接期就是
         #   duplicate symbol —— 而报错指向生成文件，用户完全看不懂。
         #   所有者由 find_output_owner 在 do_build 里预先探查好传进来。
-        if output_array and output_owner == job.src:
+        if env.output_array and env.output_owner == job.src:
             with open(job.wrapped, "w", encoding="utf-8") as f:
                 f.write('/* 由 scut_build.py 生成（--no-watch 薄包装）：'
                         '只放结果图搬运，不做符号发现。 */\n')
                 f.write('#include "scut_sdk.h"\n')
                 f.write('#include "%s"\n' % job.rel)
-                f.write(_thin_copy_fn(output_array))
-            cmd = [cc] + base_flags + user_flags + include_dirs + \
-                  ["-c", job.wrapped, "-o", job.wrapped_obj]
+                f.write(_thin_copy_fn(env.output_array))
+            cmd = wrap_cmd(job, env)
         else:
-            cmd = [cc] + base_flags + user_flags + include_dirs + \
-                  ["-c", job.src, "-o", job.wrapped_obj]
-        reporter.detail("  $ " + " ".join('"%s"' % a if " " in a else a for a in cmd))
-        r = run_cmd(cmd)
-        _append(r.out)
+            cmd = direct_cmd(job, env)
+        env.reporter.detail("  $ " + _cmd_text(cmd))
+        r = run_cmd(cmd, cwd=env.root)
+        env.append(r.out)
         if r.code != 0:
             job.ok = False
-        return job.ok
-
-    # ---- 第 1 遍：探针编译（-g -O0，固定） ----------------
-    probe_cmd = [cc] + base_flags + probe_flags + include_dirs + \
-                ["-c", job.src, "-o", job.obj]
-    reporter.detail("  [1/3 探针] $ " + " ".join(
-        '"%s"' % a if " " in a else a for a in probe_cmd))
-    r = run_cmd(probe_cmd)
-    _append(r.out)
-    if r.code != 0:
-        job.warnings.append(
-            "探针编译失败，已改为直接编译原文件（不会影响本次构建，"
-            "但该文件的全局变量不会出现在变量面板里）。")
-        return _fallback_compile(job, cc, base_flags, user_flags, include_dirs,
-                                 reporter, _append)
-
-    # ---- 第 2 遍：调用 scut_symbols.py 生成包装单元 ----------------------
-    # ★ 先写临时文件再 os.replace：插件可能在构建过程中读这些文件，
-    #   半截文件会让变量面板偶发为空，且极难复现。
-    #
-    # ★ 为什么临时文件放在【独立的临时目录】而不是 `xxx.wrapped.c.tmp`：
-    #   scut_symbols.py 会把 --out-c 的【文件名】写进生成文件头的注释里
-    #   （"<name> AUTO-GENERATED ..."）。若临时名带 .tmp，最终产物开头
-    #   会永远写着 `main.wrapped.c.tmp` —— 一个看得见、但没人能解释的
-    #   脏东西。把临时文件放到同盘的另一目录、并保持【同样的文件名】，
-    #   既保住了 os.replace 的原子性（同文件系统），产物内容也干净。
-    staging = tempfile.mkdtemp(prefix="scut_gen_", dir=proj.scut_dir)
-    try:
-        tmp_c = os.path.join(staging, os.path.basename(job.wrapped))
-        tmp_j = os.path.join(staging, os.path.basename(job.manifest))
-
-        gen_cmd = [
-            python, symbols_tool,
-            "--obj", job.obj,
-            # --src 会原样写进生成文件的 #include，所以必须是【相对 code/】的
-            # 路径（--src 只能给相对路径，给绝对路径会编不过）。
-            "--src", job.rel,
-            # 扫描"用户手写注册"要另给一个绝对路径：本脚本可能在任意工作目录
-            # 下运行，若生成器按相对路径 open()，会失败、被 except 吞掉、
-            # 静默返回空集 —— 症状是"用户主动注册的变量一个都不显示"，
-            # 而且没有任何报错。（曾经就这么坏着，靠手动调生成器才暴露。）
-            "--src-abs", job.src,
-            "--out-c", tmp_c,
-            "--out-json", tmp_j,
-        ]
-        if output_array:
-            # 结果图数组名交给生成器：只有它展开了用户源码，
-            # 才知道这个数组的真实类型与作用域。
-            gen_cmd += ["--output-array", output_array]
-        if image_size:
-            # 尺寸只用于错误提示的措辞（"环境要按 120 行 × 188 列去读它"），
-            # 不参与任何生成逻辑 —— 真值来源始终是工程配置。
-            gen_cmd += ["--image-size", image_size]
-        # ★ 这两个开关 scut_symbols.py 一直支持，但本脚本【从来不传】——
-        #   于是它们在整条构建链上不可达：命令行没有、配置没有、UI 也没有。
-        #   一个"实现了却没人能调到"的开关比没有更糟：读生成器代码的人
-        #   会以为构建侧已经在用它们了。
-        #   现在补上透传（值来自 --exclude / --max-elems，默认空/0 = 不启用）。
-        if exclude_names:
-            gen_cmd += ["--exclude", exclude_names]
-        if max_elems > 0:
-            gen_cmd += ["--max-elems", str(max_elems)]
-        reporter.detail("  [2/3 生成] $ " + " ".join(
-            '"%s"' % a if " " in a else a for a in gen_cmd))
-        env = dict(os.environ)
-        # 保证生成脚本自身的中文输出不会因 Windows 控制台编码而炸
-        env["PYTHONIOENCODING"] = "utf-8"
-        env["PYTHONUTF8"] = "1"
-        r = run_cmd(gen_cmd, env=env)
-        _append(r.out)
-        if r.code == 4:
-            # ★ 退出码 4 = 生成器发现【用户配置问题】（结果图数组名指向标量）。
-            #
-            #   这里【绝不能】降级为"直接编译原文件"：
-            #   那样会得到一个"构建成功但图是垃圾"的结果，
-            #   而用户配置错了这件事就被彻底掩盖了 —— 那正是要避免的。
-            #
-            #   ★ 保留完整的多行说明，只剥掉生成器的 [scut_symbols] 前缀：
-            #     "为什么必须拦住 / 下一步"才是用户真正要读的，
-            #     只取第一行等于把最有用的部分丢掉。
-            raw = (r.out or "").strip() or "结果图数组的形状不合法。"
-            kept = []
-            for line in raw.splitlines():
-                s = line.strip()
-                if s.startswith("[scut_symbols]"):
-                    s = s[len("[scut_symbols]"):].strip()
-                kept.append(s)
-            job.config_error = "\n".join(kept).strip()
-            job.ok = False
             return False
-        if r.code != 0 or not os.path.isfile(tmp_c):
-            job.warnings.append(
-                "自动符号发现失败（%s），已改为直接编译原文件。"
-                "这一步只读探针 .o 里的 DWARF，不依赖任何外部工具 ——"
-                "所以多半是 Python 解释器的问题。请运行 doctor 查看详情。"
-                % (r.out.strip().splitlines()[-1] if r.out.strip() else "无输出"))
-            return _fallback_compile(job, cc, base_flags, user_flags,
-                                     include_dirs, reporter, _append)
+        refresh_unit_stamp(job, env)
+        return True
 
-        try:
-            os.replace(tmp_c, job.wrapped)
-            if os.path.isfile(tmp_j):
-                os.replace(tmp_j, job.manifest)
-        except OSError as exc:
-            job.warnings.append("生成物落盘失败（%s），已改为直接编译原文件。"
-                                % exc)
-            return _fallback_compile(job, cc, base_flags, user_flags,
-                                     include_dirs, reporter, _append)
-    finally:
-        # 无论成败都清掉暂存目录，避免 .scut 下堆积临时文件
-        shutil.rmtree(staging, ignore_errors=True)
+    if not (job.probe_ok and job.wrapper_ok):
+        return _fallback_compile(job, env)
 
-    # ---- 第 3 遍：编译包装单元 = 真正的目标文件 ---------------------------
-    wrap_cmd = [cc] + base_flags + user_flags + include_dirs + \
-               ["-c", job.wrapped, "-o", job.wrapped_obj]
-    reporter.detail("  [3/3 包装] $ " + " ".join(
-        '"%s"' % a if " " in a else a for a in wrap_cmd))
-    r = run_cmd(wrap_cmd)
-    _append(r.out)
+    cmd = wrap_cmd(job, env)
+    env.reporter.detail("  [3/3 包装] $ " + _cmd_text(cmd))
+    r = run_cmd(cmd, cwd=env.root)
+    env.append(r.out)
     if r.code != 0:
         # 包装单元编译失败通常是自动发现的边界情况（例如某个变量在
         # 文件作用域其实不可见）。降级编译原文件，保证「算法能跑」优先。
         job.warnings.append(
             "编译自动生成的包装单元失败，已改为直接编译原文件。"
             "该文件的全局变量不会出现在变量面板里，但算法本身可以正常运行。")
-        return _fallback_compile(job, cc, base_flags, user_flags, include_dirs,
-                                 reporter, _append)
+        return _fallback_compile(job, env)
 
     job.used_wrapper = True
+    refresh_unit_stamp(job, env)
     return True
 
 
@@ -1940,9 +2344,7 @@ def find_output_owner(sources: List[str], out_array: str, cc: str,
     return None
 
 
-def _fallback_compile(job: UnitJob, cc: str, base_flags: List[str],
-                      user_flags: List[str], include_dirs: List[str],
-                      reporter: Reporter, append) -> bool:
+def _fallback_compile(job: UnitJob, env: BuildEnv) -> bool:
     """
     降级路径：直接编译用户原文件。
 
@@ -1950,18 +2352,18 @@ def _fallback_compile(job: UnitJob, cc: str, base_flags: List[str],
       「变量面板少几个变量」和「算法根本跑不起来」是严重性完全不同的两件事，
       绝不能让前者导致后者。
 
-    ★ 参数名写 user_flags 而不是 mode_flags：这里编的是【用户源码】，
-      必须恒为 -O0（可调试性要求），不能跟随环境变成 -O2。
+    ★ 编的是【用户源码】，所以恒用 user_flags（-O0），
+      不能跟随环境变成 -O2。
     """
-    cmd = [cc] + base_flags + user_flags + include_dirs + \
-          ["-c", job.src, "-o", job.wrapped_obj]
-    reporter.detail("  [降级] $ " + " ".join(
-        '"%s"' % a if " " in a else a for a in cmd))
-    r = run_cmd(cmd)
-    append(r.out)
+    cmd = direct_cmd(job, env)
+    env.reporter.detail("  [降级] $ " + _cmd_text(cmd))
+    r = run_cmd(cmd, cwd=env.root)
+    env.append(r.out)
     if r.code != 0:
         job.ok = False
-    return job.ok
+        return False
+    refresh_unit_stamp(job, env)
+    return True
 
 
 # ===========================================================================
@@ -2010,6 +2412,47 @@ def prune_stale_staging(scut_dir: str) -> int:
             removed += 1
         except OSError:
             # 被占用 / 权限不足：跳过即可，不影响本次构建
+            continue
+    return removed
+
+
+def prune_clean_trash(scut_dir: str) -> int:
+    """清掉上次 clean 删失败留下的 `<scut>.deleting-*` 目录。
+
+    ★ 与 prune_stale_staging 的区别（两个函数都在"打扫"，但扫的不是一处）：
+        prune_stale_staging 扫的是 .scut 【里面】的 scut_gen_*（构建中途被强杀）；
+        本函数扫的是 .scut 【旁边】的 .scut.deleting-*（clean 改名成功但删不动）。
+      它们是两次不同事故的残留，所以没有合并 —— 合并会让"这个函数到底
+      该在哪一层目录里找"变得需要猜。
+
+    ★ 为什么可以整目录删（不像 prune_stale_staging 那样只删空的）：
+      `.scut.deleting-<pid>` 这个命名只有 clean 会创建，而且创建它的那一刻
+      真正的 .scut 已经被改名走了。所以它【一定】是待删垃圾，不可能是
+      "别人正在用的目录"。唯一要小心的是别删到自己刚建的那个 —— 调用方
+      在改名之后才调本函数，此时自己的那个已经在删了。
+
+    返回删掉的个数（只用于日志）。
+    """
+    parent = os.path.dirname(scut_dir)
+    prefix = os.path.basename(scut_dir) + ".deleting-"
+    if not os.path.isdir(parent):
+        return 0
+    removed = 0
+    try:
+        names = os.listdir(parent)
+    except OSError:
+        return 0
+    for name in names:
+        if not name.startswith(prefix):
+            continue
+        path = os.path.join(parent, name)
+        if not os.path.isdir(path):
+            continue
+        try:
+            shutil.rmtree(path)
+            removed += 1
+        except OSError:
+            # 还占着就下次再试，不影响本次结果
             continue
     return removed
 
@@ -2071,6 +2514,12 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
     stale = prune_stale_staging(proj.scut_dir)
     if stale:
         reporter.detail("  清理了 %d 个上次残留的空暂存目录" % stale)
+    # ★ 再顺手清掉"清理时删失败"留下的 .scut.deleting-*（在 .scut 旁边）。
+    #   放在这里是因为用户不一定再点一次「清理」，而构建是他一定会做的事 ——
+    #   不在这儿扫，那个目录就永远留在工程里。
+    trash = prune_clean_trash(proj.scut_dir)
+    if trash:
+        reporter.detail("  清理了 %d 个上次删失败留下的目录" % trash)
     with timer.stage("工具链探测"):
         tc = detect_toolchain(args.toolchain, reporter)
         for w in tc.warnings:
@@ -2488,27 +2937,60 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
         except Exception as exc:  # noqa: BLE001 - 纯锦上添花，绝不影响构建
             reporter.detail("  跳过 clangd 索引生成：%s" % exc)
 
+    # 生成器自身的内容指纹：符号发现脚本、DWARF 读取器、本脚本。
+    # ★ 为什么要算本脚本：--no-watch 那条路的薄包装 C 代码是
+    #   _thin_copy_fn 现拼出来的，它改了而指纹不变就会一直复用旧产物。
+    #   代价是读一个 130 KB 的文件（约 1 ms），换来"改了生成逻辑必然重建"。
+    generator_fp = _generator_fingerprint()
+
     # --- 5) 编译 bind 单元 -------------------------------------------------
     # bind 是唯一知道编译期尺寸的地方，改 config.h 只需重编它 + 用户算法，
     # 核心库零重编 —— 这是整套架构的核心收益。
+    #
+    # ★ 这里也做增量：bind 的输入集合是固定的（它只 include core/include
+    #   下的头与生成的 scut_config.h），不需要依赖文件，直接把源文件、
+    #   头文件目录与命令行一起哈希即可。判据与用户单元共用
+    #   fingerprint_of / read_stamp / write_stamp，只是依赖名单是我们自己
+    #   列出来的（见 bind_inputs）。
     bind_obj = os.path.join(proj.obj_dir, "scut_bind.o")
+    bind_stamp = os.path.join(proj.obj_dir, "scut_bind.stamp")
+    bind_inputs = sorted(
+        [bind_src]
+        + [os.path.join(core_include, n)
+           for n in (os.listdir(core_include)
+                     if os.path.isdir(core_include) else [])
+           if n.endswith(".h")]
+        + [os.path.join(proj.gen_dir, "scut_config.h")])
+    bind_parts = ["cc=" + tc.cc,
+                  "ccver=" + tc.cc_version,
+                  "gen=" + generator_fp,
+                  "cmd=$ " + _cmd_text(
+                      [tc.cc] + base_flags + env_flags + include_dirs
+                      + ["-c", bind_src, "-o", bind_obj])]
+    bind_fp = fingerprint_of(bind_parts, bind_inputs)
+    bind_cached = (bool(bind_fp)
+                   and os.path.isfile(bind_obj)
+                   and read_stamp(bind_stamp).get("fp") == bind_fp)
     with timer.stage("编译 bind 单元"):
-        bind_cmd = ([tc.cc] + base_flags + env_flags + include_dirs
-                    + ["-c", bind_src, "-o", bind_obj])
-        reporter.detail("  $ " + " ".join(
-            '"%s"' % a if " " in a else a for a in bind_cmd))
-        rb = run_cmd(bind_cmd)
-        with log_lock:
-            logs.append(rb.out)
-        if rb.code != 0:
-            diags = parse_diagnostics(rb.out)
-            reporter.error("绑定单元 scut_bind.c 编译失败。\n"
-                           "    原因：多半是 config.h 里的 SCUT_IMAGE_W/H "
-                           "不合法，或 core/include 下的头文件缺失。\n"
-                           "    " + first_error_digest(diags).replace("\n", "\n    "))
-            timer.report()
-            return finish(1)
-
+        if bind_cached:
+            reporter.detail("  bind 单元未变化，复用 %s" % bind_obj)
+        else:
+            bind_cmd = ([tc.cc] + base_flags + env_flags + include_dirs
+                        + ["-c", bind_src, "-o", bind_obj])
+            reporter.detail("  $ " + _cmd_text(bind_cmd))
+            rb = run_cmd(bind_cmd, cwd=proj.root)
+            with log_lock:
+                logs.append(rb.out)
+            if rb.code != 0:
+                diags = parse_diagnostics(rb.out)
+                reporter.error("绑定单元 scut_bind.c 编译失败。\n"
+                               "    原因：多半是 config.h 里的 SCUT_IMAGE_W/H "
+                               "不合法，或 core/include 下的头文件缺失。\n"
+                               "    " + first_error_digest(diags).replace("\n", "\n    "))
+                timer.report()
+                return finish(1)
+            if bind_fp:
+                write_stamp(bind_stamp, {"fp": bind_fp})
     # --- 5b) 用户源码体检：两条最常见的"看起来正常、其实跑不起来" ---
     #   ① code/ 里写了 main()：main 由呈现后端提供，两者一定撞车。
     #   ② 钩子函数被写成了 static：接线单元在另一个编译单元里调不到它。
@@ -2591,27 +3073,43 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
         reporter.human("  结果图数组 : %s（声明在 %s）"
                        % (out_array, rel_or_abs(out_owner, proj.root)))
 
-    with timer.stage("编译用户代码（%d 个文件）" % len(jobs)):
-        if workers == 1 or len(jobs) == 1:
-            for j in jobs:
-                build_one_unit(j, tc.cc, tc.python,
-                               SYMBOLS_TOOL, base_flags, user_flags, probe_flags,
-                               include_dirs, auto_watch, out_array,
-                               out_owner, img_shape,
-                               reporter, log_lock, logs, proj,
-                               exclude_names, max_elems)
-        else:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-                futs = [ex.submit(
-                    build_one_unit, j, tc.cc, tc.python,
-                    SYMBOLS_TOOL, base_flags, user_flags, probe_flags,
-                    include_dirs, auto_watch, out_array,
-                    out_owner, img_shape,
-                    reporter, log_lock, logs, proj,
-                    exclude_names, max_elems)
-                    for j in jobs]
-                concurrent.futures.wait(futs)
+    env = BuildEnv(
+        cc=tc.cc, cc_version=tc.cc_version, python=tc.python,
+        symbols_tool=SYMBOLS_TOOL, base_flags=base_flags,
+        user_flags=user_flags, probe_flags=probe_flags,
+        include_dirs=include_dirs, auto_watch=auto_watch,
+        output_array=out_array, output_owner=out_owner,
+        image_size=img_shape, exclude_names=exclude_names,
+        max_elems=max_elems, proj=proj, reporter=reporter,
+        log_lock=log_lock, logs=logs, generator_fp=generator_fp)
 
+    with timer.stage("编译用户代码（%d 个文件）" % len(jobs)):
+        # 先判增量：一个文件都没变的单元直接复用上次的 .o，
+        # 连编译器和 Python 都不启动。
+        pending: List[UnitJob] = []
+        reused = 0
+        for j in jobs:
+            stamp = unit_up_to_date(j, env)
+            if stamp is None:
+                pending.append(j)
+                continue
+            # ★ 必须把上次「走的是包装单元吗」恢复出来：
+            #   变量清单与结果图搬运函数是否存在取决于这个标记。
+            j.used_wrapper = bool(stamp.get("wrapper"))
+            reused += 1
+        # ★ 无论命中多少个都打这一行：0/4 与 4/4 都要能看见。
+        #   只在"有命中"时打的话，用户从日志里分不出
+        #   「全部重编了」和「这一段根本没跑」。
+        reporter.detail("  %d/%d 个文件未变化，复用上次的目标文件"
+                        % (reused, len(jobs)))
+        if pending:
+            # 三个阶段分轮跑，而不是一个文件一条龙：
+            #   ① 探针编译可以并行（互不依赖）；
+            #   ② 符号发现【一次进程】处理全部单元（见 generate_wrappers）；
+            #   ③ 产出 .o 再并行。
+            _parallel_map(workers, lambda j: probe_unit(j, env), pending)
+            generate_wrappers(pending, env)
+            _parallel_map(workers, lambda j: compile_unit(j, env), pending)
     for j in jobs:
         for w in j.warnings:
             reporter.warn("%s：%s" % (rel_or_abs(j.src, proj.root), w))
@@ -2675,25 +3173,46 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
     #   而那正是我们想暴露的问题（比静默不执行好得多）。
     # ★ 用 env_flags 而不是 user_flags：接线单元属于【环境】，
     #   不是用户算法 —— 环境部分恒 -O2（用户代码恒 -O0，见上面的说明）。
+    #
+    # ★ 增量判据与 bind 单元同源：它的输入是生成出来的 .c 本身
+    #   加上同一批头文件，没有别的可能。生成内容不变（配置没改）
+    #   就不该重编。
     glue_obj = os.path.join(proj.obj_dir, "scut_env_glue.o")
+    glue_stamp = os.path.join(proj.obj_dir, "scut_env_glue.stamp")
+    glue_inputs = sorted(
+        [glue_path]
+        + [os.path.join(core_include, n)
+           for n in (os.listdir(core_include)
+                     if os.path.isdir(core_include) else [])
+           if n.endswith(".h")]
+        + [os.path.join(proj.gen_dir, "scut_config.h")])
+    gcmd = ([tc.cc] + base_flags + env_flags + include_dirs
+            + ["-c", glue_path, "-o", glue_obj])
+    glue_fp = fingerprint_of(
+        ["cc=" + tc.cc, "ccver=" + tc.cc_version,
+         "gen=" + generator_fp, "cmd=$ " + _cmd_text(gcmd)], glue_inputs)
+    glue_cached = (bool(glue_fp)
+                   and os.path.isfile(glue_obj)
+                   and read_stamp(glue_stamp).get("fp") == glue_fp)
     with timer.stage("编译环境接线"):
-        gcmd = ([tc.cc] + base_flags + env_flags + include_dirs
-                + ["-c", glue_path, "-o", glue_obj])
-        reporter.detail("  $ " + " ".join(
-            '"%s"' % a if " " in a else a for a in gcmd))
-        rg = run_cmd(gcmd)
-        with log_lock:
-            logs.append(rg.out)
-        if rg.code != 0:
-            gd = parse_diagnostics(rg.out)
-            reporter.error(
-                "环境接线单元编译失败。\n"
-                "    原因：多半是设置里填的钩子函数名与代码不一致，"
-                "或者函数被写成了 static（必须是非 static 的 void f(void)）。\n"
-                "    " + first_error_digest(gd).replace("\n", "\n    "))
-            timer.report()
-            return finish(1)
-
+        if glue_cached:
+            reporter.detail("  接线单元未变化，复用 %s" % glue_obj)
+        else:
+            reporter.detail("  $ " + _cmd_text(gcmd))
+            rg = run_cmd(gcmd, cwd=proj.root)
+            with log_lock:
+                logs.append(rg.out)
+            if rg.code != 0:
+                gd = parse_diagnostics(rg.out)
+                reporter.error(
+                    "环境接线单元编译失败。\n"
+                    "    原因：多半是设置里填的钩子函数名与代码不一致，"
+                    "或者函数被写成了 static（必须是非 static 的 void f(void)）。\n"
+                    "    " + first_error_digest(gd).replace("\n", "\n    "))
+                timer.report()
+                return finish(1)
+            if glue_fp:
+                write_stamp(glue_stamp, {"fp": glue_fp})
     all_output = "".join(logs)
     diags = parse_diagnostics(all_output)
     errors = [d for d in diags if d["severity"] == "error"]
@@ -2755,22 +3274,43 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
         return 1, None
 
     with timer.stage("编译呈现后端"):
+        # ★ 后端同样做增量：输入集合固定（后端 .c + core/include/*.h +
+        #   生成的契约头），与 bind / 接线单元共用同一套判据。
+        #   每个后端单元单独一个 stamp，换后端时不会互相顶掉。
         for bdir in backend_dirs:
             for name in sorted(os.listdir(bdir)):
                 if not name.endswith(".c"):
                     continue
                 src = os.path.join(bdir, name)
                 obj = os.path.join(proj.obj_dir, "backend_" + name[:-2] + ".o")
+                stamp = obj[:-2] + ".stamp"
+                inputs = sorted(
+                    [src]
+                    + [os.path.join(core_include, n)
+                       for n in (os.listdir(core_include)
+                                 if os.path.isdir(core_include) else [])
+                       if n.endswith(".h")]
+                    + [os.path.join(proj.gen_dir, "scut_config.h")])
                 cmd = ([tc.cc] + base_flags + env_flags + include_dirs
                        + ["-c", src, "-o", obj])
-                reporter.detail("  $ " + " ".join(
-                    '"%s"' % a if " " in a else a for a in cmd))
-                rb = run_cmd(cmd)
+                fp = fingerprint_of(
+                    ["cc=" + tc.cc, "ccver=" + tc.cc_version,
+                     "gen=" + generator_fp,
+                     "cmd=$ " + _cmd_text(cmd)], inputs)
+                if (fp and os.path.isfile(obj)
+                        and read_stamp(stamp).get("fp") == fp):
+                    reporter.detail("  后端 %s 未变化，复用 %s" % (name, obj))
+                    backend_objs.append(obj)
+                    continue
+                reporter.detail("  $ " + _cmd_text(cmd))
+                rb = run_cmd(cmd, cwd=proj.root)
                 with log_lock:
                     logs.append(rb.out)
                 if rb.code != 0:
                     reporter.error("后端 %s 编译失败。" % name)
                     return 1, None
+                if fp:
+                    write_stamp(stamp, {"fp": fp})
                 backend_objs.append(obj)
 
     # --- 8) 链接 ------------------------------------------------------------
@@ -2808,10 +3348,39 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
                 + ["-lm"]
                 + ["-o", tmp_exe])
 
+    # ★★ 链接也做增量：产物没变就不重新链接 ★★
+    #
+    #   两个理由，第二个才是关键：
+    #     ① 链接本身要 150~430 ms，一个文件都没改时纯属白付；
+    #     ② 没有改动就不重新生成 exe，也就不会撞上
+    #        「scut_sim.exe 正在运行 → os.replace 报 WinError 5」。
+    #        那个失败只在"确实有改动"时才该发生，而现在它会在
+    #        "什么都没改"的构建里发生，是最容易被当成插件 bug 的一种。
+    #
+    #   判据用【全部链接输入的字节】：目标文件 + 核心库 + 额外库 + 命令行。
+    #   这比逐个目标文件算指纹更直接 —— 链接器看的就是这些字节，
+    #   它们一个都没变，产物必然一模一样。
+    #
+    #   ★ 额外库（scut.extra.mk 里的 -lfoo）必须解析成实际文件再入指纹：
+    #     只把 `-lfoo` 这个名字放进指纹的话，"库换了内容"就检测不到 ——
+    #     用户更新了第三方库、构建却报「链接输入未变化」，exe 里还是旧实现。
+    link_inputs = ([bind_obj] + [j.wrapped_obj for j in jobs]
+                   + [glue_obj] + backend_objs + [core_lib]
+                   + resolve_extra_libs(extra_libs, extra_libdirs))
+    link_fp = fingerprint_of(["cmd=$ " + _cmd_text(link_cmd)], link_inputs)
+    link_stamp = os.path.join(proj.obj_dir, "link.stamp")
+    link_cached = (bool(link_fp)
+                   and os.path.isfile(proj.exe_path)
+                   and read_stamp(link_stamp).get("fp") == link_fp)
+
     with timer.stage("链接"):
-        reporter.detail("  $ " + " ".join(
-            '"%s"' % a if " " in a else a for a in link_cmd))
-        rl = run_cmd(link_cmd)
+        if link_cached:
+            reporter.detail("  链接输入未变化，复用 %s" % proj.exe_path)
+            rl = CmdResult(link_cmd, 0, "")
+        else:
+            reporter.detail("  $ " + " ".join(
+                '"%s"' % a if " " in a else a for a in link_cmd))
+            rl = run_cmd(link_cmd)
         with log_lock:
             logs.append(rl.out)
         if rl.code != 0:
@@ -2845,7 +3414,31 @@ def do_build(args: argparse.Namespace, reporter: Reporter,
             diags = diags + link_diags
             timer.report()
             return finish(1)
-        os.replace(tmp_exe, proj.exe_path)
+        if not link_cached:
+            try:
+                os.replace(tmp_exe, proj.exe_path)
+            except OSError as exc:
+                # ★ 这是【最常见的用户侧失败】，绝不能让它冒到顶层兜底里
+                #   变成"构建脚本内部错误，请把调用栈贴给我们"：
+                #   Windows 对正在运行的 exe 独占写锁，而用户点编译时
+                #   仿真很可能还在跑（插件会先 stop()，但命令行直接调
+                #   脚本、或多窗口共用同一份 exe 时挡不住）。
+                #   把可执行的下一步直接写清楚，比一句 traceback 有用得多。
+                winerr = getattr(exc, "winerror", None)
+                locked = winerr in (5, 32) or isinstance(exc, PermissionError)
+                reporter.error(
+                    ("无法写入可执行文件：%s\n"
+                     "    原因：%s\n"
+                     "    下一步：关闭正在运行的 scut_sim.exe 后重新构建。\n"
+                     "    说明：本次的编译产物都已生成，关掉进程再点一次编译即可，"
+                     "不需要清理。"
+                     % (proj.exe_path,
+                        "它正在被占用（仿真还在运行，或另一个窗口正在构建）"
+                        if locked else exc)))
+                timer.report()
+                return finish(1)
+            if link_fp:
+                write_stamp(link_stamp, {"fp": link_fp})
 
     reporter.human("")
     reporter.human("构建成功")
@@ -2887,7 +3480,7 @@ def merge_manifests(jobs: List[UnitJob]) -> Optional[Dict[str, Any]]:
         return None
 
     # 手写注册的名字：并集 + 去重 + 稳定排序
-    manual: Set[str] = set()
+    manual = set()
     for p in pieces:
         for n in p.get("manualWatches", []) or []:
             if isinstance(n, str) and n:
@@ -3135,30 +3728,93 @@ def do_doctor(args: argparse.Namespace, reporter: Reporter,
 
 def do_clean(args: argparse.Namespace, reporter: Reporter,
              timer: StageTimer) -> Tuple[int, Dict[str, Any]]:
+    """删掉生成物目录 .scut —— 等价于「回到从没编译过的状态」。
+
+    ★ 这个命令存在的唯一理由是【怀疑增量判据】。增量判据失效时的表现是
+      "改了代码却没生效"：不报错、不自证，用户只能开始怀疑自己没保存文件。
+      此时需要的是一条【无条件、不做任何判断】的路，回到已知状态再编一次。
+      所以这里刻意不做"聪明的"部分清理（例如只删 .o、保留核心库）——
+      部分清理会留下"一半新一半旧"的组合，那比全量重编更难排查。
+
+    ★ 删除边界只有 .scut 一个目录。code/、pic/、scut_project.json、
+      scut.extra.mk、.clangd 全在工程根，一个都不在删除范围内 ——
+      用户资产与生成物分处不同目录，正是为了让这条边界一眼看清。
+
+    ★★ 为什么"先改名再删"而不是直接 rmtree ★★
+      直接 rmtree 的失败结果是【不可预测】的：它按 os.scandir 的顺序逐项删，
+      撞上第一个删不掉的条目才抛异常，而在此之前删掉的东西【已经没了】。
+      实测（Windows）：
+        · 锁住 .scut/bin/scut_sim.exe 时，bin/ 恰好排在首位被先撞上，
+          于是什么都没删掉 —— 这是运气；
+        · 锁住 obj/ 里的一个文件时，排在它前面的 13 项全部被删，
+          留下的 .scut 里 obj/ 还在、aaa/ bin/ gen/ lib/ 没了。
+      也就是说"删失败"可能是"一个字节没动"，也可能是【删了一半】，
+      而删了一半比什么都没删坏得多：下一次构建可能把残骸当成有效的增量缓存，
+      于是"清理过一次"的工程反而更难回到确定状态。
+      改成：先把 .scut 原子改名成 .scut.deleting-<pid>（rename 只动目录项，
+      被占用的文件也能改名），再删那个改名后的目录。
+        · 改名失败 → 一个字节都没动，如实报错；
+        · 改名成功、删除失败 → 真正的 .scut 已经不存在了（构建会全量重编），
+          只剩一个待清理的垃圾目录，下次构建/清理顺手删掉即可。
+      两种失败都不会产生"半新半旧的有效缓存"。
+
+    ★ JSON 契约与 build 对齐（带 errors），插件的失败提示才有完整原因可显示。
+    """
     proj = Project(args.project)
     t0 = time.perf_counter()
+
+    def result(ok: bool, removed: Optional[str],
+               error: str = "") -> Tuple[int, Dict[str, Any]]:
+        return (0 if ok else 2), {
+            "ok": ok,
+            "removed": removed,
+            "elapsedMs": int((time.perf_counter() - t0) * 1000),
+            "errors": ([{"file": None, "line": None, "column": None,
+                         "severity": "error", "message": error}]
+                       if error else []),
+        }
+
     if os.path.isdir(proj.scut_dir):
+        # 顺手清掉以前删失败留下的垃圾（见上面"先改名再删"的说明）。
+        stale = prune_clean_trash(proj.scut_dir)
+        if stale:
+            reporter.detail("  顺手清掉 %d 个上次删失败留下的目录" % stale)
+        trash = "%s.deleting-%d" % (proj.scut_dir, os.getpid())
         try:
-            # 只删生成物目录 .scut，绝不碰 code/、config.h、pic/ 等用户资产。
-            shutil.rmtree(proj.scut_dir)
+            os.replace(proj.scut_dir, trash)
         except OSError as exc:
-            reporter.error("删除生成物目录失败：%s\n"
-                           "    原因：多半是有进程正在占用里面的文件"
-                           "（例如仿真还在运行，或资源管理器打开了该目录）。\n"
-                           "    下一步：关闭 scut_sim.exe / 关闭占用该目录的窗口，"
-                           "然后重试。" % exc)
-            return 2, {"ok": False, "removed": None, "elapsedMs":
-                       int((time.perf_counter() - t0) * 1000)}
+            msg = ("清理失败：无法把生成物目录改名。\n"
+                   "    位置：%s\n"
+                   "    原因：多半是有进程正在占用里面的文件"
+                   "（例如仿真还在运行，或资源管理器打开了该目录）。\n"
+                   "    下一步：关闭 scut_sim.exe / 关闭占用该目录的窗口，"
+                   "然后重试。\n"
+                   "    ★ 什么都没删：工程还是清理之前的样子，可以直接再编一次。"
+                   % exc)
+            reporter.error(msg)
+            timer._record("clean", (time.perf_counter() - t0) * 1000)
+            timer.report()
+            return result(False, None, msg)
+        # 到这里 .scut 已经不存在了 —— 后续删除失败只是"垃圾没扫干净"，
+        # 不影响"工程回到未编译状态"这个结果。
+        try:
+            shutil.rmtree(trash)
+        except OSError as exc:
+            reporter.warn("生成物目录已移除，但有残留文件没删掉：%s\n"
+                          "    原因：%s\n"
+                          "    影响：不影响构建（下次构建会重新生成 .scut）；"
+                          "只是多占一份磁盘，下次清理会再试一次。"
+                          % (trash, exc))
         reporter.human("已清理生成物目录：%s" % proj.scut_dir)
         removed = proj.scut_dir
     else:
         reporter.human("生成物目录本来就不存在，无需清理：%s" % proj.scut_dir)
         removed = None
     reporter.human("（code/、config.h、pic/ 等用户资产未做任何改动）")
+    reporter.human("下次编译会全量重编（慢一次），之后照旧走增量。")
     timer._record("clean", (time.perf_counter() - t0) * 1000)
     timer.report()
-    return 0, {"ok": True, "removed": removed,
-               "elapsedMs": int((time.perf_counter() - t0) * 1000)}
+    return result(True, removed)
 
 
 # ===========================================================================

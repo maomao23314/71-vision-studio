@@ -23,6 +23,7 @@ import type {
     WatchedVariable,
 } from './types';
 import { parseDiagnostics, type VarLineEntry } from './protocol';
+import { buildScriptArgs } from './buildcmd';
 import { detectToolchain } from './toolchain';
 import { isDir, isFile } from './fsutil';
 
@@ -266,6 +267,66 @@ export interface BuildContext {
     projectRoot?: string;
 }
 
+/**
+ * 定位 tools/scut_build.py。
+ *
+ * ★★ 这里刻意【只有一条】构建路径 ★★
+ *
+ *   以前另有一条 350 行的"内置直调"实现，作为"找不到脚本时"的兜底。
+ *   它已经删掉了，理由是三条独立的证据：
+ *
+ *     ① 它不可达。tools/scut_build.py 是 sync-sdk.js 的必需文件，
+ *        并且 package.json 的 files 里带了 sdk/**，
+ *        所以正常安装的插件里一定有它。真找不到就说明安装损坏 ——
+ *        那种情况下"换一套实现接着编"只会掩盖问题。
+ *
+ *     ② 它与新架构矛盾。新的架构里，图像尺寸契约头与接线单元
+ *        都是【构建脚本生成的】；内置直调不生成它们，
+ *        于是它编出来的程序必然链接失败（用户没写注册宏了）。
+ *        留着它等于留一条"看起来能跑、实际必然报 undefined reference"
+ *        的路径 —— 比直接报错更糟。
+ *
+ *     ③ 它无法同步维护。同一件事有两份实现，改一处漏一处，
+ *        而这个项目的核心价值恰恰是"环境行为可预期"。
+ *
+ *   所以现在：找不到脚本就明确告诉用户插件安装不完整。
+ *
+ * ★ 抽成函数是因为「编译」与「清理」都要用它，而两者的失败文案必须
+ *   一模一样 —— 同一个问题给两套说法，用户会以为是两个不同的问题。
+ */
+function resolveBuildScript(
+    root: string,
+    extensionUri: vscode.Uri,
+): { script: string } | { error: BuildDiagnostic } {
+    const sdkRoot = locateSdkRoot(root, extensionUri);
+    const script = sdkRoot ? path.join(sdkRoot, 'tools', 'scut_build.py') : undefined;
+    if (script && isFile(script)) {
+        return { script };
+    }
+    return {
+        error: {
+            severity: 'error',
+            message: '插件安装不完整：找不到构建脚本 tools/scut_build.py。\n'
+                + `    查找位置：${script ?? '(未能定位 SDK 目录)'}\n`
+                + '    原因：构建脚本随插件一起打包，正常安装时一定存在。\n'
+                + '    下一步：重新安装插件；'
+                + '若你是从源码调试，请先在 extension/ 下执行 `npm run sync-sdk`。',
+        },
+    };
+}
+
+/** 「没有找到仿真工程」的统一说法（编译与清理共用）。 */
+function noProjectDiag(): BuildDiagnostic {
+    return {
+        severity: 'error',
+        message: '没有找到仿真工程目录。\n'
+            + '    原因：仿真工程是一个含 code/ 与 scut_project.json 的文件夹，'
+            + '这里既没打开文件夹，也没在设置里指定。\n'
+            + '    下一步：用「文件 → 打开文件夹」打开你的工程，'
+            + '或者先执行「SCUT-71: 新建仿真工程」。',
+    };
+}
+
 export async function build(options: BuildOptions, ctx: BuildContext): Promise<BuildResult> {
     const started = Date.now();
     const ch = getBuildOutputChannel();
@@ -297,14 +358,7 @@ export async function build(options: BuildOptions, ctx: BuildContext): Promise<B
             // ---- 1) 工程根 ----
             const root = ctx.projectRoot ?? resolveProjectRoot();
             if (!root || !isDir(root)) {
-                return fail(started, [{
-                    severity: 'error',
-                    message: '没有找到仿真工程目录。\n'
-                        + '    原因：仿真工程是一个含 code/ 与 scut_project.json 的文件夹，'
-                        + '这里既没打开文件夹，也没在设置里指定。\n'
-                        + '    下一步：用「文件 → 打开文件夹」打开你的工程，'
-                        + '或者先执行「SCUT-71: 新建仿真工程」。',
-                }], ch);
+                return fail(started, [noProjectDiag()], ch);
             }
             const dirs = projectDirs(root);
             ch.appendLine(`\n===== SCUT-71 构建 ${new Date().toLocaleString()} =====`);
@@ -312,47 +366,93 @@ export async function build(options: BuildOptions, ctx: BuildContext): Promise<B
             ch.appendLine(`优化：用户代码 -O0（可调试）· 环境 -O2   自动符号发现：${options.autoWatch ? '开' : '关'}`);
 
             // ---- 2) 定位构建脚本 ----
-            //
-            // ★★ 这里刻意【只有一条】构建路径 ★★
-            //
-            //   以前另有一条 350 行的"内置直调"实现，作为"找不到脚本时"的兜底。
-            //   它已经删掉了，理由是三条独立的证据：
-            //
-            //     ① 它不可达。tools/scut_build.py 是 sync-sdk.js 的必需文件，
-            //        并且 package.json 的 files 里带了 sdk/**，
-            //        所以正常安装的插件里一定有它。真找不到就说明安装损坏 ——
-            //        那种情况下"换一套实现接着编"只会掩盖问题。
-            //
-            //     ② 它与新架构矛盾。新的架构里，图像尺寸契约头与接线单元
-            //        都是【构建脚本生成的】；内置直调不生成它们，
-            //        于是它编出来的程序必然链接失败（用户没写注册宏了）。
-            //        留着它等于留一条"看起来能跑、实际必然报 undefined reference"
-            //        的路径 —— 比直接报错更糟。
-            //
-            //     ③ 它无法同步维护。同一件事有两份实现，改一处漏一处，
-            //        而这个项目的核心价值恰恰是"环境行为可预期"。
-            //
-            //   所以现在：找不到脚本就明确告诉用户插件安装不完整。
             progress.report({ message: '正在查找构建脚本…' });
-            const sdkRoot = locateSdkRoot(root, ctx.extensionUri);
-            const buildScript = sdkRoot ? path.join(sdkRoot, 'tools', 'scut_build.py') : undefined;
-
-            if (!buildScript || !isFile(buildScript)) {
-                ch.appendLine(`找不到构建脚本：${buildScript ?? '(SDK 目录未定位到)'}`);
-                return fail(started, [{
-                    severity: 'error',
-                    message: '插件安装不完整：找不到构建脚本 tools/scut_build.py。\n'
-                        + `    查找位置：${buildScript ?? '(未能定位 SDK 目录)'}\n`
-                        + '    原因：构建脚本随插件一起打包，正常安装时一定存在。\n'
-                        + '    下一步：重新安装插件；'
-                        + '若你是从源码调试，请先在 extension/ 下执行 `npm run sync-sdk`。',
-                }], ch);
+            const found = resolveBuildScript(root, ctx.extensionUri);
+            if ('error' in found) {
+                ch.appendLine('找不到构建脚本。');
+                return fail(started, [found.error], ch);
             }
 
-            ch.appendLine(`构建脚本：${buildScript}`);
+            ch.appendLine(`构建脚本：${found.script}`);
             progress.report({ message: '正在调用 tools/scut_build.py…' });
-            const r = await buildWithScript(buildScript, dirs, options, tc, token, ch);
+            const r = await buildWithScript(found.script, dirs, options, tc, token, ch);
             return finishResult(r, started, ch);
+        },
+    );
+}
+
+/**
+ * 清理：删掉生成物目录 `.scut`。
+ *
+ * ★★ 为什么需要它 ★★
+ *
+ *   增量构建的判据一旦出错，症状是【改了代码却没生效】：不报错、
+ *   不自证，画面和变量面板全都正常，只是跑的是旧算法。
+ *   此时用户唯一的自救手段是"把中间产物全删了重来"，而在此之前
+ *   他得先知道 `.scut` 是什么、在哪、能不能删 —— 这些都不该由他承担。
+ *   所以给一个按钮，语义只有一句：**回到从没编译过的状态**。
+ *
+ * ★ 为什么不做「只删 .o、保留核心库」这类聪明清理：
+ *   部分清理会留下"一半新一半旧"的组合。那种状态比全量重编难查得多，
+ *   而省下的只是核心库那一次重建（几秒，且只在第一次）。
+ *   一个语义模糊的清理按钮比没有更糟 —— 用户无法预期它会留下什么。
+ *
+ * ★ 为什么要先停仿真进程：Windows 对正在运行的 exe 持有写锁，
+ *   `.scut/bin/scut_sim.exe` 删不掉，整个 rmtree 会失败。
+ *   这与「编译」前先 stop 是同一个原因（见 commandBuild 的注释）。
+ */
+export async function clean(ctx: BuildContext): Promise<BuildResult> {
+    const started = Date.now();
+    const ch = getBuildOutputChannel();
+
+    return vscode.window.withProgress(
+        {
+            location: vscode.ProgressLocation.Notification,
+            title: 'SCUT-71：正在清理生成物',
+            cancellable: false,
+        },
+        async (progress): Promise<BuildResult> => {
+            progress.report({ message: '正在识别工程…' });
+            const root = ctx.projectRoot ?? resolveProjectRoot();
+            if (!root || !isDir(root)) {
+                return fail(started, [noProjectDiag()], ch);
+            }
+            const dirs = projectDirs(root);
+            ch.appendLine(`\n===== SCUT-71 清理 ${new Date().toLocaleString()} =====`);
+            ch.appendLine(`工程目录：${root}`);
+            ch.appendLine(`将删除：${dirs.scutDir}`);
+
+            progress.report({ message: '正在查找构建脚本…' });
+            const found = resolveBuildScript(root, ctx.extensionUri);
+            if ('error' in found) {
+                ch.appendLine('找不到构建脚本。');
+                return fail(started, [found.error], ch);
+            }
+            ch.appendLine(`构建脚本：${found.script}`);
+
+            // ★ clean 不需要工具链（它只是删目录），所以这里用只读探测：
+            //   绝不因为"清理"而去触发一次 165MB 的工具链下载。
+            //   tc 只用来拿 python 解释器路径。
+            const tc = await detectToolchain(false);
+            const r = await runScript(
+                buildScriptArgs(found.script, 'clean', {
+                    projectRoot: dirs.root,
+                    autoWatch: true,
+                }),
+                dirs, tc, undefined, ch,
+            );
+            const out: BuildResult = {
+                ok: r.ok,
+                output: `[清理] tools/scut_build.py clean\n\n${r.output}`,
+                errors: r.errors,
+                elapsedMs: Date.now() - started,
+            };
+            if (r.ok) {
+                ch.appendLine(`清理完成：${r.removed ?? '生成物目录本来就不存在'}`);
+            } else {
+                ch.appendLine(`清理失败（用时 ${out.elapsedMs} ms）。`);
+            }
+            return out;
         },
     );
 }
@@ -535,7 +635,16 @@ async function buildWithScript(
     token: vscode.CancellationToken,
     ch: vscode.OutputChannel,
 ): Promise<BuildResult> {
-    const r = await runBuildScript(script, dirs, options, tc, token, ch);
+    const r = await runScript(
+        buildScriptArgs(script, 'build', {
+            projectRoot: dirs.root,
+            toolchainRoot: tc.root,
+            autoWatch: options.autoWatch,
+            watchExclude: options.watchExclude,
+            watchMaxElems: options.watchMaxElems,
+        }),
+        dirs, tc, token, ch,
+    );
     return {
         ok: r.ok,
         exePath: r.exePath,
@@ -552,6 +661,8 @@ interface ScriptResult {
     output: string;
     errors: BuildDiagnostic[];
     manifest?: VariableManifest;
+    /** clean 子命令删掉的目录（本来就不存在时为空） */
+    removed?: string;
 }
 
 /**
@@ -567,36 +678,34 @@ interface ScriptResult {
  *   1) 先用插件自己探测到的 python（已经校验过 3.7+，见 toolchain.ts）；
  *   2) 再退回 Windows 启动器 `py -3`（本机实测：py -3 指向 3.12，而
  *      PATH 上的裸 `python` 是 3.6.2，跑 scut_build.py 会 SyntaxError）。
+ *
+ * ★★ 参数叫 argv 而不是 args，而且【这里没有 script 参数】★★
+ *
+ *   0.14.1 里"脚本路径排在 argv 第 0 位"这件事出过两次事故，
+ *   方向正好相反：
+ *
+ *     第一次——谁都没写。argv 是 `clean --project …`，python 去找一个
+ *       叫 clean 的文件：can't open file '...\clean'。
+ *
+ *     第二次——两处都写了。buildScriptArgs 与这个函数各加一次脚本路径，
+ *       argv 是 `<脚本> <脚本> --project …`，argparse 把第二个脚本当成
+ *       子命令：invalid choice: 'c:\...\scut_build.py'（choose from
+ *       'build','doctor','clean'）。
+ *
+ *   两次的成因是同一个：**同一个位置有两个负责方**。第二个负责方
+ *   无论写不写都会错 —— 不写是漏，写了是重。
+ *
+ *   所以这里不靠"补位 + 幂等"去调和两个负责方（那本身就是个易错设计），
+ *   而是让第二个负责方【不存在】：本函数只收一份已经完整的 argv，
+ *   结构上没有任何地方能再插一次脚本路径。要加参数就去 buildcmd.ts 加。
  */
-async function runBuildScript(
-    script: string,
+async function runScript(
+    argv: string[],
     dirs: ProjectDirs,
-    options: BuildOptions,
     tc: Toolchain,
-    token: vscode.CancellationToken,
+    token: vscode.CancellationToken | undefined,
     ch: vscode.OutputChannel,
 ): Promise<ScriptResult> {
-    const args: string[] = [
-        script,
-        '--project', dirs.root,
-        '--json',
-    ];
-    if (tc.root) {
-        args.push('--toolchain', tc.root);
-    }
-    if (!options.autoWatch) {
-        args.push('--no-watch');
-    }
-    // 变量发现的两个过滤器（可选）。
-    // ★ 只有非空才传：空串/0 传给脚本等于"没指定"，
-    //   但显式传一个空 --exclude 会让日志里出现一个误导性的参数。
-    if (options.watchExclude && options.watchExclude.trim().length > 0) {
-        args.push('--exclude', options.watchExclude.trim());
-    }
-    if (options.watchMaxElems && options.watchMaxElems > 0) {
-        args.push('--max-elems', String(options.watchMaxElems));
-    }
-
     const attempts: Array<{ exe: string; prefix: string[] }> = [];
     if (tc.python) {
         attempts.push({ exe: tc.python, prefix: [] });
@@ -606,10 +715,12 @@ async function runBuildScript(
         attempts.push({ exe: 'python', prefix: [] });
     }
 
+    // ★ 这里【不做任何拼接】：argv 已经完整（见上面的注释）。
     let lastHuman = '';
     for (const a of attempts) {
-        ch.appendLine(`$ "${a.exe}" ${[...a.prefix, ...args].join(' ')}`);
-        const r = await runProcess(a.exe, [...a.prefix, ...args], {
+        const full = [...a.prefix, ...argv];
+        ch.appendLine(`$ "${a.exe}" ${full.join(' ')}`);
+        const r = await runProcess(a.exe, full, {
             cwd: dirs.root,
             token,
             onLine: (line) => {
@@ -627,7 +738,7 @@ async function runBuildScript(
         const parsed = parseScriptJson(r.stdout);
         if (parsed) {
             if (parsed.output && parsed.output.trim().length > 0) {
-                ch.appendLine('--- 构建脚本详细输出 ---');
+                ch.appendLine('--- 脚本详细输出 ---');
                 ch.appendLine(parsed.output);
             }
             const diags: BuildDiagnostic[] = (parsed.errors ?? []).map((d) => ({
@@ -649,6 +760,7 @@ async function runBuildScript(
                 output: `${r.stderr}\n${parsed.output ?? ''}`.trim(),
                 errors: diags,
                 manifest: normalizeManifest(parsed.manifest),
+                removed: typeof parsed.removed === 'string' ? parsed.removed : undefined,
             };
         }
 
@@ -673,7 +785,7 @@ async function runBuildScript(
         errors: [{
             severity: 'error',
             message: '无法运行构建脚本 tools/scut_build.py：尝试过的解释器都跑不动它。\n'
-                + `    脚本位置：${script}\n`
+                + `    脚本位置：${argv[0] ?? '(未知)'}\n`
                 + '    原因：脚本用了 Python 3.7+ 的语法'
                 + '（from __future__ import annotations），'
                 + '3.6 及更早的版本会在第 70 行直接 SyntaxError。\n'
@@ -696,6 +808,7 @@ interface ScriptJson {
     elapsedMs?: number;
     errors?: Array<{ file?: string | null; line?: number | null; column?: number | null; severity?: string; message?: string }>;
     manifest?: unknown;
+    removed?: string | null;
 }
 
 /**

@@ -560,34 +560,20 @@ def _emit_manifest(args, variables):
         json.dump(manifest, f, ensure_ascii=False, indent=2)
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--obj', required=True, help='探针目标文件 (.o)')
-    ap.add_argument('--src', required=True, help='原始源文件名（用于 #include，必须相对 code/）')
-    ap.add_argument('--src-abs', default='',
-                    help='原始源文件的绝对路径，仅用于扫描用户手写的 '
-                         'SCUT_Watch/SCUT_WATCH_SCALAR 调用；留空则退回 --src')
-    ap.add_argument('--out-c', required=True, help='输出的包装 .c 文件')
-    ap.add_argument('--out-json', help='输出的变量清单 JSON')
-    # ★ 兼容参数：旧版靠 objdump 读 DWARF，现在不用了。
-    #   保留它是为了让还在传这个参数的调用方不报「不认识的参数」——
-    #   构建脚本、插件、用户自己写的脚本都可能带着它。传进来的值会被忽略。
-    ap.add_argument('--objdump', default='', help=argparse.SUPPRESS)
-    ap.add_argument('--exclude', default='', help='逗号分隔的黑名单')
-    ap.add_argument('--max-elems', type=int, default=0,
-                    help='元素数超过该值的变量不注册 (0=不限)')
-    ap.add_argument('--output-array', default='',
-                    help='结果图数组名。若它声明在本文件里，则生成'
-                         'scut_env_copy_output() 供环境接线单元调用')
-    ap.add_argument('--image-size', default='',
-                    help='图像尺寸（"188x120"），只用于错误提示的措辞')
-    args = ap.parse_args()
+def process_unit(args):
+    """处理【一个】编译单元：读 DWARF → 生成包装 .c + 变量清单。
 
-    # 只影响错误信息的措辞，所以解析失败也不报错。
-    if args.image_size:
-        global IMAGE_SHAPE
-        IMAGE_SHAPE = args.image_size.replace('x', ' 行 × ') + " 列"
+    返回 (退出码, 给人看的原因)。退出码语义：
+        0  成功
+        2  读不了调试信息（DwarfError）
+        3  有调试信息但解析不出任何条目
+        4  用户配置问题（结果图数组的形状不对）
 
+    ★ 为什么把这一段从 main() 里拆出来：
+      批量模式要处理 N 个单元，而每个单元的处理逻辑必须与单文件模式
+      【逐字相同】—— 两份实现必然漂移，而漂移的表现是"插件构建出来的
+      包装单元和手工跑生成器的不一样"，极难发现。
+    """
     # ---- 读 DWARF（纯 Python，不调任何外部命令） --------------------------
     #
     # ★ 静默失败检测：读不出任何 DIE 时【明确报错】。
@@ -600,8 +586,9 @@ def main():
     try:
         reader, dies = dwarf.load_die_tree(args.obj)
     except dwarf.DwarfError as exc:
-        print('[scut_symbols] 读不了调试信息：%s' % exc, file=sys.stderr)
-        return 2
+        msg = '读不了调试信息：%s' % exc
+        print('[scut_symbols] %s' % msg, file=sys.stderr)
+        return 2, msg
 
     if not dies:
         if not reader.ok():
@@ -609,15 +596,15 @@ def main():
                     "  最常见的原因：探针编译没带 -g。\n"
                     "  已确认：%s" % args.obj)
             if '.debug$S' in reader._obj.sections:
-                hint += ("\n  另外：这个文件里是 CodeView 调试信息（.debug$S），"
-                         "\n    那是 MSVC 的格式，不是 DWARF —— "
+                hint += ("\n  另外：这个文件里是 CodeView 调试信息"
+                         "（.debug$S），\n    那是 MSVC 的格式，不是 DWARF —— "
                          "请用 clang/mingw 的编译器。")
         else:
             hint = ("目标文件里有调试信息，但解析不出任何条目。\n"
                     "  说明：这是 scut_dwarf 的兼容性缺口，不是你的代码问题。\n"
                     "  请把 %s 保留下来反馈（它不含源码正文）。" % args.obj)
         print('[scut_symbols] %s' % hint, file=sys.stderr)
-        return 3
+        return 3, hint
 
     variables = collect_variables(dies)
 
@@ -636,7 +623,7 @@ def main():
     #   用户点名排除它，就是不想在面板里看到它（那是他的权利）。
     #   所以只把它喂给搬运函数的生成逻辑，不注册进观察表。
     all_vars = variables
-    black = {s.strip() for s in args.exclude.split(',') if s.strip()}
+    black = {s.strip() for s in (args.exclude or '').split(',') if s.strip()}
     variables = [v for v in variables
                  if v['name'] not in black and not v['name'].startswith('_')]
     if args.max_elems > 0:
@@ -648,8 +635,9 @@ def main():
     except CopyShapeError as exc:
         # 用户配置问题：把中文说明原样打到 stderr 并给出专用退出码，
         # 由 scut_build.py 转成构建错误（而不是让它冒成调用栈）。
-        print('[scut_symbols] %s' % exc, file=sys.stderr)
-        return 4
+        msg = str(exc)
+        print('[scut_symbols] %s' % msg, file=sys.stderr)
+        return 4, msg
     _emit_manifest(args, variables)
 
     print('[scut_symbols] %s: 发现 %d 个全局变量 -> %s'
@@ -659,7 +647,119 @@ def main():
         tag = 'static' if not v['external'] else 'global'
         print('    %-22s %-12s %-14s elems=%-7d %dB  %s'
               % (v['name'], v['kind'], d, v['total'], v['elem_bytes'], tag))
+    return 0, ''
+
+
+def set_image_shape(image_size):
+    """把 --image-size 记进模块级变量（只影响错误提示的措辞）。"""
+    if not image_size:
+        return
+    global IMAGE_SHAPE
+    IMAGE_SHAPE = image_size.replace('x', ' 行 × ') + " 列"
+
+
+def run_batch(args):
+    """批量模式：一次进程处理多个编译单元。
+
+    ★★ 为什么要有这个模式 ★★
+      单文件模式下，每个用户 .c 都要起一个 Python 进程。而本脚本真正的
+      计算只有几十毫秒（读 DWARF 11 ms、扫手写注册 5 ms），其余全是解释器
+      启动；在装了实时扫描的机器上启动会被放大一个数量级（实测同一台机器
+      `python -c pass` 在 27 ms 与 1050 ms 之间双峰摆动）。批量化之后
+      启动次数与文件数无关。
+
+    ★ 输出契约（scut_build.py 的 read_batch_result 逐字对应）：
+        {"units": [{"code": <int>, "message": "<原因>"}, ...]}
+      顺序与 spec 里的 units 顺序一致。即使个别单元失败，
+      本进程也要正常退出并写出完整结果 —— 让调用方按单元决定
+      是降级还是报错，而不是被一个整体退出码吞掉全部信息。
+    """
+    try:
+        with open(args.batch, 'r', encoding='utf-8') as f:
+            spec = json.load(f)
+    except (OSError, ValueError) as exc:
+        print('[scut_symbols] 读不了批量任务文件：%s' % exc, file=sys.stderr)
+        return 2
+
+    set_image_shape(spec.get('imageSize') or '')
+    units = spec.get('units') or []
+    results = []
+    for u in units:
+        one = argparse.Namespace(
+            obj=u.get('obj', ''),
+            src=u.get('src', ''),
+            src_abs=u.get('srcAbs', ''),
+            out_c=u.get('outC', ''),
+            out_json=u.get('outJson', ''),
+            output_array=spec.get('outputArray') or '',
+            exclude=spec.get('exclude') or '',
+            max_elems=int(spec.get('maxElems') or 0),
+            image_size=spec.get('imageSize') or '',
+            objdump='',
+        )
+        try:
+            code, msg = process_unit(one)
+        except Exception as exc:            # noqa: BLE001
+            # 一个单元的意外异常绝不能带走整批：其余单元的结果仍然有效。
+            code, msg = 1, '生成器内部错误：%s' % exc
+            print('[scut_symbols] %s: %s' % (one.src, msg), file=sys.stderr)
+        results.append({'code': code, 'message': msg})
+
+    if args.batch_out:
+        try:
+            with open(args.batch_out, 'w', encoding='utf-8',
+                      newline='\n') as f:
+                json.dump({'units': results}, f, ensure_ascii=False)
+        except OSError as exc:
+            print('[scut_symbols] 写不了批量结果：%s' % exc, file=sys.stderr)
+            return 2
     return 0
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    # ★ --obj/--src/--out-c 在批量模式下不需要，所以不能标 required：
+    #   标了的话批量调用必须伪造三个假参数，而"必须传但用不上"
+    #   正是最容易让人误以为它们仍然生效的那种参数。
+    ap.add_argument('--obj', default='', help='探针目标文件 (.o)')
+    ap.add_argument('--src', default='',
+                    help='原始源文件名（用于 #include，必须相对 code/）')
+    ap.add_argument('--src-abs', default='',
+                    help='原始源文件的绝对路径，仅用于扫描用户手写的 '
+                         'SCUT_Watch/SCUT_WATCH_SCALAR 调用；留空则退回 --src')
+    ap.add_argument('--out-c', default='', help='输出的包装 .c 文件')
+    ap.add_argument('--out-json', default='', help='输出的变量清单 JSON')
+    # ★ 兼容参数：旧版靠 objdump 读 DWARF，现在不用了。
+    #   保留它是为了让还在传这个参数的调用方不报「不认识的参数」——
+    #   构建脚本、插件、用户自己写的脚本都可能带着它。传进来的值会被忽略。
+    ap.add_argument('--objdump', default='', help=argparse.SUPPRESS)
+    ap.add_argument('--exclude', default='', help='逗号分隔的黑名单')
+    ap.add_argument('--max-elems', type=int, default=0,
+                    help='元素数超过该值的变量不注册 (0=不限)')
+    ap.add_argument('--output-array', default='',
+                    help='结果图数组名。若它声明在本文件里，则生成'
+                         'scut_env_copy_output() 供环境接线单元调用')
+    ap.add_argument('--image-size', default='',
+                    help='图像尺寸（"188x120"），只用于错误提示的措辞')
+    ap.add_argument('--batch', default='',
+                    help='批量任务 JSON（一次进程处理多个单元，供构建脚本用）')
+    ap.add_argument('--batch-out', default='',
+                    help='批量结果 JSON（与 --batch 配对）')
+    args = ap.parse_args()
+
+    if args.batch:
+        return run_batch(args)
+
+    for name, val in (('--obj', args.obj), ('--src', args.src),
+                      ('--out-c', args.out_c)):
+        if not val:
+            print('[scut_symbols] 缺少必需参数 %s（单文件模式）' % name,
+                  file=sys.stderr)
+            return 2
+
+    set_image_shape(args.image_size)
+    code, _ = process_unit(args)
+    return code
 
 
 if __name__ == '__main__':

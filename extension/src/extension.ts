@@ -22,7 +22,7 @@ import * as path from 'path';
 import type { BuildOptions, BuildResult, ScutProject } from './types';
 import { detectToolchain, peekToolchain, resetToolchainCache, runDoctor, setGlobalStorageDir } from './toolchain';
 import { createProjectFromTemplate, describeProject, detectProject, locatePicReadme, locateTemplateDir, PIC_EXTS } from './project';
-import { build, disposeBuildOutputChannel, getBuildOutputChannel } from './build';
+import { build, clean, disposeBuildOutputChannel, getBuildOutputChannel } from './build';
 import {
     CONFIG_FILENAME,
     defaultConfig,
@@ -259,6 +259,13 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(
         vscode.commands.registerCommand('scut71.doctor', () => commandDoctor()),
         vscode.commands.registerCommand('scut71.build', () => commandBuild(context, simView, projectOf, log)),
+        /* ★ 清理 / 重新编译：两个入口，一条语义。
+         *   「清理」= 删掉 .scut（回到从没编译过的状态）；
+         *   「重新编译」= 清理 + 编译，一步到位。
+         *   存在的理由是【增量判据失效时的自救】——那种故障不报错、
+         *   不自证（改了代码却没生效），用户需要一条无条件回到已知状态的路。 */
+        vscode.commands.registerCommand('scut71.clean', () => commandClean(context, simView, projectOf, log)),
+        vscode.commands.registerCommand('scut71.rebuild', () => commandRebuild(context, simView, projectOf, log)),
         vscode.commands.registerCommand('scut71.newProject', () => commandNewProject(context)),
         vscode.commands.registerCommand('scut71.openSimView', () => commandOpenSimView()),
         vscode.commands.registerCommand('scut71.bench', () => simView.bench()),
@@ -425,27 +432,39 @@ function formatDoctor(lines: string[], errors: string[]): string {
     return out.join('\n');
 }
 
-async function commandBuild(
+/**
+ * 取当前工程；没有就给出"下一步"并返回 undefined。
+ *
+ * ★ 三个命令（编译 / 清理 / 重新编译）共用这一份 —— 同一个问题
+ *   给三套说法，用户会以为是三个不同的问题。
+ */
+async function requireProject(
+    projectOf: () => ScutProject | undefined,
+): Promise<ScutProject | undefined> {
+    const project = projectOf();
+    if (project) {
+        return project;
+    }
+    const choice = await vscode.window.showWarningMessage(
+        'SCUT-71：没有找到仿真工程（需要含 code/ 的文件夹）。',
+        '新建工程',
+        '打开文件夹',
+    );
+    if (choice === '新建工程') {
+        await vscode.commands.executeCommand('scut71.newProject');
+    } else if (choice === '打开文件夹') {
+        await vscode.commands.executeCommand('workbench.action.files.openFolder');
+    }
+    return undefined;
+}
+
+/** 跑一次构建并把结论说给用户听。构建本身抛异常时返回 undefined。 */
+async function runBuildOnce(
     context: vscode.ExtensionContext,
     simView: SimViewProvider,
-    projectOf: () => ScutProject | undefined,
+    project: ScutProject,
     log: (line: string) => void,
-): Promise<void> {
-    const project = projectOf();
-    if (!project) {
-        const choice = await vscode.window.showWarningMessage(
-            'SCUT-71：没有找到仿真工程（需要含 code/ 的文件夹）。',
-            '新建工程',
-            '打开文件夹',
-        );
-        if (choice === '新建工程') {
-            await vscode.commands.executeCommand('scut71.newProject');
-        } else if (choice === '打开文件夹') {
-            await vscode.commands.executeCommand('workbench.action.files.openFolder');
-        }
-        return;
-    }
-
+): Promise<BuildResult | undefined> {
     // ★ 编译前先停掉运行中的仿真进程（用户原话："按下编译的时候应该自动
     //   尝试关闭进程，否则容易出现无法写入文件"）：
     //   Windows 对正在运行的 exe 独占写锁，链接器 rename(tmp → exe)
@@ -471,7 +490,7 @@ async function commandBuild(
             + '    下一步：打开「输出 → SCUT-71 构建」通道查看完整日志，'
             + '并执行「SCUT-71: 环境自检」确认工具链。',
         );
-        return;
+        return undefined;
     }
 
     simView.setBuildOutput(result.exePath, result.manifest);
@@ -499,6 +518,133 @@ async function commandBuild(
             getBuildOutputChannel().show(true);
         }
     }
+    return result;
+}
+
+/**
+ * 清理：把 `.scut`（生成物目录）整个删掉。
+ *
+ * ★ 只删生成物，不碰用户资产 —— 边界由目录结构本身保证：
+ *   code/、pic/、scut_project.json、scut.extra.mk 全在工程根，
+ *   `.scut` 是唯一由构建产生的东西。所以这个动作【不需要确认对话框】：
+ *   它删不掉任何用户写的东西，多问一句只是噪音。
+ *
+ * ★ 什么时候用它：怀疑"改了代码却没生效"（增量判据失效的典型症状，
+ *   不报错、不自证）。清理后再编译一次，就回到确定的状态。
+ */
+async function commandClean(
+    context: vscode.ExtensionContext,
+    simView: SimViewProvider,
+    projectOf: () => ScutProject | undefined,
+    log: (line: string) => void,
+): Promise<void> {
+    const project = await requireProject(projectOf);
+    if (!project) {
+        return;
+    }
+    // ★ 必须先停进程：Windows 对运行中的 exe 持写锁，.scut/bin 删不掉。
+    await simView.stop();
+    log(`[清理] ${project.root}`);
+
+    let result: BuildResult;
+    try {
+        result = await clean({
+            extensionUri: context.extensionUri,
+            projectRoot: project.root,
+        });
+    } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        log(`[清理] 出现意外异常：${msg}`);
+        void vscode.window.showErrorMessage(`SCUT-71 清理出现意外错误：${msg}`);
+        return;
+    }
+
+    if (result.ok) {
+        // ★ 清理之后旧 exe 就没了，视图必须知道这件事 ——
+        //   否则状态栏还写着"可执行：…"，点「下一张」会拿到一个已删除的路径。
+        simView.clearBuildOutput();
+        void vscode.window.showInformationMessage(
+            'SCUT-71 已清理生成物目录（code/、pic/、scut_project.json 未动）。'
+            + '下次编译会全量重编，慢一次。',
+        );
+    } else {
+        const first = result.errors.find((d) => d.severity === 'error');
+        const choice = await vscode.window.showErrorMessage(
+            `SCUT-71 清理失败：${first?.message ?? '详见输出面板'}`,
+            '查看输出',
+        );
+        if (choice === '查看输出') {
+            getBuildOutputChannel().show(true);
+        }
+    }
+}
+
+/**
+ * 重新编译 = 先清理再编译。
+ *
+ * ★ 为什么做成一个按钮而不是"让用户点两下"：
+ *   这两步的组合是有意义的整体（"从零开始编一遍"），拆成两次点击
+ *   会让中间状态（生成物已删、还没编）暴露给用户 —— 那时点「下一张」
+ *   会得到"还没有可运行的仿真程序"，而用户并没有做错任何事。
+ *
+ * ★ 清理失败就【不继续编译】：清理没成功意味着旧产物还在，
+ *   继续编译只会得到一份"半新半旧"的构建，而用户以为自己重编过了。
+ *   那种情况下"什么都没发生"比"看起来成功了"安全得多。
+ */
+async function commandRebuild(
+    context: vscode.ExtensionContext,
+    simView: SimViewProvider,
+    projectOf: () => ScutProject | undefined,
+    log: (line: string) => void,
+): Promise<void> {
+    const project = await requireProject(projectOf);
+    if (!project) {
+        return;
+    }
+    await simView.stop();
+    log(`[重新编译] ${project.root}`);
+
+    let cleaned: BuildResult;
+    try {
+        cleaned = await clean({
+            extensionUri: context.extensionUri,
+            projectRoot: project.root,
+        });
+    } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        log(`[重新编译] 清理阶段出现意外异常：${msg}`);
+        void vscode.window.showErrorMessage(`SCUT-71 重新编译失败（清理阶段）：${msg}`);
+        return;
+    }
+    if (!cleaned.ok) {
+        const first = cleaned.errors.find((d) => d.severity === 'error');
+        const choice = await vscode.window.showErrorMessage(
+            `SCUT-71 重新编译中止：清理没成功，旧产物还在，`
+            + `继续编译会得到半新半旧的结果。原因：${first?.message ?? '详见输出面板'}`,
+            '查看输出',
+        );
+        if (choice === '查看输出') {
+            getBuildOutputChannel().show(true);
+        }
+        return;
+    }
+
+    // 生成物已删，先把视图里指向旧 exe 的状态清掉，再全量编一次。
+    simView.clearBuildOutput();
+    await runBuildOnce(context, simView, project, log);
+}
+
+async function commandBuild(
+    context: vscode.ExtensionContext,
+    simView: SimViewProvider,
+    projectOf: () => ScutProject | undefined,
+    log: (line: string) => void,
+): Promise<void> {
+    const project = await requireProject(projectOf);
+    if (!project) {
+        return;
+    }
+    await runBuildOnce(context, simView, project, log);
 }
 
 /**

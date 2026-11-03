@@ -31,7 +31,7 @@
  *    收到 {type:'status', running, exePath}
  *
  *    发出 {type:'ack',    index}          ← 背压：必须发，否则会话会卡住
- *    发出 {type:'cmd',    cmd:'stop'|'build'|'debug'|'bench'
+ *    发出 {type:'cmd',    cmd:'stop'|'build'|'rebuild'|'clean'|'debug'|'bench'
  *                             |'prevPic'|'nextPic'|'gotoPic'|'settings', n?}
  *         ★ 曾写 'run'|'step'|'stop'|'clearLog' —— 四个里三个是错的：
  *           run/step 从未发出（「运行」在 0.10.6 也删掉了），
@@ -1136,6 +1136,11 @@
   bind('btn-goto', function () { vscode.postMessage({ type: 'cmd', cmd: 'gotoPic' }); });
   // 测速：同一张图重复 N 次取平均（旧环境 R 键的做法）
   bind('btn-bench', function () { vscode.postMessage({ type: 'cmd', cmd: 'bench' }); });
+  // 清理 / 重新编译：增量构建失效时的逃生口（改了代码却没生效时用）。
+  // 两者都走扩展主命令，页面只负责发出意图 —— 顺序与"清理失败就不编"
+  // 这些语义全在宿主侧，不在这里重复一遍。
+  bind('btn-rebuild', function () { vscode.postMessage({ type: 'cmd', cmd: 'rebuild' }); });
+  bind('btn-clean', function () { vscode.postMessage({ type: 'cmd', cmd: 'clean' }); });
   // 设置入口：直接跳到本插件的设置页（扩展侧会展开最常用的「工具链」子栏目）
   bind('btn-settings', function () { vscode.postMessage({ type: 'cmd', cmd: 'settings' }); });
   bind('btn-clear', function () {

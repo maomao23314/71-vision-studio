@@ -219,6 +219,30 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
         }
     }
 
+    /**
+     * 生成物被删掉（清理 / 重新编译的清理阶段）时调用：把视图里关于
+     * 「已编译」的一切都清空。
+     *
+     * ★ 为什么不能复用 setBuildOutput(undefined, undefined)：
+     *   那个方法的语义是"这次构建报了这些值"，而两个参数都可选 ——
+     *   传 undefined 等于"这次没有新信息"，于是旧路径和旧清单会【留着】。
+     *   清理之后留着它们是有害的：状态栏还写着"可执行：…"，点「下一张」
+     *   会拿到一个已删除的路径，报的错与真实原因（刚清理过）完全无关。
+     *   所以这里要的是一个语义明确的"作废"，而不是"没更新"。
+     */
+    public clearBuildOutput(): void {
+        this.lastExePath = undefined;
+        this.manifest = undefined;
+        this.lastSnapshot = [];
+        this.lastTiming = undefined;
+        this.lastFrameIndex = 0;
+        for (const v of this.views) {
+            this.sendCatalog(v);
+            this.sendSnapshot();
+        }
+        this.sendStatus();
+    }
+
     public getManifest(): VariableManifest | undefined {
         return this.manifest;
     }
@@ -690,6 +714,14 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
                     /* 交给扩展主命令执行 —— 这样"编译"只有一条实现路径，
                      * 视图里的按钮和命令面板里的命令走的是同一段代码。 */
                     void vscode.commands.executeCommand('scut71.build');
+                } else if (cmd === 'rebuild') {
+                    /* 重新编译 = 清理 + 编译。同样走扩展主命令：
+                     * 这个组合的顺序（先清后编、清理失败就不编）是语义的一部分，
+                     * 不能在 webview 侧再拼一遍。 */
+                    void vscode.commands.executeCommand('scut71.rebuild');
+                } else if (cmd === 'clean') {
+                    /* 清理生成物（只删 .scut）。 */
+                    void vscode.commands.executeCommand('scut71.clean');
                 } else if (cmd === 'debug') {
                     /* 走扩展主命令 —— 与视图标题栏的「调试」图标是同一条实现路径。 */
                     void vscode.commands.executeCommand('scut71.debug');
@@ -947,6 +979,22 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
       <span class="toolbar-sep"></span>
       <button id="btn-bench" title="测速：同一张图重复 N 次取平均 cycles (F9)">测速</button>
       <button id="btn-stop" class="danger" title="停止仿真进程 (Shift+F5)">■ 停止</button>
+      <span class="toolbar-sep"></span>
+      <!--
+        ★★ 清理 / 重新编译：低频率的"自救"按钮，用 ghost 样式 ★★
+        理由：
+          · 它们是【增量构建失效时的逃生口】，正常开发一天也用不到一次，
+            不该和「编译 / 下一张」抢注意力；
+          · 但它们必须【看得见】—— 用户遇到"改了代码没生效"时，
+            如果界面上没有出口，他只会去翻文档或重装插件。
+        所以用 ghost（灰底细边框）：一眼看出是可点的按钮，但明显不是常用键。
+        ★ 为什么「重新编译」不叫「全量编译」：用户不需要知道增量/全量这套词，
+          他要的语义是"从头再来一遍"，而"重新编译"就是这个词。
+      -->
+      <button id="btn-rebuild" class="ghost"
+              title="重新编译：先删掉 .scut 生成物再编译一次（怀疑改了代码没生效时用）">重新编译</button>
+      <button id="btn-clean" class="ghost"
+              title="清理生成物：删掉 .scut（code/、pic/、配置都不动），回到从没编译过的状态">清理</button>
       <!--
         ★ 设置入口：刻意放在工具栏【最右端】，且用 ghost 样式（低对比、无边框）★★
         理由：

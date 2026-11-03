@@ -2,7 +2,7 @@
   "name": "scut-71-vision-studio",
   "displayName": "SCUT-71 Vision Studio",
   "description": "智能车视觉仿真环境 —— 只写算法，其余交给环境",
-  "version": "0.13.0",
+  "version": "0.14.2",
   "publisher": "maomao23314",
   "license": "GPL-3.0",
   "repository": {
@@ -44,6 +44,18 @@
         "title": "编译仿真程序",
         "category": "SCUT-71",
         "icon": "$(play)"
+      },
+      {
+        "command": "scut71.rebuild",
+        "title": "重新编译（先清理再编译）",
+        "category": "SCUT-71",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "scut71.clean",
+        "title": "清理生成物",
+        "category": "SCUT-71",
+        "icon": "$(trash)"
       },
       {
         "command": "scut71.newProject",
@@ -266,7 +278,8 @@
     "check-sdk": "node scripts/sync-sdk.js --check",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "prepackage": "npm run clean && npm run sync-sdk && npm run compile",
+    "check-version": "node scripts/check-version.js",
+    "prepackage": "npm run check-version && npm run clean && npm run sync-sdk && npm run compile",
     "package": "vsce package --no-dependencies --allow-missing-repository",
     "publish": "npm run prepackage && vsce publish --no-dependencies --allow-missing-repository",
     "publish:patch": "npm run prepackage && vsce publish patch --no-dependencies --allow-missing-repository --no-git-tag-version",

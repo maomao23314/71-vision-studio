@@ -360,6 +360,28 @@ if (SCENARIO === 'keys') {
   console.log('CTRL_EQ ' + JSON.stringify(cmdsSince(mark)) + ' prevented=' + z);
   process.exit(0);
 }
+
+if (SCENARIO === 'clean_rebuild') {
+  /* 「清理」与「重新编译」两个按钮：点一下必须各发一条对应命令。
+   *
+   * ★ 为什么这条值得写（它守着一类"按钮画了但没接线"的缺陷）：
+   *   工具栏是纯 HTML + 一段 bind 调用。加一个按钮时最容易漏的
+   *   恰恰是那行 bind —— 按钮看得见、点下去毫无反应，
+   *   而所有静态检查都不会红（HTML 里有 id，JS 里没引用它）。
+   *   这里走的是"真的点一下"的路径，漏接线就必然发不出命令。
+   *
+   * ★ 顺带钉住命令名：'clean' / 'rebuild' 是宿主 switch 里的字面量。
+   *   页面发一个宿主不认识的名字，结果是静默无反应 ——
+   *   同样不会让任何静态检查变红。 */
+  let mark = outbox.length;
+  getEl('btn-clean').click();
+  console.log('CLEAN ' + JSON.stringify(cmdsSince(mark)));
+
+  mark = outbox.length;
+  getEl('btn-rebuild').click();
+  console.log('REBUILD ' + JSON.stringify(cmdsSince(mark)));
+  process.exit(0);
+}
 '''
 
 
@@ -460,6 +482,18 @@ def main():
           '焦点在输入框里时一个键都不抢', out)
     check('CTRL_EQ [] prevented=true' in out,
           'Ctrl+= 仍然是缩放（页面自己吃掉），不是翻页', out)
+
+    # ---- 场景 5：清理 / 重新编译按钮 ----
+    print('')
+    print('[5] 清理 / 重新编译：按钮真的发出对应命令')
+    out, err, rc = run_node('clean_rebuild')
+    print('    driver: %s' % (out or '(no output)'))
+    if err:
+        print('    stderr : %s' % err[:400])
+    check('CLEAN ["clean"]' in out,
+          '「清理」按钮发 clean（不是别的命令、也不是什么都不发）', out)
+    check('REBUILD ["rebuild"]' in out,
+          '「重新编译」按钮发 rebuild', out)
 
     print('\n' + '=' * 60)
     if failures:

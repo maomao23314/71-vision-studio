@@ -22,6 +22,11 @@ python tools\scut_build.py doctor --project .
 python tools\scut_build.py clean --project .
 ```
 
+> **什么时候需要 `clean`**：怀疑"改了代码却没生效"的时候。增量判据一旦
+> 出错，症状就是这个 —— 不报错、不自证，画面和变量面板全都正常，
+> 只是跑的还是旧算法。此时 `clean` 再构建一次，就回到确定的状态。
+> 插件里对应工具栏的 **清理** 与 **重新编译**（后者 = 清理 + 编译）。
+
 `--project` 指向你的工程目录（那个装着 `code/` 与 `scut_project.json` 的目录）。
 老工程用 `config.h` 承载尺寸契约，也仍然支持。
 
@@ -66,10 +71,15 @@ python tools\scut_build.py clean --project .
 
 ```
 [1] clang -g -O0 -c camera.c -o camera.probe.o        ← 探针：产出调试信息
-[2] python tools/scut_symbols.py --obj camera.probe.o --src camera.c \
-        --out-c camera.wrapped.c --out-json camera.vars.json   ← 生成
+[2] python tools/scut_symbols.py --batch spec.json    ← 生成（一次进程处理全部单元）
 [3] clang ... -c camera.wrapped.c -o camera.o         ← 编译【包装单元】，不是原文件
 ```
+
+第 [2] 步在构建里走的是**批量模式**：把全部单元写进一份 `spec.json`，
+一次进程全部处理完。它真正的计算只有几十毫秒（读 DWARF、扫手写注册），
+其余全是 Python 解释器启动 —— 按文件起进程等于把启动开销乘以文件数。
+单文件模式（`--obj/--src/--out-c`）仍然保留，手工排查时用它更方便；
+两条路对同一个输入产出的文件**逐字节相同**（`tests/test_incremental.py` 守着这条）。
 
 **为什么必须编译「包装单元」而不是你的原文件？**
 
@@ -164,6 +174,32 @@ python tools\scut_build.py --project . --json
 
 退出码：`0` 成功 · `1` 编译/链接失败 · `2` 环境或工程结构有致命问题 · `3` 脚本自身出错。
 
+### `clean` 的 JSON 形状（与 build 对齐）
+
+```bat
+python tools\scut_build.py clean --project . --json
+```
+
+```json
+{
+  "ok": true,
+  "removed": "C:\\...\\.scut",
+  "elapsedMs": 22,
+  "errors": []
+}
+```
+
+`removed` 在生成物目录本来就不存在时是 `null`（这不是失败，是幂等）。
+失败时 `ok` 为 `false`、`errors` 里带完整的中文原因，退出码 `2`。
+
+> **为什么 clean 是「先改名再删」**：`rmtree` 删到一半失败（最典型：
+> `scut_sim.exe` 还在跑，Windows 锁住它）会留下 `bin/` 没了、`obj/` 还在的
+> `.scut`，下一次构建会把它当成有效的增量缓存 —— 那比"什么都没删"更糟。
+> 现在的做法是先把 `.scut` 原子改名成 `.scut.deleting-<pid>`（改名只动目录项，
+> 被占用的文件也能改名），再删那个目录。于是失败只可能是两种：
+> **一个字节都没动**，或者**真正的 `.scut` 已经消失、只剩一份待清理的垃圾**
+> （下次构建或下次 clean 会自动扫掉）。两种都不会产生"半新半旧的有效缓存"。
+
 ---
 
 ## 五、逃生舱：`scut.extra.mk`
@@ -213,3 +249,6 @@ python tools\scut_build.py doctor --project .
 - `tools/scut_dwarf.py` 是独立的 DWARF 读取器，不知道 SCUT 的任何概念，
   可以被任何工具复用；改它请跑 `tests/test_dwarf.py`。
 - `scut_symbols.py` 的回归测试在 `tests/test_symbols.py`，改动生成器后务必跑一遍。
+- `scut_build.py` 的增量判据在 `tests/test_incremental.py`。改判据**必须**先读那一条：
+  它同时测「该失效的真的失效」和「该命中的真的命中」——
+  只测前一半的话，一个"永远返回需要重建"的实现照样全绿。

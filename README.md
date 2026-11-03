@@ -229,7 +229,18 @@ void camera_draw(void)
 | 跳到第 N 张 | 工具栏「跳到…」 | 图集大时比一张张点快 |
 | 测速 | `F9` | 同一张图重复 N 次取平均周期数 |
 | 停止 | `Shift+F5` | |
+| 重新编译 | — | 先删掉 `.scut` 再编一遍。**怀疑"改了代码却没生效"时用它** |
+| 清理 | — | 只删 `.scut`（`code/`、`pic/`、`scut_project.json` 一个字节都不动） |
 | 查看 `SCUT_Log` | — | 侧边栏「运行日志」折叠区，同时镜像到底部「SCUT-71 运行日志」输出通道（可搜索/复制） |
+
+> **什么时候需要「清理」/「重新编译」**：增量构建靠"内容指纹 + 编译器自己
+> 写的依赖文件"判断哪些文件不用重编。判据一旦出错，症状是**改了代码却没生效**
+> —— 不报错、不自证，画面和变量面板全都正常，只是跑的还是旧算法。
+> 这时点「清理」（或直接「重新编译」）回到确定状态即可。
+> 正常情况下完全用不到它们，所以它们是工具栏右侧的两个灰色小按钮。
+>
+> 「清理」不做二次确认：它能删的东西只有 `.scut` 一个目录，而 `code/`、
+> `pic/`、`scut_project.json` 全在工程根 —— 目录结构本身就保证了这条边界。
 
 > 上表里带键的几项（`+`/`-`/`←`/`→`/`F9`/`Shift+F5`）**只在仿真视图拿着焦点时生效**：
 > 点一下面板就行，点回代码就交还给编辑器 —— 你在 `.c` 里敲 `+` 永远是加号。
@@ -431,10 +442,22 @@ scut_project.json
    └─→ .scut/gen/scut_env_glue.c   接线单元（调用用户的三个钩子）
 用户每个 .c：
    [1] clang -g -O0 -gdwarf-4 -c  → 探针 .o
-   [2] scut_symbols.py            → 包装单元 .c（#include 用户源码 + constructor 注册）
+   [2] scut_symbols.py --batch    → 包装单元 .c（#include 用户源码 + constructor 注册）
    [3] clang -g -O0 -c 包装单元    → 真正的 .o
 链接：核心库 .a（-O2）+ bind（-O2）+ 后端（-O2）+ 用户 .o（-O0）+ glue（-O2）
 ```
+
+**每一步都是增量的。** 判据是「命令行 + 编译器身份 + 依赖文件内容」的 sha256，
+依赖名单由编译器自己写的 `-MD` 文件给出（make / ninja 的做法）。
+一个文件都没改时整次构建约 300 ms（只剩探测、配置与 clangd 索引），
+而且**不会重新链接** —— 也就不会撞上「仿真还在跑导致 exe 写不进去」。
+[2] 是**一次进程处理全部单元**：它真正的计算只有几十毫秒，
+其余全是 Python 解释器启动，按文件起进程等于把启动开销乘以文件数。
+
+> **判据出错时的逃生口**：工具栏的「清理」删掉整个 `.scut`，「重新编译」= 清理 + 编译。
+> 增量判据的失效方式是**静默的**（改了代码却复用旧 `.o`，不报错、不自证），
+> 所以必须有一条无条件回到已知状态的路。`clean` 用「先改名再删」：
+> 删到一半失败（exe 被占用）也不会留下"半新半旧"的 `.scut` 被下次构建误当成有效缓存。
 
 包装单元是唯一能触及 `static` 变量的办法（`#include` 展开源码后注册）。
 注册必须是 `constructor`，否则没人调用它，表现是"变量面板永远是空的"。
@@ -489,6 +512,7 @@ python tests/run_all_tests.py --toolchain <根目录>    # 工具链不在默认
 | mem-safety | `test_mem_safety.py` | ASan + 金丝雀抓栈越界（曾抓到 `json_escape` 越界写、`scut_watch_read` 越界读） |
 | settings | `test_extension_settings.py` | 配置一致性：TS 的 `ProjectConfig` 与 Python 的 `DEFAULT_CONFIG` 字段逐字对齐 |
 | extension | `extension_smoke.js` | 插件纯逻辑（协议解析 / PPM / 诊断）—— 不依赖 VS Code |
+| buildcmd | `test_buildcmd.js` | 插件**拼出来的命令行形状**：脚本路径必须排 argv[0]。曾漏掉它，导致 `python clean --project …` 把 `clean` 当文件名打开，编译与清理一起坏 |
 | session | `run_frames.js` | 单步/测速/翻页的 **ACK 背压链路**：一步只走一帧（背压多放行一次就会多出帧来） |
 | manual-vars | `manual_vars.js` | 主动暴露变量：源码扫描 → 分组 → 恒显示 |
 | dap | `dap_smoke.js` | 真实 lldb-dap DAP 会话（缺 lldb-dap 时**明确跳过**，不判失败） |
