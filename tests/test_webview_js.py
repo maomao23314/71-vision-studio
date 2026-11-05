@@ -380,6 +380,24 @@ if (SCENARIO === 'clean_rebuild') {
   mark = outbox.length;
   getEl('btn-rebuild').click();
   console.log('REBUILD ' + JSON.stringify(cmdsSince(mark)));
+
+  /* ---- 热重载开关 ----
+   * ★ 断言的是"发出去的意图"，因为页面【不】自己记状态：
+   *   真值在宿主，页面只按宿主回推的 status 高亮按钮。
+   *   所以这里同时验两件事：
+   *     ① 按钮没亮时点一下 → on=true（要打开）；
+   *     ② 宿主已经回推过"开"（按钮有 .on）之后再点 → on=false（要关）。
+   *   只看 ① 的话，一个"永远发 on=true"的实现照样全绿 —— 用户就再也关不掉了。 */
+  mark = outbox.length;
+  getEl('btn-hot').click();
+  console.log('HOT_ON ' + JSON.stringify(cmdsSince(mark))
+              + ' raw=' + JSON.stringify(outbox.slice(mark).filter(m => m && m.type === 'cmd')));
+
+  getEl('btn-hot').classList.add('on');   // 宿主刚回推过"开"
+  mark = outbox.length;
+  getEl('btn-hot').click();
+  console.log('HOT_OFF ' + JSON.stringify(cmdsSince(mark))
+              + ' raw=' + JSON.stringify(outbox.slice(mark).filter(m => m && m.type === 'cmd')));
   process.exit(0);
 }
 '''
@@ -494,6 +512,11 @@ def main():
           '「清理」按钮发 clean（不是别的命令、也不是什么都不发）', out)
     check('REBUILD ["rebuild"]' in out,
           '「重新编译」按钮发 rebuild', out)
+    # ---- 热重载开关 ----
+    check('"cmd":"hotReload"' in out and '"on":true' in out,
+          '「热重载」按钮发出 hotReload=开', out)
+    check('"cmd":"hotReload","on":false' in out,
+          '已经是"开"的状态时再点 → 发 hotReload=关（能被关掉）', out)
 
     print('\n' + '=' * 60)
     if failures:

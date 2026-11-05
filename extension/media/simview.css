@@ -358,9 +358,28 @@ button.ghost:hover {
  *   工具栏的视觉层级应当反映使用频率。这两个按钮的字号与 ⚙ 一致，
  *   于是整行读下来是「常用（实心）→ 低频（灰底）→ 角落（⚙）」三段。 */
 #btn-rebuild,
-#btn-clean {
+#btn-clean,
+#btn-hot {
   font-size: 11px;
   padding: 2px 7px;
+}
+
+/* ---- 热重载：开着的时候必须一眼看出来 ----
+ * ★ 为什么不用"改文字"（比如「热重载 ✓ / 热重载」）：
+ *   文字一变长度就变，工具栏会在切换的瞬间整体抖动；
+ *   而且用户要读才知道现在是哪个状态。
+ *   高亮边框 + 强调色是"当前模式"最省位的表达方式。
+ * ★ 为什么用 button-background 而不是自定义颜色：
+ *   主题切换（浅色/深色/高对比）由 VS Code 的变量负责，
+ *   写死一个绿或蓝在这套面板里会在某个主题下糊成一片。 */
+#btn-hot.on {
+  color: var(--vscode-button-foreground, #fff);
+  background: var(--vscode-button-background, #0e639c);
+  border-color: var(--vscode-button-background, #0e639c);
+}
+
+#btn-hot.on:hover {
+  background: var(--vscode-button-hoverBackground, #1177bb);
 }
 
 .runN {

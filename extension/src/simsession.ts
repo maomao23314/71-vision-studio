@@ -432,6 +432,20 @@ export class SimSessionImpl implements SimSession {
     }
 
     /**
+     * 重载当前这张图（协议 "r"）。
+     *
+     * ★ 与 step() 的区别：空行在【不带 --advance】时只是"再跑一帧"，
+     *   输入缓冲里的像素还是上一帧那份 —— 后端根本不会去读文件。
+     *   而热重载要的正是"重新读一遍工程根下的副本"，所以必须有一条
+     *   自己的命令；复用一个语义不同的命令，将来一定会有人把
+     *   "空行" 改成别的意思，然后热重载静默失效。
+     */
+    reloadPic(): Promise<void> {
+        this.writeLine('r');
+        return Promise.resolve();
+    }
+
+    /**
      * 测速：当前这张图重复 N 次（协议 "b<N>"）。
      *
      * ★ 只跑【计时段】：后端收到 b<N> 后把 repeat 临时设为 N、
@@ -671,6 +685,7 @@ if (!rgb) {
                 timing,
                 pic: frame.pic,
                 loadError: frame.loadError,
+                inHash: frame.inHash || undefined,
             });
             return;
         }
@@ -684,6 +699,7 @@ if (!rgb) {
             timing,
             pic: frame.pic,
             loadError: frame.loadError,
+            inHash: frame.inHash || undefined,
         });
     }
 

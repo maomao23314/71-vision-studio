@@ -219,6 +219,11 @@ export interface FrameLine {
     pic: string;
     /** 本帧图像加载失败的原因（成功时为空串）。 */
     loadError: string;
+    /**
+     * 本帧解码的那份 Input_pic 副本的内容指纹（后端 0.15 起随帧上报）。
+     * 空串 = 本帧不是从副本解码的（镜像失败，读的是图集原图）。
+     */
+    inHash: string;
     /** 每帧变量快照（随帧 JSON 内嵌，面板数值与画面同步）。 */
     vars: VarLineEntry[];
     timing: FrameTiming;
@@ -266,6 +271,7 @@ export function parseFrameLine(line: string): FrameLine | undefined {
         img2: typeof root.img2 === 'string' ? root.img2 : '',
         pic: typeof root.pic === 'string' ? root.pic : '',
         loadError: typeof root.loadError === 'string' ? root.loadError : '',
+        inHash: typeof root.inHash === 'string' ? root.inHash : '',
         vars: parseVariablesLine(JSON.stringify(root)) ?? [],
         timing: {
             processUs: num(t.processUs),

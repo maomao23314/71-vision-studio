@@ -19,6 +19,7 @@
  *     "pic":"<path to source image>",
  *     ["loadError":"<短中文原因>",]        ← 仅当本帧加载失败时出现
  *     ["img2":"<path to ppm>",]            ← 仅当算法画过图片2时出现
+ *     ["inHash":"<16 位十六进制>",]        ← 仅当本帧从 Input_pic 副本解码时出现
  *     "bench":false,
  *     "vars":[{"name":..,"kind":..,"dim":..,"total":..,"values":"..",
  *              "truncated":bool}, ...],     ← 每帧内嵌，面板数值与画面同步
@@ -40,6 +41,11 @@
  *    IDE 要在界面上显示「这一帧看的是哪张图」，否则批跑整组图时
  *    画面与文件对不上号，用户只能靠帧号去猜。
  *    追加字段一律排在旧字段后面（只增不改），老解析端照常工作。
+ *
+ *  ★ "inHash" 是【本帧解码的那份 Input_pic 副本】的内容指纹：
+ *    插件靠它区分"副本变了是我自己写的（翻页）"还是"用户用图片编辑器
+ *    改了它" —— 时序靠不住，内容哈希才是唯一稳的判据。
+ *    算法与取值规则见 pic_hash_file / s_pic_in_hash。
  *
  *  ★ 关于 "pic" 的【取值格式】（本轮调整）：
  *    修复"测试图找不到"的 bug 之后，内部使用的图片路径变成了绝对路径
@@ -382,6 +388,30 @@ static int  s_pic_err_code;
 static char s_pic_err_path[SCUT_PATH_MAX];
 static int  s_pic_err_reported;
 static char s_pic_err_short[128];       /* 最近一次加载失败的短中文原因 */
+
+/* 本帧【真正解码的那份副本】的内容指纹（FNV-1a 64，16 位小写十六进制）。
+ *
+ * ★ 为什么需要它（热重载的基石）：
+ *   上层（插件）要判断"工程根下的 Input_pic 变了，是不是我自己的写入造成的回声"。
+ *   插件在发完一条翻页命令后收到文件变化通知时，【无法】区分
+ *     · 后端刚刚按命令重写了副本（正常，不该再加载一次），
+ *     · 外部图像编辑器刚刚保存了这张图（该加载）。
+ *   靠"时间窗口"猜是脆的：帧的往返时间取决于机器负载，猜错一次
+ *   就是多跑一帧（算法状态平白前进一格，界面上完全看不出原因）。
+ *
+ *   所以让【写文件的那一方】把"我读到的内容是什么"报出来：
+ *   插件只需用同一个算法算一遍当前文件，相同 → 回声，不同 → 真的变了。
+ *   时间完全退出判据，这是唯一不依赖时序的划分方式。
+ *
+ * ★ 为什么用内容哈希而不是 (大小, 修改时间)：
+ *   修改时间的精度在 MinGW 的 stat() 上只有【秒】。画图时一秒内保存两次
+ *   完全正常，且 BMP 大小恒定 —— (大小, mtime) 会把两次不同的编辑
+ *   判成"没变"，表现为"偶尔保存了却不出图"，且完全无法复现。
+ *
+ * ★ 空串 = 本帧不是从副本解码的（镜像失败，直接读了图集原图）。
+ *   此时"监听副本"这件事没有意义，插件据此关掉热重载的判据。
+ *   与 loadError 一样，这个状态是【本帧】的，每次加载开头清零。 */
+static char s_pic_in_hash[17];
 
 /* 测速请求：收到了 b<N>，但【还没跑那一帧】。
  *
@@ -904,6 +934,63 @@ static int pic_file_exists(const char *path)
 }
 
 /* --------------------------------------------------------------------------
+ *  文件内容指纹（FNV-1a 64）
+ *
+ * ★ 为什么是 FNV-1a 而不是 CRC32 / MD5：
+ *   · 只有 32 位的 CRC32 在"判等"这件事上碰撞概率不可忽略，
+ *     而这里判错的代价是【静默漏掉一次热重载】；
+ *   · MD5 / SHA-256 要引入一份不小的实现，只为了区分两个几十 KB 的图，
+ *     代价与收益完全不成比例。
+ *   FNV-1a 64 只需一个乘法循环，十几行、无表、无依赖，
+ *   而且插件侧（JS）能用同一条公式算出同一个值 —— 两边必须逐位一致，
+ *   这就是它唯一的硬性要求。初值与乘数都是它规范里写死的常量。
+ *
+ * ★ 为什么单独读一遍文件，而不是在解码时顺带算：
+ *   解码走的是 core 的 scut_frame_load_image()，那里是"图片格式"的领域；
+ *   把一个"给上层判断文件有没有变"的哈希塞进去，会让 core 多背一个
+ *   与解码无关的职责。多读一遍 20 多 KB 是几十微秒，换来的是职责清晰。
+ *
+ * 成功返回 0 并把 16 位十六进制写进 out（cap 至少 17）；
+ * 打不开/读失败返回 -1 并把 out 置空 —— 空串在帧 JSON 里表示"没有指纹"。
+ * -------------------------------------------------------------------------- */
+static int pic_hash_file(const char *path, char *out, size_t cap)
+{
+    /* FNV-1a 64 的规范常量（offset basis / prime）。 */
+    const unsigned long long basis = 14695981039346656037ULL;
+    const unsigned long long prime = 1099511628211ULL;
+    unsigned long long h = basis;
+    unsigned char      buf[8192];
+    size_t             n;
+    FILE              *f;
+
+    if (out == NULL || cap < 17u) {
+        return -1;
+    }
+    out[0] = '\0';
+
+    f = fopen(path, "rb");
+    if (f == NULL) {
+        return -1;
+    }
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+        size_t i;
+
+        for (i = 0; i < n; i++) {
+            h ^= (unsigned long long)buf[i];
+            h *= prime;             /* 无符号溢出回绕，正是规范要的行为 */
+        }
+    }
+    if (ferror(f)) {
+        fclose(f);
+        return -1;
+    }
+    fclose(f);
+
+    snprintf(out, cap, "%016" PRIx64, (scut_u64)h);
+    return 0;
+}
+
+/* --------------------------------------------------------------------------
  *  「输入图副本」：把当前这张图复制到 <工程根>/Input_pic.<ext>
  *
  * ★ 为什么要有这一步（用户要求，2026-11）：
@@ -1021,7 +1108,14 @@ static int pic_mirror_to_project(const char *src, char *out, size_t out_cap)
     }
 
     if (s_last_src[0] != '\0' && strcmp(s_last_src, src) == 0 &&
-        size >= 0 && size == s_last_size && mtime == s_last_mtime) {
+        size >= 0 && size == s_last_size && mtime == s_last_mtime &&
+        /* ★ 还必须确认副本【真的还在】。
+         *   少了这一个判断，"同源跳过复制"会一路跳到"从副本解码"，
+         *   而副本已经被删掉（用户清理目录、编辑器"删了再写"的中间态、
+         *   同步盘回收文件），于是这一帧解不开、画面变黑 ——
+         *   报出来的原因指向一张根本不坏的源图。
+         *   副本不在就当缓存失效，老老实实重拷一遍。 */
+        pic_file_exists(dst)) {
         fclose(fi);
         return 1;                   /* 同一张图、内容没变：已拷过，副本就是它 */
     }
@@ -1712,6 +1806,9 @@ static int scut_pic_load(int index)
     s_pic_err_path[0]  = '\0';
     s_pic_err_reported = 0;
     s_pic_err_short[0] = '\0';
+    /* 指纹同理：本帧没从副本解码时它必须是空的，否则插件会拿上一帧的
+     * 指纹去比，得到"文件没变"的结论 —— 那正好把一次真的热重载吃掉。 */
+    s_pic_in_hash[0] = '\0';
 
     s_pic_path[0] = '\0';
 
@@ -1780,6 +1877,15 @@ static int scut_pic_load(int index)
              *   报副本路径的话，每张图都显示成同一个 Input_pic.bmp，
              *   翻页时看不出任何变化 —— 用户会以为翻页没生效。 */
             snprintf(s_pic_path, sizeof(s_pic_path), "%s", path);
+
+            /* ★ 只有【真从副本解码】时才报指纹（load_path 指向副本）。
+             *   回落到读原图时留空：那时用户改副本影响不了画面，
+             *   插件若拿着一个"看起来有效"的指纹去比对，就会不停
+             *   判定"文件变了、该重载"，而重载永远不改变任何东西。 */
+            if (load_path != path) {
+                (void)pic_hash_file(load_path, s_pic_in_hash,
+                                    sizeof(s_pic_in_hash));
+            }
             loaded = 1;
             break;
         }
@@ -2309,6 +2415,7 @@ static void on_frame(void *user)
     char        *vars_json = s_vars_json;   /* 进程级缓冲（main 分配一次，见 VARS_JSON_CAP） */
     int          load_error;
     int          has_img2 = 0;      /* 本帧有没有图片2可报（见下面写盘那段） */
+    int          has_in_hash;       /* 本帧有没有输入副本指纹（见 s_pic_in_hash） */
     int          is_bench;
     const scut_u8 *out;
     int          w, h;
@@ -2406,6 +2513,11 @@ static void on_frame(void *user)
         load_error = 0;
     }
 
+    /* ★ 输入副本指纹：只有本帧真从副本解码时才有值（见 s_pic_in_hash）。
+     *   与 loadError / img2 一样是【可选字段】—— 没有就整段不出现，
+     *   老解析端看不到它，照常工作。 */
+    has_in_hash = (s_pic_in_hash[0] != '\0');
+
     if (o->json) {
         /* ★ 周期数用 PRIu64（即 I64u）而不是 "%llu"：
          *   MinGW 的 gcc 在 -std=c11（定义了 __STRICT_ANSI__）下
@@ -2427,6 +2539,7 @@ static void on_frame(void *user)
                "\"pic\":\"%s\","
                "%s%s%s"
                "%s%s%s"
+               "%s%s%s"
                "\"bench\":%s,"
                "\"vars\":%s,"
                "\"timing\":{\"processUs\":%.3f,\"drawUs\":%.3f,"
@@ -2442,6 +2555,11 @@ static void on_frame(void *user)
                has_img2 ? "\"img2\":\"" : "",
                has_img2 ? img2_esc : "",
                has_img2 ? "\"," : "",
+               /* ★ inHash 是【追加】字段，排在所有旧字段之后（只增不改）。
+                *   内容是 16 位十六进制，不含需要转义的字符，不必过 json_escape。 */
+               has_in_hash ? "\"inHash\":\"" : "",
+               has_in_hash ? s_pic_in_hash : "",
+               has_in_hash ? "\"," : "",
                is_bench ? "true" : "false",
                vars_json,
                t ? t->process_us : 0.0,
@@ -2608,6 +2726,7 @@ static void on_frame(void *user)
          *     n           下一张图（相对当前位置 +1，回绕）
          *     p           上一张图（-1，回绕）
          *     g<N>        跳到第 N 张（N 按图集编号基准）
+         *     r           重载当前这张图（不换图；供热重载用，见 case 'r'）
          *     其它行      当作推进一帧（宽容：未知命令不让会话卡死）
          *
          * 为什么要有跳转命令（用户原话："为什么我点上一张下一张
@@ -2640,6 +2759,26 @@ static void on_frame(void *user)
                         int idx = scut_pic_index() - s_pic_first;
                         idx = (idx - 1 + s_pic_count) % s_pic_count;
                         scut_pic_load(s_pic_first + idx);
+                    }
+                    break;
+                }
+                case 'r': {                  /* reload：原地重读当前这张图 */
+                    /* ★ 热重载的落地动作（用户要求，2026-11）：
+                     *   外面用图片编辑器改了工程根下的 Input_pic，插件发现
+                     *   文件变了就发一个 'r'，让正在跑的这个进程【重新解码
+                     *   同一张图】，然后照常跑下一帧 —— 算法状态不清零，
+                     *   与翻页/跳图完全同一套语义。
+                     *
+                     * ★ 为什么不在这里"重新从 pic/ 复制一遍再解码"：
+                     *   那就等于把用户改过的副本覆盖掉，热重载永远看不到
+                     *   编辑结果。能不能重拷由 pic_mirror_to_project 自己判断
+                     *   （源文件真的变了才拷），本分支只是"再加载一次"，
+                     *   把"该不该拷"这件事留在唯一的那一处。
+                     *
+                     * ★ 图集为空时什么都不做：没有"当前图"可重载，
+                     *   下一帧照跑（输入仍是黑的），由 loadError 解释原因。 */
+                    if (s_pic_count > 0) {
+                        scut_pic_load(scut_pic_index());
                     }
                     break;
                 }

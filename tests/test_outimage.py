@@ -495,6 +495,26 @@ def main():
                       'E2 改副本后画面跟着变（证明解码读的是 Input_pic）',
                       out[-400:])
 
+            # ---- E3) 热重载 ----
+            # 这一节守的是 0.15.0 的新承诺：
+            #   ① 帧 JSON 里的 inHash 就是磁盘上那份副本的指纹（C 与 JS 一致）；
+            #   ② 发 'r' 之后进程重读【当前磁盘内容】，而不是重新从图集复制 ——
+            #      后者会把用户用图片编辑器改过的副本覆盖掉，热重载等于没做。
+            # ★ 必须用真进程：这条链路里"后端怎么处理 r""镜像会不会覆盖"
+            #   都不是宿主侧能推出来的（理由同 mirror_decode.js 的头部）。
+            print('\n[E3] 热重载（协议 r：重读当前副本，不重新复制）')
+            if not shutil.which('node'):
+                print('  SKIP  找不到 node，跳过热重载验证')
+            else:
+                rr = run([shutil.which('node'),
+                          os.path.join(HERE, 'hot_reload_e2e.js'),
+                          projE, pic_dirE])
+                out = ((rr.stdout or '') + (rr.stderr or ''))
+                check(rr.returncode == 0, 'E3 热重载端到端验证通过', out[-900:])
+                check('HOT_RELOAD_OK' in out,
+                      'E3 重载读的是改写后的副本（没有被图集覆盖）',
+                      out[-500:])
+
         print('\n' + '=' * 60)
         if failures:
             print('%d/%d 项通过，%d 项失败：' % (checks - len(failures), checks,

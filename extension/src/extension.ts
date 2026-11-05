@@ -41,6 +41,14 @@ import {
 import { isDir, isFile } from './fsutil';
 
 /**
+ * 热重载开关在 globalState 里的键名。
+ *
+ * ★ 写成常量而不是在 deps 里内联字符串：读写必须用同一个键，
+ *   两处各写一遍字面量，将来改一个忘一个，开关就会"记住了又忘"。
+ */
+const HOT_RELOAD_KEY = 'scut71.hotReload';
+
+/**
  * 用户算法 SCUT_Log 的独立输出通道（VS Code 底部「输出」面板）。
  *
  * ★ 为什么是 OutputChannel 而不是侧边栏折叠区（用户原话：
@@ -235,6 +243,12 @@ export function activate(context: vscode.ExtensionContext): void {
             };
         },
         log,
+        /* ★ 热重载开关记在 globalState（用户级、跨窗口、跨重启）：
+         *   它描述的是"我习惯用外接图片编辑器调图吗"，属于人的偏好，
+         *   不属于某个工程 —— 写进 scut_project.json 会让它跟着工程跑，
+         *   同事拿到这个工程打开面板就会莫名其妙处在"自动重载"模式。 */
+        getHotReload: (): boolean => context.globalState.get<boolean>(HOT_RELOAD_KEY, false),
+        setHotReload: (on: boolean): void => { void context.globalState.update(HOT_RELOAD_KEY, on); },
     });
 
     context.subscriptions.push(

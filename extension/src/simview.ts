@@ -23,6 +23,7 @@ import type { FramePacket, VariableManifest, VariableSnapshot, WatchedVariable }
 import { configPath, defaultConfig, readConfig } from './projectconfig';
 import type { ProjectConfig } from './projectconfig';
 import { OutPicSaver } from './outpic';
+import { decideReload, hashInputCopy } from './hotreload';
 
 /** 视图 id（必须与 package.json 的 contributes.views 一致）。 */
 export const SIM_VIEW_ID = 'scut71.simview';
@@ -63,6 +64,16 @@ export interface SimViewDeps {
     getProjectInfo(): ProjectInfo | undefined;
     /** 环境日志（写进侧边栏日志折叠区）。 */
     log(line: string): void;
+    /**
+     * 热重载开关的持久化（跨窗口、跨重启记住用户的选择）。
+     *
+     * ★ 放在 deps 里而不是直接 import vscode 的 context.globalState：
+     *   本文件已经持有 vscode 引用，但"用户偏好存在哪"是插件生命周期的事，
+     *   和"面板怎么显示"是两件事。多两个函数，换来的是
+     *   simview 不必知道 globalState 的键名（那是 extension.ts 的事）。
+     */
+    getHotReload(): boolean;
+    setHotReload(on: boolean): void;
 }
 
 /**
@@ -111,12 +122,46 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
     private outputCfgKey = '';
     private disposables: vscode.Disposable[] = [];
 
+    /* ------------------------------------------------------------ 热重载 */
+    /*
+     * 用户要的是：外接图片编辑器写工程根下的 Input_pic（环境真正解码的
+     * 那份副本），面板自动重新加载并跑一帧；关掉开关时只有按钮会换图。
+     *
+     * 判据全在 hotreload.ts（纯逻辑、可单测）。这里只做三件事：
+     *   ① 监听文件变化（VS Code 的 watcher，不自己轮询）；
+     *   ② 记账：发了多少条命令还没收到帧、上一帧的指纹是什么；
+     *   ③ 判据说 reload 时，向会话发一条 'r'。
+     */
+    /** 开关状态（面板工具栏最右边那个按钮；跨重启记住） */
+    private hotReload = false;
+    /** 工程根下 Input_pic.* 的监听器 */
+    private hotWatcher: vscode.FileSystemWatcher | undefined;
+    /** 被监听的那个工程根（换工程时要重建监听器） */
+    private hotWatchRoot: string | undefined;
+    /** 合并连续写入的防抖定时器（一次保存常常连发好几个事件） */
+    private hotTimer: ReturnType<typeof setTimeout> | undefined;
+    /** 有文件变化还没核对完（在等防抖，或在等在途的帧落地） */
+    private hotPending = false;
+    /** 已发命令、还没收到对应帧的条数（判据的一部分，理由见 hotreload.ts） */
+    private framesInFlight = 0;
+    /** 后端上一帧报回来的副本指纹（undefined = 那一帧没从副本解码） */
+    private lastInputHash: string | undefined;
+    /** 本帧输入图路径（只用来推导副本名 Input_pic<后缀>） */
+    private lastPicPath: string | undefined;
+    /** "后端没报指纹"只提示一次：工程根写不了时每帧都会缺这个字段 */
+    private warnedNoHash = false;
+
     constructor(extensionUri: vscode.Uri, deps: SimViewDeps) {
         this.extensionUri = extensionUri;
         this.deps = deps;
+        /* ★ 恢复上次的开关状态，但【不】在这里建监听器：
+         *   构造时可能还没有工程（工作区还没打开完），
+         *   监听器由 syncHotWatcher() 在"有工程根"的时候才建。 */
+        this.hotReload = deps.getHotReload();
     }
 
     dispose(): void {
+        this.stopHotWatcher();
         for (const d of this.disposables.splice(0)) {
             d.dispose();
         }
@@ -152,6 +197,11 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
             visible: () => view.visible,
         };
         this.views.add(attached);
+        /* ★ 面板第一次打开时补建热重载监听器。
+         *   开关状态是持久化的（上次关掉面板时可能是"开"），
+         *   而构造 SimViewProvider 的那一刻往往还没有工程根 ——
+         *   只在这里补一次，用户上次开了就还是开的。 */
+        this.syncHotWatcher();
         // 不可见即停止产帧（停在我们这侧：不放行下一帧），可见即恢复。
         const visSub = view.onDidChangeVisibility(() => {
             this.deps.log(`[视图] 可见性变化：${view.visible ? '可见' : '隐藏'}`);
@@ -295,6 +345,7 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
         }
         this.updateProduction();
         this.sendStatus();
+        this.framesInFlight++;
         // ★ 用 bench() 返回的那一帧，而不是 this.lastTiming 缓存：
         //   命令是异步生效的，缓存里此刻还是【测速之前】那一帧的数字。
         //   详见 SimSession.bench 的说明。
@@ -346,6 +397,7 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
         this.deps.log(`[跳图] 跳到第 ${n} 张。`);
         this.updateProduction();
         this.sendStatus();
+        this.framesInFlight++;
         await s.gotoPic(n);
     }
 
@@ -373,6 +425,9 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
         this.deps.log(delta > 0 ? '[翻页] 下一张图。' : '[翻页] 上一张图。');
         this.updateProduction();
         this.sendStatus();
+        /* 记一笔"有一条命令在途"：后端会在执行它的时候重写 Input_pic，
+         * 热重载的判据必须等这一帧落地（理由见 hotreload.ts 的 framesInFlight）。 */
+        this.framesInFlight++;
         if (delta > 0) {
             await s.nextPic();
         } else {
@@ -388,6 +443,9 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
         }
         this.session = undefined;
         await s.stop();
+        // 进程停了：在途命令不会再有帧，指纹也随进程作废（理由同 onExit）。
+        this.framesInFlight = 0;
+        this.lastInputHash = undefined;
         // ★ 走 sendStatus 而不是自己拼一条 {type:'status'}：
         //   那条消息现在还要带"工程就绪度"，手拼一份就少一个字段，
         //   前端于是会显示"未运行"却拿不到该引导哪一步。
@@ -407,8 +465,153 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
      *   由 extension.ts 在工作区变化时调用。
      */
     public refresh(): void {
+        // 工程可能刚被换掉：热重载的监听器要跟着换根（或本来没有工程，现在有了）。
+        this.syncHotWatcher();
         this.sendStatus();
         this.sendCatalogToAll();
+    }
+
+    /* ------------------------------------------------------- 热重载（对外） */
+
+    /**
+     * 打开 / 关闭热重载。
+     *
+     * ★ 语义只有一条（用户原话）：开着 = "检测到文件替换"就重新加载；
+     *   关着 = 只有按钮（上一张 / 下一张 / 跳到…）会换图。
+     *   "按钮触发"那条路本来就在，所以关闭时不需要做任何事 ——
+     *   只是不再自动发 'r'。
+     */
+    public setHotReload(on: boolean): void {
+        const changed = this.hotReload !== on;
+        this.hotReload = on;
+        if (changed) {
+            this.deps.setHotReload(on);
+        }
+        this.syncHotWatcher();
+        /* ★ 打开时立刻核对一次：用户很可能是"先在编辑器里改好、再回来开开关"，
+         *   而文件已经改完了，不会再有新的变化事件 —— 不主动检查就永远不生效。
+         *   延迟 0：此时没有在途的帧（开关是刚点下的），可以马上判。 */
+        if (on) {
+            this.scheduleHotReconcile(0);
+        }
+        if (changed) {
+            this.deps.log(on
+                ? '[热重载] 已打开：工程根下的 Input_pic 被外部改写时，会自动重新加载并跑一帧。'
+                : '[热重载] 已关闭：只有「上一张 / 下一张 / 跳到…」会换图。');
+            this.warnedNoHash = false;
+        }
+        this.sendStatus();
+    }
+
+    /**
+     * 让监听器与当前状态对齐（建 / 换根 / 拆）。
+     *
+     * ★ 为什么不做成"setHotReload 里直接建、关的时候直接拆"：
+     *   工程根可能在开关打开【之后】才出现（先开面板、再打开文件夹）；
+     *   也可能中途换掉（打开另一个工程）。只认一个入口，
+     *   就不会出现"监听器盯着上一个工程"这种看不出症状的错。
+     */
+    private syncHotWatcher(): void {
+        const root = this.hotReload ? this.deps.projectRoot() : undefined;
+        if (this.hotWatcher && (!root || root !== this.hotWatchRoot)) {
+            this.stopHotWatcher();
+        }
+        if (!root) {
+            return;
+        }
+        if (this.hotWatcher) {
+            return;
+        }
+        /* ★ 用 VS Code 的文件监听而不是自己 fs.watch / 轮询：
+         *   · 编辑器保存常常是"写临时文件 + 改名覆盖"，自己盯着
+         *     某个具体路径会在改名后【再也收不到事件】；
+         *   · 轮询要选间隔（太长迟钝、太短烧 CPU），而且用户关掉面板也还在跑；
+         *   · 这正是 VS Code 自己的 watcher 已经处理好的事（含排除规则）。 */
+        const watcher = vscode.workspace.createFileSystemWatcher(
+            new vscode.RelativePattern(vscode.Uri.file(root), 'Input_pic.*'));
+        const touched = (): void => { this.onInputCopyTouched(); };
+        watcher.onDidChange(touched);
+        watcher.onDidCreate(touched);
+        watcher.onDidDelete(touched);
+        this.hotWatcher = watcher;
+        this.hotWatchRoot = root;
+        this.deps.log(`[热重载] 正在监听 ${root} 下的 Input_pic.*`);
+    }
+
+    private stopHotWatcher(): void {
+        if (this.hotTimer) {
+            clearTimeout(this.hotTimer);
+            this.hotTimer = undefined;
+        }
+        this.hotPending = false;
+        this.hotWatcher?.dispose();
+        this.hotWatcher = undefined;
+        this.hotWatchRoot = undefined;
+    }
+
+    /**
+     * 文件变化 → 防抖 → 核对。
+     *
+     * ★ 为什么必须防抖：一次保存往往连着触发好几个事件（写、改、改），
+     *   而 Photoshop / 画图这类工具是"分块写"的。不合并的话，
+     *   一次保存会重载好几次，用户看到画面闪、算法状态白白前进好几格。
+     *   150 ms 的依据：它比人眼能察觉的延迟短（保存后立刻就看到结果），
+     *   又足够让一次保存的所有事件落进同一个窗口。
+     */
+    private onInputCopyTouched(): void {
+        this.scheduleHotReconcile(150);
+    }
+
+    private scheduleHotReconcile(delayMs: number): void {
+        if (!this.hotReload) {
+            return;
+        }
+        this.hotPending = true;
+        if (this.hotTimer) {
+            clearTimeout(this.hotTimer);
+        }
+        this.hotTimer = setTimeout(() => {
+            this.hotTimer = undefined;
+            this.reconcileHot();
+        }, delayMs);
+    }
+
+    /**
+     * 核对：这次变化要不要重载。
+     *
+     * ★ 判据本身在 hotreload.ts（纯函数，可单测）。这里只负责
+     *   "拿状态问它、按结论做事"，不在这里再写一遍规则 ——
+     *   两处各写一份，迟早会漂移成两种行为。
+     */
+    private reconcileHot(): void {
+        if (!this.hotPending) {
+            return;
+        }
+        const root = this.deps.projectRoot();
+        const decision = decideReload({
+            enabled: this.hotReload,
+            running: this.isRunning(),
+            framesInFlight: this.framesInFlight,
+            loadedHash: this.lastInputHash,
+            fileHash: root ? hashInputCopy(root, this.lastPicPath) : undefined,
+        });
+        if (decision === 'wait') {
+            /* 有命令在途：那一帧落地时 onFrame 会再调一次。
+             * ★ 这里【不能】清掉 hotPending —— 清了就再也没有第二次机会，
+             *   用户那次编辑会被静默吃掉。 */
+            return;
+        }
+        this.hotPending = false;
+        if (decision !== 'reload') {
+            return;
+        }
+        const s = this.session;
+        if (!s || !s.running) {
+            return;
+        }
+        this.framesInFlight++;
+        this.deps.log('[热重载] Input_pic 变了，重新加载并跑一帧。');
+        void s.reloadPic();
     }
 
     /**
@@ -493,6 +696,11 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
         s.onFrame((f) => this.onFrame(f));
         s.onVariables((v) => this.pushSnapshot(v));
         s.onExit(() => {
+            /* ★ 进程没了，在途命令永远不会再有帧回来。
+             *   不清零的话 framesInFlight 会一直 >0，热重载从此永远"等一等"——
+             *   表现为"开关开着但怎么改都不生效"，且没有任何报错。 */
+            this.framesInFlight = 0;
+            this.lastInputHash = undefined;
             this.sendStatus();
         });
         try {
@@ -504,6 +712,10 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
             return undefined;
         }
         this.session = s;
+        // 新进程：上一份会话的记账全部作废（指纹属于上一个进程读过的那张图）
+        this.framesInFlight = 0;
+        this.lastInputHash = undefined;
+        this.lastPicPath = undefined;
         this.sendStatus();
         return s;
     }
@@ -579,6 +791,38 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
     private onFrame(f: FramePacket): void {
         this.lastTiming = f.timing;
         this.lastFrameIndex = f.index;
+
+        /* ---- 热重载记账 ----
+         * ★ 顺序是有意义的：先更新"这一帧到底读到了什么"，再判有没有
+         *   待核对的变化。反过来会把本帧的指纹漏掉，判成"文件变了"，
+         *   于是每翻一页都多跑一帧。 */
+        this.lastPicPath = f.pic || this.lastPicPath;
+        this.lastInputHash = f.inHash;
+        this.framesInFlight = Math.max(0, this.framesInFlight - 1);
+        if (this.hotReload && !f.inHash && !this.warnedNoHash) {
+            this.warnedNoHash = true;
+            this.deps.log('[热重载] 本帧没有输入副本指纹：当前跑的程序不认识它。'
+                + '最常见的原因是升级插件之后【还没有重新编译】'
+                + '（旧程序里没有这段代码），其次是工程根写不了 Input_pic。');
+            /* ★ 这里必须【弹出来】，不能只写日志：
+             *   这一种失效是"开关亮着、改图没反应"，用户完全无从判断
+             *   是自己没保存、还是功能没生效。而它的修法只有一句话
+             *   （重新编译），正好可以做成一个按钮。
+             *   只弹一次（warnedNoHash），重开开关才会再提示 —— 不刷屏。 */
+            void vscode.window.showWarningMessage(
+                'SCUT-71：热重载暂时不起作用 —— 正在运行的程序没有报回输入图指纹。'
+                + '升级插件后要先重新编译一次，旧程序里没有这段代码。',
+                '重新编译',
+            ).then((pick) => {
+                if (pick === '重新编译') {
+                    void vscode.commands.executeCommand('scut71.build');
+                }
+            });
+        }
+        if (this.hotPending && this.framesInFlight === 0) {
+            // 那次变化发生在"命令在途"时，当时判不了；现在那一帧落地了，重判。
+            this.reconcileHot();
+        }
 
         this.saveOutputPictures(f);
 
@@ -734,6 +978,10 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
                     void this.prevPic();
                 } else if (cmd === 'nextPic') {
                     void this.nextPic();
+                } else if (cmd === 'hotReload') {
+                    /* 热重载开关。★ 只改【开关】，真正干活的监听器与判据
+                     * 全在宿主侧 —— webview 是沙箱页面，它连文件都读不到。 */
+                    this.setHotReload(msg.on === true);
                 } else if (cmd === 'gotoPic') {
                     /* 跳到指定编号。走扩展主命令 —— 这样 webview 按钮、
                      * 视图标题栏图标、命令面板三条路共用同一份实现
@@ -778,6 +1026,10 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
                 running,
                 exePath: this.lastExePath ?? null,
                 project: info ?? null,
+                /* ★ 热重载开关随状态一起推：webview 会重建（切走再切回），
+                 *   它自己记不住这个模式，而按钮必须显示真实状态 ——
+                 *   否则会出现"按钮是灰的、其实热重载开着"这种自相矛盾的画面。 */
+                hotReload: this.hotReload,
             });
         }
     }
@@ -976,6 +1228,21 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
       <button id="btn-prev" class="primary" title="上一张图 (←)">◀ 上一张</button>
       <button id="btn-next" class="primary" title="下一张图 (→)">下一张 ▶</button>
       <button id="btn-goto" title="跳到指定编号的图（图集很大时比一张张点快）">跳到…</button>
+      <!--
+        ★★ 热重载：一个开关，决定「换图」由谁触发 ★★
+        用户原话："通过一个按钮选择由『检测到文件替换』来触发加载，
+        还是关闭热重载的时候，只能由按钮触发。"
+
+        为什么用 ghost 样式：它服务于「外接图片编辑器」这种专门工作流，
+        不开的人从来不会点它 —— 不该和「上一张 / 下一张」抢注意力。
+        打开之后按钮会高亮（.on）："现在是哪个模式"必须一眼可见，
+        否则用户改完图会以为"环境怎么不动"。
+
+        为什么放在翻页那一组：它改变的是【输入图从哪来】，
+        与「上一张 / 下一张 / 跳到…」是同一件事的另一种触发方式。
+      -->
+      <button id="btn-hot" class="ghost"
+              title="热重载：关＝只有按钮会换图；开＝工程根下的 Input_pic 被外部改写时，自动重新加载并跑一帧">热重载</button>
       <span class="toolbar-sep"></span>
       <button id="btn-bench" title="测速：同一张图重复 N 次取平均 cycles (F9)">测速</button>
       <button id="btn-stop" class="danger" title="停止仿真进程 (Shift+F5)">■ 停止</button>

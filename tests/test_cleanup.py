@@ -765,6 +765,25 @@ ok('清理 / 重新编译是 ghost 样式（低频操作，不抢注意力）',
    re.search(r'id="btn-rebuild"\s+class="ghost"', sv_html) is not None
    and re.search(r'id="btn-clean"\s+class="ghost"', sv_html) is not None)
 
+# ---- 热重载开关（0.15.0）----
+# ★ 它和清理/重建不同：那两个是"动作"，这个是"模式"。
+#   所以除了"有没有接线"，还要守住下面这条——
+#   按钮的【高亮由宿主回推的状态决定】。页面自己记状态的话，
+#   切走再切回、或宿主重启后，按钮会显示一个与真实监听状态无关的样子，
+#   而用户完全无从判断"我改了图为什么不动"。
+ok('工具栏有 btn-hot 按钮', 'id="btn-hot"' in sv_html)
+ok('热重载是 ghost 样式（低频模式开关，不抢注意力）',
+   re.search(r'id="btn-hot"\s+class="ghost"', sv_html) is not None)
+ok('simview.ts 接收 cmd=hotReload 并调用 setHotReload',
+   re.search(r"cmd === 'hotReload'\)\s*\{[^}]*setHotReload\(", sv_html) is not None)
+ok('simview.js 把热重载按钮接线到弹消息',
+   "cmd: 'hotReload'" in sv_js)
+ok('status 消息带 hotReload（按钮状态由宿主回推，页面不自己记）',
+   re.search(r"type: 'status',[\s\S]{0,400}hotReload: this\.hotReload", sv_html) is not None)
+ok('host 侧持久化热重载开关（getHotReload / setHotReload 都在 deps 里）',
+   'getHotReload' in ext_ts and 'setHotReload' in ext_ts
+   and 'HOT_RELOAD_KEY' in ext_ts)
+
 # ★ 反向：不许给它们绑快捷键。它们是"出事时才用"的按钮，
 #   给一个键位等于让用户可能在手忙脚乱时误触发全量重编。
 ok('清理 / 重新编译没有绑 VS Code 键位',

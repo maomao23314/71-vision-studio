@@ -149,6 +149,7 @@
     logCount: document.getElementById('log-count'),
     picInfo: document.getElementById('pic-info'),
     status: document.getElementById('status'),
+    hot: document.getElementById('btn-hot'),
     varsList: document.getElementById('vars-list'),
     varsCount: document.getElementById('vars-count'),
     varsHint: document.getElementById('vars-hint'),
@@ -1134,6 +1135,16 @@
   //   这里补上唯一缺的入口。走扩展主命令，让按钮/标题栏/命令面板
   //   共用同一份实现（含输入框与校验）。
   bind('btn-goto', function () { vscode.postMessage({ type: 'cmd', cmd: 'gotoPic' }); });
+  /* ---- 热重载开关 ----
+   * ★ 页面【不】自己记这个状态：点一下只发"切换"意图，
+   *   按钮的高亮由宿主回推的 status.hotReload 决定。
+   *   两份真相（页面一份、宿主一份）迟早会分叉 ——
+   *   典型症状是"按钮亮着，其实没在监听"，而用户完全无从判断。
+   *   浏览器没有文件系统访问权，这个开关本来也只能由宿主实现。 */
+  bind('btn-hot', function () {
+    var on = !(el.hot && el.hot.classList.contains('on'));
+    vscode.postMessage({ type: 'cmd', cmd: 'hotReload', on: on });
+  });
   // 测速：同一张图重复 N 次取平均（旧环境 R 键的做法）
   bind('btn-bench', function () { vscode.postMessage({ type: 'cmd', cmd: 'bench' }); });
   // 清理 / 重新编译：增量构建失效时的逃生口（改了代码却没生效时用）。
@@ -1474,6 +1485,16 @@
            *   msg.project 为 null 表示没识别到工程。 */
           renderGuide(msg.project || null, msg.running === true);
           updatePlaceholder(msg.project || null);
+          /* ★ 热重载开关的真实状态（宿主是唯一真相，这里只负责显示）。
+           *   .on 只影响外观，语义在宿主侧 —— 页面不参与判断。 */
+          if (el.hot) {
+            var hotOn = msg.hotReload === true;
+            el.hot.classList.toggle('on', hotOn);
+            el.hot.setAttribute('aria-pressed', hotOn ? 'true' : 'false');
+            el.hot.title = hotOn
+              ? '热重载已打开：工程根下的 Input_pic 被外部改写时会自动重新加载（点一下关闭）'
+              : '热重载：关＝只有按钮会换图；开＝工程根下的 Input_pic 被外部改写时，自动重新加载并跑一帧';
+          }
         } catch (e) {
           log('[视图] 状态更新失败：' + (e && e.message ? e.message : e));
         }

@@ -220,6 +220,14 @@ export interface FramePacket {
     pic?: string;
     /** 本帧图像加载失败的原因（成功时为空串）。 */
     loadError?: string;
+    /**
+     * 本帧解码的那份 Input_pic 副本的内容指纹（FNV-1a 64，16 位十六进制）。
+     *
+     * ★ 没有这个字段 = 本帧【不是】从副本解码的（工程根写不了，回落到读图集原图）。
+     *   热重载靠它区分"副本变了是我自己翻页写的"还是"用户用编辑器改了它"，
+     *   判据与理由见 hotreload.ts（那里是唯一的实现，这里只负责搬运）。
+     */
+    inHash?: string;
 }
 
 export interface TimingInfo {
@@ -289,6 +297,15 @@ export interface SimSession {
      *   跳图与翻页共用同一条 stdin 通道，所以不重启进程、状态保留。
      */
     gotoPic(n: number): Promise<void>;
+    /**
+     * 重载【当前这张图】（协议 r）：不换图、不推进，只是让仿真进程
+     * 重新解码工程根下的 Input_pic 副本，然后照常跑下一帧。
+     *
+     * ★ 热重载的落地动作就是它：用户用外部图片编辑器保存了副本，
+     *   宿主发现文件变了 → 发 'r' → 画面与算法结果跟着改的那张图走。
+     *   进程不重启，算法状态保留（与翻页同一套语义）。
+     */
+    reloadPic(): Promise<void>;
     /* ★ 这里原先有 setSelectedVariables(names: string[])。
      *   它在实现侧是空函数，且没有任何真实用途 —— 勾选变化走的是
      *   宿主侧的显示过滤（simview.selectVariables），完全不碰仿真进程。

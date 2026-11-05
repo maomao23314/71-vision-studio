@@ -37,7 +37,6 @@
 
 const path = require('path');
 const fs = require('fs');
-const zlib = require('zlib');
 
 const ROOT = path.dirname(__dirname);
 const { SimSessionImpl } = require(path.join(ROOT, 'extension', 'out', 'simsession.js'));
@@ -106,97 +105,10 @@ async function frameAfter(s, cmd) {
 }
 
 /* ---------------------------------------------------------------- 编码器 */
-
-/** CRC32（PNG 每个 chunk 都要）。 */
-const CRC_TABLE = (() => {
-    const t = new Int32Array(256);
-    for (let n = 0; n < 256; n++) {
-        let c = n;
-        for (let k = 0; k < 8; k++) {
-            c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-        }
-        t[n] = c;
-    }
-    return t;
-})();
-
-function crc32(buf) {
-    let c = 0xffffffff;
-    for (let i = 0; i < buf.length; i++) {
-        c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
-    }
-    return (c ^ 0xffffffff) >>> 0;
-}
-
-/** 8 位真彩 PNG（非交织，filter=0）。 */
-function encodeWhitePng(w, h, value) {
-    const ihdr = Buffer.alloc(13);
-    ihdr.writeUInt32BE(w, 0);
-    ihdr.writeUInt32BE(h, 4);
-    ihdr[8] = 8;    /* bit depth */
-    ihdr[9] = 2;    /* color type 2 = truecolor RGB */
-    ihdr[10] = 0;   /* compression */
-    ihdr[11] = 0;   /* filter */
-    ihdr[12] = 0;   /* interlace = none */
-
-    const stride = w * 3;
-    const raw = Buffer.alloc((stride + 1) * h);
-    for (let y = 0; y < h; y++) {
-        const base = y * (stride + 1);
-        raw[base] = 0;  /* filter type 0 (None) */
-        raw.fill(value, base + 1, base + 1 + stride);
-    }
-
-    const chunk = (type, data) => {
-        const head = Buffer.alloc(8);
-        head.writeUInt32BE(data.length, 0);
-        head.write(type, 4, 'ascii');
-        const crcBuf = Buffer.alloc(4);
-        crcBuf.writeUInt32BE(crc32(Buffer.concat([head.subarray(4), data])), 0);
-        return Buffer.concat([head, data, crcBuf]);
-    };
-
-    return Buffer.concat([
-        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-        chunk('IHDR', ihdr),
-        chunk('IDAT', zlib.deflateSync(raw, { level: 3 })),
-        chunk('IEND', Buffer.alloc(0)),
-    ]);
-}
-
-/** 24 位 BMP（行序自下而上，每行补齐到 4 字节）。 */
-function encodeWhiteBmp(w, h, value) {
-    const rowBytes = w * 3;
-    const pad = (4 - (rowBytes % 4)) % 4;
-    const stride = rowBytes + pad;
-    const out = Buffer.alloc(54 + stride * h);
-    out.write('BM', 0, 'ascii');
-    out.writeUInt32LE(out.length, 2);
-    out.writeUInt32LE(54, 10);
-    out.writeUInt32LE(40, 14);
-    out.writeInt32LE(w, 18);
-    out.writeInt32LE(h, 22);
-    out.writeUInt16LE(1, 26);
-    out.writeUInt16LE(24, 28);
-    out.writeUInt32LE(0, 30);
-    out.writeUInt32LE(stride * h, 34);
-    for (let y = 0; y < h; y++) {
-        out.fill(value, 54 + y * stride, 54 + y * stride + rowBytes);
-    }
-    return out;
-}
-
-/** 按副本后缀生成同格式的纯白图。 */
-function whiteImageLike(file, w, h, value) {
-    const ext = path.extname(file).toLowerCase();
-    if (ext === '.png') {
-        return encodeWhitePng(w, h, value);
-    }
-    if (ext === '.bmp') {
-        return encodeWhiteBmp(w, h, value);
-    }
-    return undefined;
-}
+/* ★ 造替身图的那几个函数已经搬到 tests/whiteimage.js —— 热重载的端到端测试
+ *   要用同一套编码器。测试自己复制一份，就会出现"两份实现坏了一份"的
+ *   情况，而那种坏法是【假绿】，比失败更糟。 */
+const { whiteImageLike } = require('./whiteimage');
 
 (async () => {
     const s = new SimSessionImpl({
