@@ -17,7 +17,7 @@
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
-import { SimSessionImpl } from './simsession';
+import { SimSessionImpl, describeExitCode, isAbnormalExit } from './simsession';
 import { getSimLogChannel } from './extension';
 import type { FramePacket, VariableManifest, VariableSnapshot, WatchedVariable } from './types';
 import { configPath, defaultConfig, readConfig } from './projectconfig';
@@ -150,6 +150,15 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
     private lastPicPath: string | undefined;
     /** "后端没报指纹"只提示一次：工程根写不了时每帧都会缺这个字段 */
     private warnedNoHash = false;
+    /**
+     * "进程异常终止"只提示一次。
+     *
+     * ★ 为什么按会话而不是按事件去重：连续翻页时每一张图都可能把进程打死
+     *   （实测 63 张里有 22 张会），每张弹一次等于把 IDE 炸掉。
+     *   ★ 为什么重新起会话时清掉它：用户改了代码、重新编译、再跑，
+     *     如果还是崩，那就是新问题，应该再说一次。
+     */
+    private crashNotified = false;
 
     constructor(extensionUri: vscode.Uri, deps: SimViewDeps) {
         this.extensionUri = extensionUri;
@@ -695,13 +704,49 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
         s.onLog((line) => this.pushLog(line));
         s.onFrame((f) => this.onFrame(f));
         s.onVariables((v) => this.pushSnapshot(v));
-        s.onExit(() => {
+        s.onExit((code) => {
             /* ★ 进程没了，在途命令永远不会再有帧回来。
              *   不清零的话 framesInFlight 会一直 >0，热重载从此永远"等一等"——
              *   表现为"开关开着但怎么改都不生效"，且没有任何报错。 */
             this.framesInFlight = 0;
             this.lastInputHash = undefined;
             this.sendStatus();
+            /* ★★ 进程【异常终止】必须主动说出来（2026-11-05 真实工程测出来的缺口）★★
+             *
+             *   用户算法的数组越界会把仿真进程打成访问冲突。原来的行为是：
+             *   只在「SCUT-71 构建输出」通道里写一行
+             *   「进程已退出（退出码 3221225477）」，界面上什么都不发生 ——
+             *   画面就停在那儿，按钮还能点，但按了没反应。
+             *   用户既不知道发生了什么，也不知道该改哪里，
+             *   而且 3221225477 这个数字搜都搜不到。
+             *
+             *   所以：异常退出时弹一条通知，用 describeExitCode 翻成人话。
+             *   按一次会话只弹一次（crashNotified），
+             *   不做去重会让连续翻页刷屏。 */
+            if (this.crashNotified) {
+                return;
+            }
+            if (!isAbnormalExit(code)) {
+                return;
+            }
+            this.crashNotified = true;
+            const why = describeExitCode(code);
+            this.deps.log(`[视图] 仿真进程异常终止：${why}`);
+            /* ★ 同时送进侧边栏的「运行日志」（走 pushLog 的 [LOG] 前缀约定）：
+             *   构建输出通道是底部那一条，用户平时不看它；
+             *   而崩溃的时候他正盯着侧边栏的画面，日志就该出现在那里。
+             *   只写 deps.log 等于"记录在没人看的地方"。 */
+            this.pushLog(`[LOG] 仿真进程异常终止 —— ${why}`);
+            /* ★ 弹窗正文【只】由 describeExitCode 决定，这里不再追加
+             *   "这通常是数组越界"之类的猜测。
+             *   原因：那张表里每个码都已经带了对应的修法
+             *   （除零就是除零、栈溢出就是递归 / 大局部数组）。
+             *   在外面再补一句通用猜测，遇到 0xC0000094 就会变成
+             *   「整数除零 —— 除数算成了 0」紧跟一句「这通常是数组越界」，
+             *   用户同时收到两个互相排斥的诊断，比只给一个还糟。 */
+            void vscode.window.showErrorMessage(
+                `SCUT-71：仿真进程异常终止 —— ${why}`,
+            );
         });
         try {
             await s.start();
@@ -716,6 +761,10 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
         this.framesInFlight = 0;
         this.lastInputHash = undefined;
         this.lastPicPath = undefined;
+        /* ★ 新的进程 = 新的崩溃额度。
+         *   用户改了代码重新编译之后再跑，如果还是崩，那是新问题，
+         *   必须再提示一次 —— 否则"我明明改了啊"会变成无从解释的死结。 */
+        this.crashNotified = false;
         this.sendStatus();
         return s;
     }

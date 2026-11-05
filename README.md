@@ -365,7 +365,7 @@ void camera_draw(void)
 
 ```
 SCUT-71: 环境自检          # 命令面板里执行，逐项报告工具链/工程结构/核心库
-python tests/run_all_tests.py   # 跑一遍回归（18 个套件）
+python tests/run_all_tests.py   # 跑一遍回归（23 个套件）
 ```
 
 ---
@@ -511,7 +511,7 @@ scut_project.json
 ## 测试
 
 ```
-python tests/run_all_tests.py                        # 18 个套件
+python tests/run_all_tests.py                        # 23 个套件
 python tests/run_all_tests.py --toolchain <根目录>    # 工具链不在默认位置时
 ```
 
@@ -546,6 +546,7 @@ python tests/run_all_tests.py --toolchain <根目录>    # 工具链不在默认
 | session | `run_frames.js` | 单步/测速/翻页的 **ACK 背压链路**：一步只走一帧（背压多放行一次就会多出帧来） |
 | hotreload | `test_hotreload.js` | 热重载判据：指纹两边一致 + **翻页不许被自己的写入触发第二次加载**（数帧数）+ 时序模拟 |
 | hotreload-e2e | `hot_reload_e2e.js` | 真进程：协议 `r` 重读的是**改写后的副本**（不是重新复制），且 `inHash` 与磁盘一致 |
+| crash | `crash_probe.py` | **用户算法把进程打死之后**：真退出码（0xC0000005 等）→ 用人话解释 → 弹提示 → 能恢复。用 `fixtures/crash_camera.c` 的真实形态越界触发，自己建工程，不依赖仓库外任何东西 |
 | manual-vars | `manual_vars.js` | 主动暴露变量：源码扫描 → 分组 → 恒显示 |
 | dap | `dap_smoke.js` | 真实 lldb-dap DAP 会话（缺 lldb-dap 时**明确跳过**，不判失败） |
 | webview | `webview_render.js` | 真实 Chromium 渲染真实帧数据并截图 |

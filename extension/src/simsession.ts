@@ -22,6 +22,94 @@ import type { FramePacket, SimSession, TimingInfo, VariableSnapshot } from './ty
 import { defaultConfig, readConfig } from './projectconfig';
 import { picArgsFromConfig, picArgsToArgv } from './simargs';
 
+/**
+ * 把进程退出码翻译成人话。
+ *
+ * ★ 为什么必须有这一层（真实缺陷，2026-11-05 用真实工程测出来的）：
+ *   用户算法的数组越界会把进程打成访问冲突，Node 报上来的退出码是
+ *   3221225477 —— 一个用户完全无法理解、也无法搜索的数字。
+ *   原来的日志写的是「进程已退出（退出码 3221225477）」，
+ *   用户看到的是"程序没了，但不知道为什么"，只能来问人。
+ *
+ *   而这些码其实都有确定含义（Windows NTSTATUS）。翻译一次，
+ *   用户得到的就从"一个数字"变成"你的数组越界了"。
+ *
+ * ★ 为什么放在 simsession 而不是 simview：
+ *   退出码是【会话层】的事实（它就来自 child.on('close')），
+ *   而"要不要弹窗"是呈现层的决定。把翻译放在事实源头，
+ *   调试入口、日志、弹窗三条路都能用同一份解释，
+ *   不会出现"日志说访问冲突、弹窗说退出码 3221225477"。
+ */
+export function describeExitCode(code: number | null): string {
+    if (code === null || code === undefined) {
+        return '进程被强制结束（未拿到退出码）';
+    }
+    if (code === 0) {
+        return '正常结束';
+    }
+    /* Windows 的 NTSTATUS 是 32 位无符号值，而这里要按【无符号】去对照
+     * 0xC0000005 这类常量。`>>> 0` 的目的是让两种来源都归一：
+     *   实测 Node 20/24 在 Windows 上直接给正数 3221225477；
+     *   但早期 Electron / 某些 libuv 版本会按有符号 int32 给 -1073741819。
+     *   两种都给得出来，所以先归一，而不是假定其中一种。
+     * （★ 这里曾经写死成"Node 传上来是负数"，那是没实测的推测，
+     *    照着它写断言会写反。） */
+    const u = code >>> 0;
+    /* ★ 一条码一行，且每行都带【怎么修】而不只是"是什么"。
+     *   弹窗和日志共用这张表：用户在日志里看到的那句话，
+     *   和他待会儿看到弹窗里的那句，必然是同一句 ——
+     *   分成两份就要有人记得同时改两处，而漏改的那次不会报错。 */
+    const known: Record<number, string> = {
+        0xc0000005: '访问冲突 —— 算法读写越界或用了空指针。'
+            + '检查定长数组（路径点、线点这类）是不是写着写着就超了上限。',
+        0xc00000fd: '栈溢出 —— 递归没有出口，或局部数组开得太大。'
+            + '检查递归的终止条件，或把大数组改成全局/静态。',
+        0xc0000094: '整数除零 —— 除数算成了 0。'
+            + '常见于"除以一个为 0 的计数"（例如图像全黑时没有任何点被检出），'
+            + '在除法前先判一下分母为不为 0。',
+        0xc0000409: '栈缓冲区溢出 —— 往定长数组里写超了。'
+            + '检查 strcpy/memcpy 的长度和数组声明的大小是否一致。',
+        0xc000001d: '非法指令（程序文件可能损坏）。点「编译」重新编译一次。',
+        0xc000013a: '被 Ctrl+C 或关闭窗口中断',
+    };
+    if (known[u]) {
+        return known[u];
+    }
+    if (u >= 0xc0000000) {
+        return `程序异常终止（0x${u.toString(16).toUpperCase()}）。`
+            + '点「编译」重新运行一次；如果反复出现，看「SCUT-71 构建」通道的日志。';
+    }
+    /* 小整数退出码（1/2/3）来自仿真程序自己：参数不合法、帧尺寸非法等
+     * 启动期问题，不是崩溃。措辞上要和上面那些"异常终止"分开，
+     * 否则用户会去翻自己的算法，而问题其实在参数上。 */
+    return `仿真程序主动退出（退出码 ${code}）——`
+        + '多半是启动参数或工程配置不合法，看「SCUT-71 构建」通道的日志。';
+}
+
+/**
+ * 这个退出码算不算"异常终止"（需要主动弹提示）。
+ *
+ * ★ 判据不是"退出码非 0"，而是"这件事用户没有在做、也不是他自己要的"：
+ *   0xC000013A 是 Ctrl+C / 关窗口 —— 表里明写着那是中断，
+ *   若还按异常处理，用户会看到「异常终止 —— 被中断」外加一段
+ *   "这通常是数组越界"，等于把用户自己按的键报成他的算法崩了。
+ */
+export function isAbnormalExit(code: number | null): boolean {
+    /* 拿不到退出码 = 我们自己 kill 掉的（stop() 的强制结束分支）。
+     * 那不是用户的算法出了问题，不该弹提示。 */
+    if (code === null || code === undefined) {
+        return false;
+    }
+    if (code === 0) {
+        return false;
+    }
+    /* 用户主动中断：不是缺陷，不弹。 */
+    if ((code >>> 0) === 0xc000013a) {
+        return false;
+    }
+    return true;
+}
+
 export interface SimSessionOptions {
     exePath: string;
     /** 工具链 bin 目录（会前置进子进程 PATH） */
@@ -144,8 +232,14 @@ export class SimSessionImpl implements SimSession {
      *   拿到的是【上一帧】的数字 —— 不报错，只是数字是错的。
      *   这里给一条"等一帧"的正规通道，免得调用方用 setTimeout 猜时间
      *   （猜时间等于把机器快慢变成正确性问题）。
+     *
+     * ★ 参数是 `FramePacket | undefined` 而不是 `FramePacket`：
+     *   进程可能在等待期间【死掉】（用户算法越界），那时永远不会有帧。
+     *   只按帧唤醒的话，等待者只能靠自己的超时脱身 —— 实测 8 秒。
+     *   用 undefined 表示"别等了，这一帧不会来了"，
+     *   进程退出时主动唤醒（见 close 处理），用户不必等超时。
      */
-    private frameWaiters: Array<(f: FramePacket) => void> = [];
+    private frameWaiters: Array<(f: FramePacket | undefined) => void> = [];
 
     private stopping = false;
     /** 上一次记日志时的可见性（只用于日志去重，不参与任何控制流）。 */
@@ -335,7 +429,14 @@ export class SimSessionImpl implements SimSession {
             for (const w of this.ackWaiters.splice(0)) {
                 w();
             }
-            this.emitLog(`[会话] 进程已退出（退出码 ${code ?? 'null'}）`);
+            this.emitLog(`[会话] ${describeExitCode(code)}`);
+            /* ★ 进程没了 → 在等的帧永远不会来，立刻唤醒等待者。
+             *   不唤醒的话，测速那条路会【白等满 8 秒超时】——
+             *   而进程其实早就退出了，用户看着界面卡住 8 秒毫无线索。
+             *   （实测：崩溃后 bench 等 8010 ms 才返回 undefined。） */
+            for (const w of this.frameWaiters.splice(0)) {
+                w(undefined);
+            }
             for (const cb of this.exitCbs) {
                 cb(code);
             }
@@ -749,6 +850,9 @@ if (!rgb) {
      * 顺序不能反：先写命令、再等帧 —— bench() 内部已经是这个顺序。
      * 超时返回 undefined（不抛异常）：这是诊断路径，拿不到数据显示
      * 一条中文说明即可，不该让整个命令失败。
+     *
+     * ★ 进程死掉时也会立刻返回 undefined（见 close 处理里唤醒等待者）：
+     *   崩溃之后这一帧永远不会来，靠超时脱身等于让用户白等 8 秒。
      */
     waitFrame(timeoutMs = 8000): Promise<FramePacket | undefined> {
         return new Promise<FramePacket | undefined>((resolve) => {
@@ -768,7 +872,7 @@ if (!rgb) {
                 }
                 finish(undefined);
             }, timeoutMs);
-            const waiter = (f: FramePacket): void => { finish(f); };
+            const waiter = (f: FramePacket | undefined): void => { finish(f); };
             this.frameWaiters.push(waiter);
         });
     }
