@@ -259,6 +259,31 @@ export class SimSessionImpl implements SimSession {
         return this.child !== undefined && !this.stopping;
     }
 
+    /**
+     * 子进程 pid（没有进程时 undefined）。
+     *
+     * ★★ 为什么要把 pid 暴露出去：调试【不再另起一个 exe】★★
+     *
+     *   旧做法是调试时用 lldb-dap 启动第二个 scut_sim.exe。后果有三个，
+     *   每一个都让用户以为"环境坏了"：
+     *     · 界面在跑进程 A，断点命中的是进程 B —— 两张图/两份算法状态；
+     *     · 进程 B 没人喂 stdin，只能一口气跑完就退出（一个断点接着下一个，
+     *       等于"自动翻图"，用户没法决定什么时候换图）；
+     *     · 进程 B 画的图没有任何地方显示（界面不认它）。
+     *
+     *   现在的做法：调试器【attach 到本会话这个进程】。于是断点命中的
+     *   就是界面上那张图、那份状态；帧什么时候前进由用户点「运行 / 下一张」
+     *   决定；画面照常回到界面里。
+     *
+     * ★ 为什么每次现取、不缓存：进程退出时 close 处理会把 this.child 置空，
+     *   所以"有没有可附着的进程"这件事随时可能变。缓存一个 pid 出来，
+     *   用户下次点调试就会去 attach 一个已经死掉的进程 ——
+     *   拿到的是适配器的一句英文错误，而不是"仿真进程已经退出了"。
+     */
+    get pid(): number | undefined {
+        return this.child ? this.child.pid : undefined;
+    }
+
     /* ---------------------------------------------------------------- 事件 */
 
     onFrame(cb: (f: FramePacket) => void): void {

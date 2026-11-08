@@ -466,6 +466,41 @@ export class SimViewProvider implements vscode.WebviewViewProvider {
     }
 
     /**
+     * 调试要 attach 的目标：确保会话在跑，回报它的 pid 与 exe 路径。
+     *
+     * ★★ 为什么调试要"附着"而不是"另起一个进程" ★★
+     *   用户要的是：断点命中的就是界面里正在看的那张图/那份算法状态，
+     *   而且【换不换图、什么时候跑下一帧由他决定】（上一张 / 下一张 / 运行）。
+     *   这两条只有在"调试器和界面对话同一个进程"时才成立 ——
+     *   另起一个 exe 的话，断点命中另一个进程、画面也没人显示。
+     *
+     * ★ 为什么要复用 ensureSession 而不是自己 spawn：
+     *   会话的启动参数（--json/--step/--frames 0/--out/--pic…）、
+     *   帧目录选择、事件接线只有一处（ensureSession）。调试再写一份，
+     *   就会出现"运行和调试看到的不是同一组图"那类历史缺陷。
+     *   顺带：会话已经在跑时它直接返回现有进程，【状态不丢】。
+     *
+     * ★ 为什么要返回 exePath：lldb-dap 的 attach 用 pid 定位进程，
+     *   但给了 program 才能稳定地把源码/符号对应上（断点靠它）。
+     *
+     * ★ 失败时返回 undefined（ensureSession 已经弹过原因），
+     *   调用方据此不要启动调试会话 —— 否则用户会看到一个"链接着什么"的
+     *   调试界面，实际什么都没连上。
+     */
+    public async debugTarget(): Promise<{ pid: number; program: string } | undefined> {
+        const s = await this.ensureSession();
+        if (!s) {
+            return undefined;
+        }
+        const pid = s.pid;
+        if (pid === undefined) {
+            this.deps.log('[调试] 会话进程没有 pid（可能刚退出），无法附着。');
+            return undefined;
+        }
+        return { pid, program: s.exePath };
+    }
+
+    /**
      * 让面板重新问一遍"现在是什么状态"。
      *
      * ★ 什么时候需要：用户中途打开了另一个文件夹 / 新建完工程切过去，

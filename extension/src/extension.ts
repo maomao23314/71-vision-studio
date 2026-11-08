@@ -262,11 +262,37 @@ export function activate(context: vscode.ExtensionContext): void {
     // ★ 只为 scut71 这个【我们自己的】类型注册（DEBUG_TYPE 常量就是 'scut71'）。
     //   给 cppdbg / lldb 之类别人的类型注册工厂会劫走别人的调试会话 ——
     //   这是很常见的越界 bug，所以这里刻意只用常量、不写字面量。
-    const debugProvider = new ScutDebugConfigurationProvider(projectOf);
+    //
+    // ★ 调试的目标是"仿真视图正在对话的那个进程"（simView.debugTarget）：
+    //   会话没跑就顺手起一个，在跑就复用它。这样断点命中的图、算法状态
+    //   与界面看到的完全是同一份，也才能在"用户点下一张"之后才前进。
+    const debugProvider = new ScutDebugConfigurationProvider(() => simView.debugTarget());
     const debugFactory = new ScutDebugAdapterDescriptorFactory();
     context.subscriptions.push(
         vscode.debug.registerDebugConfigurationProvider(DEBUG_TYPE, debugProvider),
         vscode.debug.registerDebugAdapterDescriptorFactory(DEBUG_TYPE, debugFactory),
+        /* ★ 附着成功 / 结束都要说一声。
+         *
+         *   附着和"启动调试"在观感上不一样：按下去之后程序【不会停】，
+         *   它只是继续等在 stdin 上。用户看到界面上什么也没变，
+         *   很容易以为"调试没反应"，然后再按一次。
+         *   所以这里明确写一句：已经挂上了，接下来要你点「下一张」才走。 */
+        vscode.debug.onDidStartDebugSession((s) => {
+            if (s.type !== DEBUG_TYPE) {
+                return;
+            }
+            const pid = s.configuration && s.configuration.pid;
+            log(`[调试] 已附着到仿真进程${pid ? '（pid ' + String(pid) + '）' : ''}。`
+                + '接下来在仿真视图里点「运行 / 上一张 / 下一张」，断点才会命中。');
+        }),
+        vscode.debug.onDidTerminateDebugSession((s) => {
+            if (s.type !== DEBUG_TYPE) {
+                return;
+            }
+            // ★ 调试结束【不等于】仿真结束：attach 的断开是 detach，
+            //   进程和画面都还在。这句话就是防止用户以为"停止调试 = 停了仿真"。
+            log('[调试] 调试会话已结束（仿真进程继续运行，画面照常）。');
+        }),
     );
 
     // ---- 命令 ----
@@ -290,7 +316,7 @@ export function activate(context: vscode.ExtensionContext): void {
         //   F5 在没有 launch.json 时要靠 VS Code 自己挑调试器，
         //   旁边还装着 cpptools（也认 C 文件），用户很容易走错 ——
         //   这里给一个"点了就调"的按钮，入口唯一且明确。
-        vscode.commands.registerCommand('scut71.debug', () => commandDebug(simView, log)),
+        vscode.commands.registerCommand('scut71.debug', () => commandDebug(log)),
         vscode.commands.registerCommand('scut71.stop', () => commandStop(simView, log)),
         vscode.commands.registerCommand('scut71.prevPic', () => simView.prevPic()),
         vscode.commands.registerCommand('scut71.nextPic', () => simView.nextPic()),
@@ -835,7 +861,7 @@ async function commandOpenSimView(): Promise<void> {
 
 
 /**
- * 「调试」：显式启动一个 scut71 调试会话。
+ * 「调试」：把调试器附着到仿真视图那个进程。
  *
  * ★ 为什么要有这个命令（用户原话："最最重要的调试功能打不开"）：
  *   之前唯一的入口是 F5，而 F5 在没有 launch.json 时要由 VS Code
@@ -844,22 +870,37 @@ async function commandOpenSimView(): Promise<void> {
  *   （更糟的是旧版还把 F5 绑给了「运行 N 帧」，在仿真视图里按 F5 直接是运行。）
  *   现在：F5 恢复成 VS Code 标准的"开始调试"含义，
  *   另外给一个图标按钮，走我们自己的类型 scut71 —— 入口唯一、不歧义。
+ *
+ * ★★ 为什么【不再】先 simView.stop()（2026-11 返工）★★
+ *   老版本每次调试都先杀掉会话、再另起一个 exe。后果：断点命中的进程
+ *   和界面看到的进程不是同一个，换不换图也不由用户决定（详见 debug.ts 文件头）。
+ *   现在调试 = 附着到【正在跑的这个会话】：
+ *     · 会话没在跑时由 resolveDebugConfiguration 顺手起一个（debugTarget）；
+ *     · 会话在跑时就复用它，画面、算法状态、当前是哪张图全都保留。
  */
-async function commandDebug(simView: SimViewProvider, log: (line: string) => void): Promise<void> {
-    // 先停掉正在跑的仿真进程：同一份 exe 同时被"运行"和"调试"两份进程用，
-    // 用户看到的画面与断点命中的不是同一个进程，没有任何线索能看出来。
-    await simView.stop();
+async function commandDebug(log: (line: string) => void): Promise<void> {
+    // ★ 已经附着过就别再开一个：两个调试会话盯着同一个 pid，
+    //   断点会命中两次、继续一次只走一半，表现得像"卡住"。
+    //   （关闭调试后 activeDebugSession 会变回 undefined，所以这条不会挡住正常重开。）
+    const active = vscode.debug.activeDebugSession;
+    if (active && active.type === DEBUG_TYPE) {
+        log('[调试] 已经有一个调试会话在运行了。');
+        await vscode.window.showInformationMessage(
+            'SCUT-71：调试会话已经在运行。要重新开始，先按 Shift+F5 停止调试。',
+        );
+        return;
+    }
 
     const folder = vscode.workspace.workspaceFolders?.[0];
     const config: vscode.DebugConfiguration = {
         type: DEBUG_TYPE,
-        request: 'launch',
+        request: 'attach',
         name: 'SCUT-71 仿真调试',
     };
-    log('[调试] 正在启动调试会话…');
+    log('[调试] 正在附着到仿真进程…（附着之后，只有点「运行 / 上一张 / 下一张」'
+        + '才会继续跑帧，断点会在那之后命中）');
     // startDebugging 会走 registerDebugConfigurationProvider 注册的
-    // resolveDebugConfiguration —— 也就是补齐 program / args / cwd / PATH
-    // 的那段逻辑，与 F5 完全同一条路径，不重复实现。
+    // resolveDebugConfiguration —— 与 F5 完全同一条路径，不重复实现。
     const ok = await vscode.debug.startDebugging(folder, config);
     if (!ok) {
         log('[调试] 调试会话未能启动。'

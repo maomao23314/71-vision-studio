@@ -2,7 +2,7 @@
   "name": "scut-71-vision-studio",
   "displayName": "SCUT-71 Vision Studio",
   "description": "智能车视觉仿真环境 —— 只写算法，其余交给环境",
-  "version": "0.16.0",
+  "version": "0.18.0",
   "publisher": "maomao23314",
   "license": "GPL-3.0",
   "repository": {
@@ -217,23 +217,32 @@
           "cpp"
         ],
         "configurationAttributes": {
+          "attach": {
+            "required": [],
+            "properties": {
+              "pid": {
+                "type": "number",
+                "description": "要附着的进程号。留空 = 附着到仿真视图正在对话的那个进程（没有就自动起一个）"
+              }
+            }
+          },
           "launch": {
             "required": [],
             "properties": {
               "program": {
                 "type": "string",
-                "description": "要调试的可执行文件（留空则自动使用 .scut/bin/scut_sim.exe）"
+                "description": "（已弃用）调试现在附着到仿真进程，不再另起一个 exe；保留此项只为老 launch.json 不报错"
               },
               "args": {
                 "type": "array",
                 "items": {
                   "type": "string"
                 },
-                "description": "传给仿真程序的命令行参数"
+                "description": "（已弃用）参数由 SimSession 统一决定；保留此项只为老 launch.json 不报错"
               },
               "cwd": {
                 "type": "string",
-                "description": "工作目录（留空则用工程根目录）"
+                "description": "（已弃用）保留此项只为老 launch.json 不报错"
               }
             }
           }
@@ -241,17 +250,17 @@
         "initialConfigurations": [
           {
             "type": "scut71",
-            "request": "launch",
+            "request": "attach",
             "name": "SCUT-71 仿真调试"
           }
         ],
         "configurationSnippets": [
           {
             "label": "SCUT-71: 调试仿真程序",
-            "description": "调试 .scut/bin/scut_sim.exe（路径自动补齐，不需要手写）",
+            "description": "附着到仿真视图正在跑的那个进程（pid 运行时自动补，不需要手写）",
             "body": {
               "type": "scut71",
-              "request": "launch",
+              "request": "attach",
               "name": "SCUT-71 仿真调试"
             }
           }

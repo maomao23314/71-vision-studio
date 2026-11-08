@@ -187,7 +187,8 @@ console.log('\n=== 7. 图集参数共享（simargs.ts）—— 防"调试与运�
     // ★ 这组断言守的是一条真实缺陷：debug.ts 曾经写死 args:['--frames','1']，
     //   完全不补 --pic/--ext/--frame，于是"运行"用配置的图集、
     //   "调试"用编译期默认值（或全黑图），而两个入口看起来是同一件事。
-    //   simargs.ts 是两边唯一的产出点，所以这里测它 = 同时测两条路径。
+    //   0.18.0 起调试改成 attach 到会话进程、不再自己拼参数，
+    //   所以现在只剩会话这一侧用它 —— 它仍然是那一侧唯一的产出点。
     const simargs = require(path.join(__dirname, '..', 'extension', 'out', 'simargs.js'));
 
     const mk = (over) => Object.assign({

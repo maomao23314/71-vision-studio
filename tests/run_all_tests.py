@@ -406,7 +406,8 @@ def main():
         run("dap", ["node", os.path.join(HERE, "dap_smoke.js"),
                     lldb_dap,
                     os.path.join(proj, ".scut", "bin", "scut_sim.exe"),
-                    user_c_src])
+                    user_c_src,
+                    os.path.join(proj, "pic", "1")])
     else:
         # lldb-dap 是可选件（随 LLVM-MinGW 发布）。缺了就【明确跳过】而不是
         # 把整轮判失败 —— 否则"没装 lldb-dap"会被误读成"调试功能坏了"。

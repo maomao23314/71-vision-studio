@@ -926,5 +926,5 @@ function normalizeManifest(raw: unknown): VariableManifest | undefined {
  *   已删除：全树零调用点。真正的 exe 路径有三处来源，各有各的理由：
  *     · 构建结果  → BuildResult.exePath（脚本报回来的真实路径）
  *     · 运行会话  → extension.ts 的 exePathOf()（用 detectProject 的 outDir）
- *     · 调试      → debug.ts 的 resolveProgram()（自己拼 .scut/bin/）
+ *     · 调试      → 不再自己找 exe：附着到运行会话那个进程（见 debug.ts 文件头）
  *   再多一个"不触发构建的 exe 路径"只会让人以为它们是同一个真值。 */

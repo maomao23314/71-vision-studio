@@ -34,7 +34,7 @@ import type { ProjectConfig } from './projectconfig';
  *   `--frames` / `--out` —— 后者是「会话」与「调试」各自的运行模式，
  *   不属于两边必须一致的东西：
  *     · 会话：`--json --step --frames 0 --out <临时目录>`（常驻、逐帧喂）
- *     · 调试：`--frames 1`（跑一帧就停，方便下断点）
+ *     · 调试：不传（调试是 attach 到正在跑的那个会话，见 debug.ts）
  *   把它们也塞进来会逼迫调用方"传一堆参数再来覆盖"，反而更难读。
  */
 export interface PicArgs {
